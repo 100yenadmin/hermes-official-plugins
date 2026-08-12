@@ -67,6 +67,8 @@ class FakeApi:
         self.typing: List[str] = []
         self.public_keys: Dict[str, List[Dict[str, Any]]] = {}
         self.events_pages: Dict[str, Dict[str, Any]] = {}
+        # Optional multi-page feed: {conv_id: {pagination_token_or_None: page}}
+        self.paged_events: Dict[str, Dict[Optional[str], Dict[str, Any]]] = {}
         self.conversations: List[str] = []
 
     async def get_my_user(self):
@@ -82,6 +84,10 @@ class FakeApi:
         }
 
     async def get_events(self, conversation_id, *, max_results=50, pagination_token=None):
+        if conversation_id in self.paged_events:
+            return self.paged_events[conversation_id].get(pagination_token, {"data": []})
+        if pagination_token is not None:
+            return {"data": []}
         return self.events_pages.get(conversation_id, {"data": []})
 
     async def send_message(self, conversation_id, body):
@@ -242,11 +248,10 @@ async def test_backlog_seeds_keys_without_replying(monkeypatch):
     }
     await adapter._poll_conversation("111-999")
 
-    # Backlog: batch-decrypted for keys, nothing dispatched, ids marked seen.
+    # Backlog: batch-decrypted for keys, nothing dispatched, cursor advanced.
     assert crypto.batch_calls == [["BBB", "AAA"]]  # newest-first reversed
     assert captured == []
-    assert "e1" in adapter._seen_event_ids and "e2" in adapter._seen_event_ids
-    assert "111-999" in adapter._backlog_loaded
+    assert adapter._cursors["111-999"] == "e1"  # newest wire event
 
 
 @pytest.mark.asyncio
@@ -254,7 +259,7 @@ async def test_new_message_dispatched_after_backlog(monkeypatch):
     adapter = _make_adapter(monkeypatch)
     api, crypto = _wire(adapter)
     captured = _capture(adapter, monkeypatch)
-    adapter._backlog_loaded.add("111-999")
+    adapter._cursors["111-999"] = "e1"
 
     crypto.decrypt_map["CCC"] = {
         "type": "Message",
@@ -273,10 +278,129 @@ async def test_new_message_dispatched_after_backlog(monkeypatch):
     assert ev.text == "hello agent"
     # Reply target uses the canonical id embedded in the signed event.
     assert ev.source.chat_id == "111:999"
+    assert adapter._cursors["111-999"] == "e3"
 
-    # Second poll with the same event id → dedup, no double dispatch.
+    # Second poll with the same event id → cursor stops it, no double dispatch.
     await adapter._poll_conversation("111-999")
     assert len(captured) == 1
+
+
+@pytest.mark.asyncio
+async def test_cursor_survives_restart_and_prune(monkeypatch):
+    """The persisted cursor — not the in-memory dedup set — is the duplicate
+    guard: a fresh adapter (restart) with a pruned/empty dedup set must not
+    re-reply to already-processed events, and must still process newer ones."""
+    adapter = _make_adapter(monkeypatch)
+    api, crypto = _wire(adapter)
+    captured = _capture(adapter, monkeypatch)
+    adapter._cursors["111-999"] = "0"
+
+    crypto.decrypt_map["CCC"] = {
+        "type": "Message",
+        "id": "5",
+        "sender_id": "111",
+        "conversation_id": "111:999",
+        "content": {"text": "first"},
+    }
+    api.events_pages["111-999"] = {
+        "data": [{"id": "5", "encoded_event": "CCC", "sender_id": "111"}]
+    }
+    await adapter._poll_conversation("111-999")
+    assert len(captured) == 1
+
+    # Simulate a restart: brand-new adapter, empty dedup set, cursor from disk.
+    adapter2 = _make_adapter(monkeypatch)
+    api2, crypto2 = _wire(adapter2)
+    captured2 = _capture(adapter2, monkeypatch)
+    assert adapter2._cursors.get("111-999") == "5"  # loaded from disk
+
+    # Old event 5 again + a newer event 7 that arrived while we were down.
+    crypto2.decrypt_map["CCC"] = crypto.decrypt_map["CCC"]
+    crypto2.decrypt_map["DDD"] = {
+        "type": "Message",
+        "id": "7",
+        "sender_id": "111",
+        "conversation_id": "111:999",
+        "content": {"text": "while you were down"},
+    }
+    api2.events_pages["111-999"] = {
+        "data": [
+            {"id": "7", "encoded_event": "DDD", "sender_id": "111"},
+            {"id": "5", "encoded_event": "CCC", "sender_id": "111"},
+        ]
+    }
+    await adapter2._poll_conversation("111-999")
+
+    # Only the new event dispatched — no re-reply to 5, no backlog swallow of 7.
+    assert [ev.text for ev in captured2] == ["while you were down"]
+    assert adapter2._cursors["111-999"] == "7"
+
+
+@pytest.mark.asyncio
+async def test_burst_larger_than_one_page_is_paginated(monkeypatch):
+    """A burst of more than max_results events between polls must not drop
+    the overflow — the poll pages back until it reaches the cursor."""
+    adapter = _make_adapter(monkeypatch)
+    api, crypto = _wire(adapter)
+    captured = _capture(adapter, monkeypatch)
+    adapter._cursors["111-999"] = "10"
+
+    for n in (11, 12, 13, 14):
+        crypto.decrypt_map[f"E{n}"] = {
+            "type": "Message",
+            "id": str(n),
+            "sender_id": "111",
+            "conversation_id": "111:999",
+            "content": {"text": f"msg {n}"},
+        }
+    # Newest-first across two pages: page1 = 14,13 (with next_token), page2 = 12,11,10.
+    api.paged_events["111-999"] = {
+        None: {
+            "data": [
+                {"id": "14", "encoded_event": "E14", "sender_id": "111"},
+                {"id": "13", "encoded_event": "E13", "sender_id": "111"},
+            ],
+            "meta": {"next_token": "p2"},
+        },
+        "p2": {
+            "data": [
+                {"id": "12", "encoded_event": "E12", "sender_id": "111"},
+                {"id": "11", "encoded_event": "E11", "sender_id": "111"},
+                {"id": "10", "encoded_event": "E10", "sender_id": "111"},
+            ],
+            "meta": {},
+        },
+    }
+    await adapter._poll_conversation("111-999")
+
+    # All four new events dispatched oldest-first; the pre-cursor event 10 skipped.
+    assert [ev.text for ev in captured] == ["msg 11", "msg 12", "msg 13", "msg 14"]
+    assert adapter._cursors["111-999"] == "14"
+
+
+@pytest.mark.asyncio
+async def test_message_edit_dispatched(monkeypatch):
+    """The feed sometimes returns an edited message ONLY as the edit event —
+    skipping edits would make the message invisible to the bot forever."""
+    adapter = _make_adapter(monkeypatch)
+    api, crypto = _wire(adapter)
+    captured = _capture(adapter, monkeypatch)
+    adapter._cursors["111-999"] = "e1"
+
+    crypto.decrypt_map["EDIT"] = {
+        "type": "MessageEdit",
+        "id": "e6",
+        "sender_id": "111",
+        "conversation_id": "111:999",
+        "content": {"text": "edited text"},
+    }
+    api.events_pages["111-999"] = {
+        "data": [{"id": "e6", "encoded_event": "EDIT", "sender_id": "111"}]
+    }
+    await adapter._poll_conversation("111-999")
+
+    assert len(captured) == 1
+    assert captured[0].text == "edited text"
 
 
 @pytest.mark.asyncio
@@ -284,7 +408,7 @@ async def test_own_messages_filtered(monkeypatch):
     adapter = _make_adapter(monkeypatch)
     api, crypto = _wire(adapter)
     captured = _capture(adapter, monkeypatch)
-    adapter._backlog_loaded.add("111-999")
+    adapter._cursors["111-999"] = "e1"
 
     crypto.decrypt_map["DDD"] = {
         "type": "Message",
@@ -304,7 +428,7 @@ async def test_keychange_routes_through_batch(monkeypatch):
     adapter = _make_adapter(monkeypatch)
     api, crypto = _wire(adapter)
     captured = _capture(adapter, monkeypatch)
-    adapter._backlog_loaded.add("111-999")
+    adapter._cursors["111-999"] = "e1"
 
     crypto.decrypt_map["KEY"] = {"type": "KeyChange", "id": "e5"}
     api.events_pages["111-999"] = {
@@ -526,3 +650,106 @@ async def test_standalone_send_requires_key_blob(monkeypatch):
     cfg = PlatformConfig(enabled=True, extra={})
     out = await xchat_adapter._standalone_send(cfg, "111", "msg")
     assert "private-key blob" in out["error"]
+
+
+class StrictCrypto:
+    """Refuses to seed / use conversation keys until set_signing_keys is
+    called — mirrors the real SDK, where KeyChange verification (and thus
+    key seeding) is impossible without the participants' signing keys."""
+
+    def __init__(self) -> None:
+        self.signing_keys: List[Dict[str, str]] = []
+        self.keys_seeded = False
+        self.encrypted: List[tuple] = []
+
+    def load_keys(self, blob, version="1"):
+        pass
+
+    def set_identity(self, user_id):
+        pass
+
+    def set_cache_keys(self, enabled=True):
+        pass
+
+    def set_signing_keys(self, keys):
+        self.signing_keys = list(keys)
+
+    def decrypt_batch(self, events_b64):
+        if not self.signing_keys:
+            # Real SDK: KeyChange verification fails, no keys extracted.
+            return {"messages": [], "conversation_keys": {}, "errors": {"all": "unverified"}}
+        self.keys_seeded = True
+        return {
+            "messages": [{"event": {"conversation_id": "111:999"}}],
+            "conversation_keys": {"keys": {"1": b"k"}},
+            "errors": {},
+        }
+
+    def encrypt_text(self, conversation_id, text):
+        if not self.keys_seeded:
+            raise ValueError("no verified conversation key")
+        self.encrypted.append((conversation_id, text))
+        return {
+            "message_id": "mid-9",
+            "encoded_message_create_event": "ZW5j",
+            "encoded_message_event_signature": "c2ln",
+        }
+
+
+@pytest.mark.asyncio
+async def test_standalone_send_registers_signing_keys_before_decrypt(monkeypatch):
+    """Full standalone-send path against a strict crypto fake: without the
+    sender's signing keys pushed FIRST, key seeding fails and the send would
+    error — the regression the original FakeCrypto (keys unconditionally
+    handed out) let slip through."""
+    monkeypatch.setenv("XCHAT_ACCESS_TOKEN", "tok")
+    monkeypatch.setenv("XCHAT_PRIVATE_KEYS_B64", "YmxvYg==")
+    monkeypatch.setenv("XCHAT_USER_ID", "999")
+
+    api = FakeApi()
+    api.public_keys["111"] = [
+        {
+            "public_key_version": "3",
+            "signing_public_key": "SPK",
+            "public_key": "IPK",
+            "identity_public_key_signature": "SIG",
+        }
+    ]
+    api.events_pages["111-999"] = {
+        "data": [{"id": "e1", "encoded_event": "KEYCHG", "sender_id": "111"}]
+    }
+    crypto = StrictCrypto()
+    monkeypatch.setattr(xchat_adapter, "XChatApi", lambda *a, **kw: api)
+    monkeypatch.setattr(xchat_adapter, "XChatCrypto", lambda: crypto)
+
+    cfg = PlatformConfig(enabled=True, extra={})
+    out = await xchat_adapter._standalone_send(cfg, "111-999", "hello")
+
+    assert out.get("success") is True, out
+    # Signing keys were pushed before decrypt_batch could seed the key.
+    assert crypto.signing_keys and crypto.signing_keys[0]["user_id"] == "111"
+    assert crypto.keys_seeded
+    # Canonical conversation id (from the decrypted backlog) used for the send.
+    assert out["chat_id"] == "111:999"
+    assert api.sent and api.sent[0][0] == "111:999"
+
+
+@pytest.mark.asyncio
+async def test_standalone_send_no_key_without_signing_roster(monkeypatch):
+    """If the sender's public keys can't be fetched, the key never seeds and
+    the send reports the no-verified-key error instead of crashing."""
+    monkeypatch.setenv("XCHAT_ACCESS_TOKEN", "tok")
+    monkeypatch.setenv("XCHAT_PRIVATE_KEYS_B64", "YmxvYg==")
+    monkeypatch.setenv("XCHAT_USER_ID", "999")
+
+    api = FakeApi()  # no public_keys registered → empty roster
+    api.events_pages["111-999"] = {
+        "data": [{"id": "e1", "encoded_event": "KEYCHG", "sender_id": "111"}]
+    }
+    crypto = StrictCrypto()
+    monkeypatch.setattr(xchat_adapter, "XChatApi", lambda *a, **kw: api)
+    monkeypatch.setattr(xchat_adapter, "XChatCrypto", lambda: crypto)
+
+    cfg = PlatformConfig(enabled=True, extra={})
+    out = await xchat_adapter._standalone_send(cfg, "111-999", "hello")
+    assert "no verified conversation key" in out.get("error", "")

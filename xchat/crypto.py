@@ -160,8 +160,13 @@ class XChatCrypto:
 
 
 def message_text(event: dict[str, Any]) -> Optional[str]:
-    """Pull the plain text out of a decrypted Message event, or None."""
-    if event.get("type") != "Message":
+    """Pull the plain text out of a decrypted Message/MessageEdit event.
+
+    Edits matter: the feed sometimes returns an edited message only as the
+    edit event (the original is dropped), so skipping edits would make the
+    message invisible to the bot forever.
+    """
+    if event.get("type") not in ("Message", "MessageEdit"):
         return None
     content = event.get("content") or {}
     if isinstance(content, dict):

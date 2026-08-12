@@ -52,6 +52,26 @@ def _write_marker(marker: dict) -> None:
     _marker_path().write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
 
 
+def _write_private_blob(path: Path, blob_b64: str) -> None:
+    """Write the private-key blob with 0o600 from the very first byte.
+
+    ``write_text`` + ``chmod`` leaves a window where the file is world
+    readable (and swallows the chmod failure); ``os.open`` with an explicit
+    mode closes it. On platforms without POSIX modes (Windows) the mode
+    argument is a no-op, which matches the previous best-effort chmod.
+    """
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        os.write(fd, (blob_b64 + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    try:
+        # In case the file pre-existed with looser permissions.
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
 # ---------------------------------------------------------------------------
 # argparse wiring
 
@@ -70,7 +90,12 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Generate a NEW identity even if one is already registered (dangerous)",
     )
 
-    subs.add_parser("register", help="(Re)register the E2EE public keys with the X API")
+    p_reg = subs.add_parser("register", help="(Re)register the E2EE public keys with the X API")
+    p_reg.add_argument(
+        "--force",
+        action="store_true",
+        help="Generate a NEW identity even if one is already registered (dangerous)",
+    )
     subs.add_parser("status", help="Show token / key / registration state")
 
     parser.set_defaults(func=dispatch)
@@ -83,7 +108,7 @@ def dispatch(args: argparse.Namespace) -> int:
     if sub == "setup":
         return cmd_setup(force=getattr(args, "force", False))
     if sub == "register":
-        return cmd_register(force=False)
+        return cmd_register(force=getattr(args, "force", False))
     print(color(f"Unknown xchat subcommand: {sub}", Colors.RED))
     return 1
 
@@ -253,23 +278,50 @@ def cmd_register(*, force: bool) -> int:
                     return 1
                 _save_env("XCHAT_USER_ID", user_id)
 
-            crypto = XChatCrypto()
             blob_path = _blob_path()
             resuming = blob_path.exists() and marker.get("body") and not force
+            if not resuming and blob_path.exists() and not force:
+                # A key blob with no (or corrupt) registration marker.
+                # There is no forward secrecy in this protocol — silently
+                # regenerating over the blob would permanently kill every
+                # existing conversation. Refuse without --force.
+                print(
+                    color(
+                        f"A private-key blob already exists at {blob_path} but the "
+                        "registration marker is missing or unreadable. Overwriting it "
+                        "would PERMANENTLY lose access to every existing conversation.",
+                        Colors.RED,
+                    )
+                )
+                print(
+                    "If the blob belongs to a registered identity, restore or re-create "
+                    f"{_marker_path()}. To really mint a NEW identity, re-run with --force."
+                )
+                return 1
+
+            crypto = XChatCrypto()
             if resuming:
                 crypto.load_keys(blob_path.read_text(encoding="utf-8").strip())
                 body = marker["body"]
                 version = str(marker.get("version") or "1")
                 print(f"Resuming the saved identity ({blob_path}).")
             else:
+                if blob_path.exists():
+                    # force=True (guard above returns otherwise): back the old
+                    # identity up rather than destroying it outright.
+                    backup = blob_path.with_name(
+                        blob_path.name + "." + datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S") + ".bak"
+                    )
+                    blob_path.replace(backup)
+                    try:
+                        backup.chmod(0o600)
+                    except OSError:
+                        pass
+                    print(f"Backed up the previous key blob to {backup}.")
                 payload = crypto.generate_and_register_payload()
                 body = payload["registration"]
                 version = payload["version"]
-                blob_path.write_text(payload["private_keys_b64"] + "\n", encoding="utf-8")
-                try:
-                    blob_path.chmod(0o600)
-                except OSError:
-                    pass
+                _write_private_blob(blob_path, payload["private_keys_b64"])
                 _write_marker(
                     {"registered": False, "user_id": user_id, "version": version, "body": body}
                 )

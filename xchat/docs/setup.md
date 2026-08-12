@@ -40,7 +40,7 @@ hermes xchat status
 | `XCHAT_CLIENT_SECRET` | Optional | Only for confidential clients |
 | `XCHAT_USER_ID` | Auto | Bot account's numeric user id (derived by setup) |
 | `XCHAT_SIGNING_KEY_VERSION` | Auto | Registered public-key version (written by setup) |
-| `XCHAT_PRIVATE_KEYS_B64` | Optional | Key blob override — takes precedence over the blob file |
+| `XCHAT_PRIVATE_KEYS_B64` | Optional | Key blob override — takes precedence over the blob file. ⚠️ **This is the bot's entire E2EE identity**: there is no forward secrecy in this protocol, so anyone holding the blob can decrypt all past *and* future messages. Keep it in `~/.hermes/.env` (never commit it, never pass it on a command line) |
 | `XCHAT_ALLOWED_USERS` | Recommended | Comma-separated numeric X user ids allowed to talk to the bot |
 | `XCHAT_ALLOW_ALL_USERS` | Optional | `true` allows every sender (dev only) |
 | `XCHAT_CONVERSATION_IDS` | Optional | Pin specific conversation ids to poll; omit to auto-discover |
@@ -52,7 +52,7 @@ hermes xchat status
 
 ## How it works
 
-- **Inbound** — the adapter polls each conversation's events endpoint. On first sight of a conversation it batch-decrypts the backlog (`decrypt_events`) to seed the SDK's verified conversation-key cache **without replying to old messages**, then decrypts new events individually. `KeyChange` events (conversation-key rotations) are verified and folded into the key cache automatically.
+- **Inbound** — the adapter polls each conversation's events endpoint, keeping a **persistent per-conversation cursor** (`~/.hermes/xchat/cursors.json`) of the last processed event. On the very first sight of a conversation it batch-decrypts the backlog (`decrypt_events`) to seed the SDK's verified conversation-key cache **without replying to old messages**; after that every new event (including bursts larger than one page, and messages that arrived while the gateway was down) is processed exactly once. `KeyChange` events (conversation-key rotations) are verified and folded into the key cache automatically; message **edits** are treated as new messages.
 - **Outbound** — replies are encrypted and signed locally (`encrypt_message` with the session identity), then POSTed as ciphertext.
 - **Senders** — each new sender's public keys are fetched once and pushed into the XDK's signing-key store so their message signatures verify.
 - **Identity** — user ids are numeric X user ids; conversation ids look like `123-456` (1:1) or `g123…` (group).

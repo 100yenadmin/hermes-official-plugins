@@ -73,6 +73,36 @@ def _state_dir() -> Path:
     return get_hermes_home() / "xchat"
 
 
+def _cursor_path() -> Path:
+    return _state_dir() / "cursors.json"
+
+
+def _load_cursors() -> Dict[str, str]:
+    """Per-conversation cursors (last processed event id), persisted to disk.
+
+    The cursor is the source of truth for "what have we already handled":
+    it survives restarts (so messages received while the gateway was down
+    are processed, not swallowed) and never evicts (so a pruned dedup
+    entry can't cause a re-reply to an old message).
+    """
+    try:
+        data = json.loads(_cursor_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(k): str(v) for k, v in data.items() if str(v)}
+
+
+def _event_id_newer(a: str, b: str) -> bool:
+    """True when event id ``a`` is newer than ``b`` (ids are numeric,
+    time-ordered; fall back to string comparison just in case)."""
+    try:
+        return int(a) > int(b)
+    except (TypeError, ValueError):
+        return str(a) > str(b)
+
+
 def _read_key_blob() -> str:
     """Private-key blob: env override first, then the setup-written file."""
     env_blob = os.getenv("XCHAT_PRIVATE_KEYS_B64", "").strip()
@@ -202,12 +232,14 @@ class XChatAdapter(BasePlatformAdapter):
         self._running = False
         self._lock_acquired = False
 
-        # Per-conversation cursors + dedup
+        # Per-conversation cursors + dedup. Cursors persist across restarts
+        # (~/.hermes/xchat/cursors.json) — they are the primary duplicate /
+        # backlog guard; the in-memory dedup set is only a same-session
+        # safety net (echo suppression of our own sends).
         self._conversations: Set[str] = set(self._pinned_conversations)
-        self._backlog_loaded: Set[str] = set()
+        self._cursors: Dict[str, str] = _load_cursors()
         self._seen_event_ids: Dict[str, float] = {}
         self._conversation_keys: Dict[str, Dict[str, bytes]] = {}
-        self._last_event_id: Dict[str, str] = {}
 
         # Signing-key roster (accumulated; the SDK store is replaced wholesale)
         self._signing_keys: List[Dict[str, str]] = []
@@ -384,19 +416,44 @@ class XChatAdapter(BasePlatformAdapter):
 
     async def _poll_conversation(self, conv_id: str) -> None:
         assert self._api is not None and self._crypto is not None
-        page = await self._api.get_events(conv_id, max_results=50)
-        raw = page.get("data") or []
-        if not raw:
+        cursor = self._cursors.get(conv_id, "")
+
+        # Page until we reach the cursor (or the feed ends) so a burst of
+        # more than one page between polls is never dropped. Newest-first
+        # on the wire; hard page cap keeps a pathological feed bounded.
+        collected: List[Dict[str, Any]] = []
+        token: Optional[str] = None
+        reached_cursor = False
+        for _ in range(10):
+            page = await self._api.get_events(
+                conv_id, max_results=50, pagination_token=token
+            )
+            raw = page.get("data") or []
+            if not raw:
+                break
+            for item in raw:
+                eid = str(item.get("id") or "")
+                if cursor and eid and not _event_id_newer(eid, cursor):
+                    reached_cursor = True
+                    break
+                collected.append(item)
+            token = (page.get("meta") or {}).get("next_token")
+            if reached_cursor or not token:
+                break
+        if not collected:
             return
 
-        # Events arrive newest-first; process oldest-first.
-        raw = list(reversed(raw))
-        await self._register_signing_keys(raw)
+        # Process oldest-first.
+        collected.reverse()
+        await self._register_signing_keys(collected)
 
-        if conv_id not in self._backlog_loaded:
-            # First sight of this conversation: batch-decrypt to seed the
-            # SDK's verified-key cache, but do NOT reply to the backlog.
-            events_b64 = [e["encoded_event"] for e in raw if e.get("encoded_event")]
+        if not cursor:
+            # First sight of this conversation EVER (no persisted cursor):
+            # batch-decrypt to seed the SDK's verified-key cache, but do NOT
+            # reply to the historical backlog. The cursor persists, so a
+            # gateway restart does not re-enter this branch — messages that
+            # arrived while we were down are processed normally above.
+            events_b64 = [e["encoded_event"] for e in collected if e.get("encoded_event")]
             if events_b64:
                 try:
                     batch = self._crypto.decrypt_batch(events_b64)
@@ -404,22 +461,25 @@ class XChatAdapter(BasePlatformAdapter):
                     self._conversation_keys.setdefault(conv_id, {}).update(keys)
                 except Exception as e:
                     logger.warning("[xchat] backlog decrypt failed conv=%s: %s", conv_id, e)
-            for item in raw:
-                eid = str(item.get("id") or "")
-                if eid:
-                    self._seen_event_ids[eid] = time.time()
-            self._backlog_loaded.add(conv_id)
+            newest = str(collected[-1].get("id") or "")
+            if newest:
+                self._set_cursor(conv_id, newest)
             return
 
-        for item in raw:
+        for item in collected:
             event_id = str(item.get("id") or "")
-            if not event_id or event_id in self._seen_event_ids:
+            if not event_id:
+                continue
+            if event_id in self._seen_event_ids:
+                # Same-session echo suppression (our own sends).
+                self._set_cursor(conv_id, event_id)
                 continue
             self._seen_event_ids[event_id] = time.time()
             self._prune_dedup()
 
             event_b64 = item.get("encoded_event")
             if not event_b64:
+                self._set_cursor(conv_id, event_id)
                 continue
             try:
                 event = self._crypto.decrypt_one(
@@ -427,6 +487,7 @@ class XChatAdapter(BasePlatformAdapter):
                 )
             except Exception as e:
                 logger.warning("[xchat] decrypt failed conv=%s event=%s: %s", conv_id, event_id, e)
+                self._set_cursor(conv_id, event_id)
                 continue
 
             etype = event.get("type")
@@ -439,16 +500,21 @@ class XChatAdapter(BasePlatformAdapter):
                     self._conversation_keys.setdefault(conv_id, {}).update(keys)
                 except Exception as e:
                     logger.warning("[xchat] key-change processing failed conv=%s: %s", conv_id, e)
+                self._set_cursor(conv_id, event_id)
                 continue
-            if etype != "Message":
+            if etype not in ("Message", "MessageEdit"):
+                # Reactions, read receipts, etc.
+                self._set_cursor(conv_id, event_id)
                 continue
 
             sender_id = str(event.get("sender_id") or item.get("sender_id") or "")
             if sender_id == self._bot_user_id:
+                self._set_cursor(conv_id, event_id)
                 continue  # echo of our own reply
 
             text = message_text(event)
             if not text:
+                self._set_cursor(conv_id, event_id)
                 continue
 
             # The signature covers the canonical conversation id embedded in
@@ -461,6 +527,22 @@ class XChatAdapter(BasePlatformAdapter):
                 message_id=event_id,
                 raw=item,
             )
+            self._set_cursor(conv_id, event_id)
+
+    def _set_cursor(self, conv_id: str, event_id: str) -> None:
+        """Advance + persist the per-conversation cursor (monotonic)."""
+        current = self._cursors.get(conv_id, "")
+        if current and not _event_id_newer(event_id, current):
+            return
+        self._cursors[conv_id] = event_id
+        try:
+            path = _cursor_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(self._cursors, indent=0) + "\n", encoding="utf-8")
+            tmp.replace(path)
+        except OSError:
+            logger.debug("[xchat] cursor persist failed", exc_info=True)
 
     def _prune_dedup(self) -> None:
         if len(self._seen_event_ids) <= DEDUP_MAX_SIZE:
@@ -688,10 +770,36 @@ async def _standalone_send(
         crypto.set_cache_keys(True)
 
         # Seed the conversation key from the backlog (KeyChange events).
+        # KeyChange verification needs the participants' signing keys in the
+        # SDK store FIRST — decrypt_batch can't verify (and therefore can't
+        # seed the conversation key) without them.
         page = await api.get_events(chat_id, max_results=50)
-        events_b64 = [e["encoded_event"] for e in (page.get("data") or []) if e.get("encoded_event")]
+        raw_events = page.get("data") or []
+        events_b64 = [e["encoded_event"] for e in raw_events if e.get("encoded_event")]
         canonical = chat_id
         if events_b64:
+            sender_ids = {
+                str(e.get("sender_id"))
+                for e in raw_events
+                if e.get("sender_id") and str(e.get("sender_id")) != user_id
+            }
+            signing_keys: List[Dict[str, str]] = []
+            for sender_id in sender_ids:
+                try:
+                    for pk in await api.get_public_keys(sender_id):
+                        signing_keys.append(
+                            {
+                                "user_id": sender_id,
+                                "public_key_version": str(pk.get("public_key_version") or ""),
+                                "public_key": pk.get("signing_public_key") or "",
+                                "identity_public_key": pk.get("public_key") or "",
+                                "identity_public_key_signature": pk.get("identity_public_key_signature") or "",
+                            }
+                        )
+                except Exception:
+                    logger.debug("[xchat] standalone public-key fetch failed sender=%s", sender_id)
+            if signing_keys:
+                crypto.set_signing_keys(signing_keys)
             try:
                 batch = crypto.decrypt_batch(events_b64)
                 for m in batch.get("messages") or []:

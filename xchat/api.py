@@ -31,9 +31,12 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://api.x.com"
 
 # Fields we always request on the events endpoint — the decrypt path needs
-# encoded_event; sender_id/conversation_id drive session routing.
+# encoded_event; sender_id/conversation_id drive session routing. The
+# endpoint 400s on unknown fields, so only documented ones may appear here
+# (id, conversation_id, conversation_token, created_at, encoded_event,
+# is_trusted, previous_id, sender_id, message_event_signature).
 _EVENT_FIELDS = (
-    "conversation_id,created_at_msec,encoded_event,id,sender_id"
+    "conversation_id,created_at,encoded_event,id,sender_id"
 )
 
 # Refresh the access token this many seconds before its reported expiry.
