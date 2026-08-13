@@ -62,6 +62,10 @@ optional_env:
     description: "Seconds between event polls per cycle (default 10)"
     prompt: "Poll interval seconds (default 10)"
     password: false
+  - name: XCHAT_SEND_READ_RECEIPTS
+    description: "Send read receipts for processed messages (true/false, default false)"
+    prompt: "Send read receipts? (true/false)"
+    password: false
   - name: XCHAT_REQUIRE_MENTION
     description: "Ignore group-chat messages unless they match a mention wake word (true/false, default false)"
     prompt: "Require a mention in group chats?"

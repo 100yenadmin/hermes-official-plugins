@@ -47,7 +47,13 @@ from gateway.platforms.base import (
 )
 
 from .api import HTTPX_AVAILABLE, XChatApi, XChatApiError, XChatRateLimited
-from .crypto import XChatCrypto, message_text
+from .crypto import (
+    XChatCrypto,
+    detect_image_dimensions,
+    detect_mime_type,
+    message_attachments,
+    message_text,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -58,6 +64,11 @@ DEFAULT_POLL_INTERVAL = 10.0
 DISCOVERY_INTERVAL = 300.0  # re-list conversations every 5 minutes
 ERROR_BACKOFF = [5, 15, 30, 60, 120]
 DEDUP_MAX_SIZE = 5000
+# Bounded cache of recent decrypted events per conversation — used to build
+# native threaded replies (encrypt_reply needs the decrypted target event).
+REPLY_CACHE_MAX = 200
+# Cap inbound attachments processed per message.
+MAX_INBOUND_ATTACHMENTS = 5
 
 # Group-chat mention wake words — same defaults as the other Hermes channels
 # so group gating behaves identically everywhere.
@@ -240,6 +251,18 @@ class XChatAdapter(BasePlatformAdapter):
         self._cursors: Dict[str, str] = _load_cursors()
         self._seen_event_ids: Dict[str, float] = {}
         self._conversation_keys: Dict[str, Dict[str, bytes]] = {}
+        # Latest verified key version per conversation — media decrypt must
+        # use the key for the EVENT's version, media encrypt the latest.
+        self._latest_key_version: Dict[str, str] = {}
+        # Recent decrypted events per conversation, keyed by event id — lets
+        # send(reply_to=...) build a native threaded reply.
+        self._event_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        # Read receipts (privacy default: off).
+        env_read = os.getenv("XCHAT_SEND_READ_RECEIPTS")
+        if env_read is not None:
+            self._send_read_receipts = env_read.strip().lower() in {"1", "true", "yes"}
+        else:
+            self._send_read_receipts = bool(extra.get("send_read_receipts", False))
 
         # Signing-key roster (accumulated; the SDK store is replaced wholesale)
         self._signing_keys: List[Dict[str, str]] = []
@@ -421,7 +444,11 @@ class XChatAdapter(BasePlatformAdapter):
         # Page until we reach the cursor (or the feed ends) so a burst of
         # more than one page between polls is never dropped. Newest-first
         # on the wire; hard page cap keeps a pathological feed bounded.
+        # KeyChange events arrive SEPARATELY in meta.conversation_key_events
+        # — they must be decrypted (batch path) before the messages that
+        # were encrypted under them, or no conversation key is available.
         collected: List[Dict[str, Any]] = []
+        key_events_b64: List[str] = []
         token: Optional[str] = None
         reached_cursor = False
         for _ in range(10):
@@ -429,6 +456,10 @@ class XChatAdapter(BasePlatformAdapter):
                 conv_id, max_results=50, pagination_token=token
             )
             raw = page.get("data") or []
+            meta = page.get("meta") or {}
+            for kev in meta.get("conversation_key_events") or []:
+                if kev and kev not in key_events_b64:
+                    key_events_b64.append(kev)
             if not raw:
                 break
             for item in raw:
@@ -437,15 +468,23 @@ class XChatAdapter(BasePlatformAdapter):
                     reached_cursor = True
                     break
                 collected.append(item)
-            token = (page.get("meta") or {}).get("next_token")
+            token = meta.get("next_token")
             if reached_cursor or not token:
                 break
-        if not collected:
+        if not collected and not key_events_b64:
             return
 
         # Process oldest-first.
         collected.reverse()
         await self._register_signing_keys(collected)
+
+        # Verify + cache any conversation-key changes FIRST (after signing
+        # keys are registered — an unverifiable KeyChange is dropped by the
+        # SDK), so this poll's messages can decrypt under rotated keys.
+        if key_events_b64:
+            self._absorb_key_batch(conv_id, key_events_b64)
+        if not collected:
+            return
 
         if not cursor:
             # First sight of this conversation EVER (no persisted cursor):
@@ -455,12 +494,7 @@ class XChatAdapter(BasePlatformAdapter):
             # arrived while we were down are processed normally above.
             events_b64 = [e["encoded_event"] for e in collected if e.get("encoded_event")]
             if events_b64:
-                try:
-                    batch = self._crypto.decrypt_batch(events_b64)
-                    keys = (batch.get("conversation_keys") or {}).get("keys") or {}
-                    self._conversation_keys.setdefault(conv_id, {}).update(keys)
-                except Exception as e:
-                    logger.warning("[xchat] backlog decrypt failed conv=%s: %s", conv_id, e)
+                self._absorb_key_batch(conv_id, events_b64, label="backlog")
             newest = str(collected[-1].get("id") or "")
             if newest:
                 self._set_cursor(conv_id, newest)
@@ -494,12 +528,7 @@ class XChatAdapter(BasePlatformAdapter):
             if etype == "KeyChange":
                 # Key rotation: route through the batch path — it verifies the
                 # change and feeds the SDK's verified-key cache.
-                try:
-                    rotated = self._crypto.decrypt_batch([event_b64])
-                    keys = (rotated.get("conversation_keys") or {}).get("keys") or {}
-                    self._conversation_keys.setdefault(conv_id, {}).update(keys)
-                except Exception as e:
-                    logger.warning("[xchat] key-change processing failed conv=%s: %s", conv_id, e)
+                self._absorb_key_batch(conv_id, [event_b64], label="key-change")
                 self._set_cursor(conv_id, event_id)
                 continue
             if etype not in ("Message", "MessageEdit"):
@@ -512,22 +541,155 @@ class XChatAdapter(BasePlatformAdapter):
                 self._set_cursor(conv_id, event_id)
                 continue  # echo of our own reply
 
-            text = message_text(event)
-            if not text:
-                self._set_cursor(conv_id, event_id)
-                continue
-
             # The signature covers the canonical conversation id embedded in
             # the event — prefer it for replies.
             canonical_conv = str(event.get("conversation_id") or conv_id)
+            self._cache_event(canonical_conv, event_id, event)
+
+            # Encrypted media attachments: download + decrypt + cache locally
+            # so vision / the agent can read them.
+            media_urls, media_types = await self._fetch_attachments(
+                conv_id, event, item
+            )
+
+            text = message_text(event) or ""
+            if not text and not media_urls:
+                self._set_cursor(conv_id, event_id)
+                continue
+
             await self._dispatch_inbound(
                 conv_id=canonical_conv,
                 sender_id=sender_id,
                 text=text,
                 message_id=event_id,
                 raw=item,
+                media_urls=media_urls,
+                media_types=media_types,
+                reply_to=self._reply_context(canonical_conv, event),
             )
             self._set_cursor(conv_id, event_id)
+            await self._maybe_mark_read(conv_id, item)
+
+    def _absorb_key_batch(
+        self, conv_id: str, events_b64: List[str], *, label: str = "key-events"
+    ) -> None:
+        """Batch-decrypt events to extract + cache verified conversation keys."""
+        assert self._crypto is not None
+        try:
+            batch = self._crypto.decrypt_batch(events_b64)
+        except Exception as e:
+            logger.warning("[xchat] %s decrypt failed conv=%s: %s", label, conv_id, e)
+            return
+        keys = (batch.get("conversation_keys") or {}).get("keys") or {}
+        if keys:
+            self._conversation_keys.setdefault(conv_id, {}).update(keys)
+        latest = batch.get("latest_key_version")
+        if latest:
+            self._latest_key_version[conv_id] = str(latest)
+
+    def _cache_event(self, conv_id: str, event_id: str, event: Dict[str, Any]) -> None:
+        """Keep a bounded cache of decrypted events for native threaded replies."""
+        cache = self._event_cache.setdefault(conv_id, {})
+        cache[event_id] = event
+        while len(cache) > REPLY_CACHE_MAX:
+            cache.pop(next(iter(cache)))
+
+    def _reply_context(
+        self, conv_id: str, event: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        """Reply metadata for the inbound event (id/text/author), if present."""
+        reply = event.get("reply_to") or event.get("replied_to_event")
+        if not reply:
+            return None
+        reply = reply if isinstance(reply, dict) else {}
+        rid = str(reply.get("id") or reply.get("sequence_id") or "") or None
+        return {
+            "message_id": rid,
+            "text": reply.get("text") or message_text(reply),
+            "author_id": str(reply.get("sender_id") or "") or None,
+        }
+
+    async def _fetch_attachments(
+        self, conv_id: str, event: Dict[str, Any], item: Dict[str, Any]
+    ) -> tuple[List[str], List[str]]:
+        """Download + decrypt inbound media attachments to the local cache.
+
+        Uses the conversation key for the EVENT's key version — after a
+        rotation the latest key cannot decrypt older media.
+        """
+        atts = message_attachments(event)
+        if not atts:
+            return [], []
+        assert self._api is not None and self._crypto is not None
+        from gateway.platforms.base import (
+            cache_audio_from_bytes,
+            cache_document_from_bytes,
+            cache_image_from_bytes,
+            cache_video_from_bytes,
+            validate_inbound_media_size,
+        )
+
+        keys = self._conversation_keys.get(conv_id) or {}
+        event_key_version = str(event.get("key_version") or "")
+        conv_key = keys.get(event_key_version) or (
+            keys.get(self._latest_key_version.get(conv_id, "")) if keys else None
+        )
+        if conv_key is None and keys:
+            # Last resort: any cached key (single-key conversations).
+            conv_key = next(iter(keys.values()))
+        if conv_key is None:
+            logger.warning(
+                "[xchat] attachment skipped conv=%s: no conversation key cached", conv_id
+            )
+            return [], []
+
+        media_urls: List[str] = []
+        media_types: List[str] = []
+        for att in atts[:MAX_INBOUND_ATTACHMENTS]:
+            hash_key = str(att.get("media_hash_key") or "")
+            if not hash_key:
+                continue
+            try:
+                blob = await self._api.media_download(conv_id, hash_key)
+                # Raises ValueError when over the inbound media cap.
+                validate_inbound_media_size(len(blob), media_type="attachment")
+                plaintext = self._crypto.decrypt_media(blob, conv_key)
+            except Exception as e:
+                logger.warning(
+                    "[xchat] attachment fetch/decrypt failed conv=%s key=%s: %s",
+                    conv_id, hash_key[:12], e,
+                )
+                continue
+            mime = detect_mime_type(plaintext) or "application/octet-stream"
+            try:
+                if mime.startswith("image/"):
+                    ext = "." + (mime.split("/", 1)[1] or "jpg").replace("jpeg", "jpg")
+                    path = cache_image_from_bytes(plaintext, ext=ext)
+                elif mime.startswith("audio/"):
+                    path = cache_audio_from_bytes(plaintext)
+                elif mime.startswith("video/"):
+                    path = cache_video_from_bytes(plaintext)
+                else:
+                    filename = str(att.get("filename") or f"xchat-{hash_key[:10]}.bin")
+                    path = cache_document_from_bytes(plaintext, filename)
+            except Exception as e:
+                logger.warning("[xchat] attachment cache failed conv=%s: %s", conv_id, e)
+                continue
+            media_urls.append(path)
+            media_types.append(mime)
+        return media_urls, media_types
+
+    async def _maybe_mark_read(self, conv_id: str, item: Dict[str, Any]) -> None:
+        """Best-effort read receipt (opt-in via XCHAT_SEND_READ_RECEIPTS)."""
+        if not self._send_read_receipts or self._api is None:
+            return
+        seq = str(item.get("sequence_id") or item.get("id") or "")
+        if not seq:
+            return
+        try:
+            await self._api.mark_read(conv_id, seq)
+        except Exception:
+            logger.debug("[xchat] mark-read failed conv=%s", conv_id, exc_info=True)
 
     def _set_cursor(self, conv_id: str, event_id: str) -> None:
         """Advance + persist the per-conversation cursor (monotonic)."""
@@ -601,6 +763,9 @@ class XChatAdapter(BasePlatformAdapter):
         text: str,
         message_id: str,
         raw: Dict[str, Any],
+        media_urls: Optional[List[str]] = None,
+        media_types: Optional[List[str]] = None,
+        reply_to: Optional[Dict[str, Any]] = None,
     ) -> None:
         is_group = conv_id.startswith("g")
         chat_type = "group" if is_group else "dm"
@@ -609,7 +774,7 @@ class XChatAdapter(BasePlatformAdapter):
             if not self._message_matches_mention_patterns(text):
                 return
             text = self._clean_mention_text(text)
-            if not text:
+            if not text and not media_urls:
                 return
 
         source = self.build_source(
@@ -620,12 +785,33 @@ class XChatAdapter(BasePlatformAdapter):
             user_name=None,
             message_id=message_id,
         )
+        mtype = MessageType.TEXT
+        if media_urls:
+            first = (media_types or [""])[0]
+            if first.startswith("image/"):
+                mtype = MessageType.PHOTO
+            elif first.startswith("audio/"):
+                mtype = MessageType.VOICE
+            elif first.startswith("video/"):
+                mtype = MessageType.VIDEO
+            else:
+                mtype = MessageType.DOCUMENT
+        reply_to = reply_to or {}
         event = MessageEvent(
             text=text,
-            message_type=MessageType.TEXT,
+            message_type=mtype,
             source=source,
             raw_message=raw,
             message_id=message_id,
+            user_id=sender_id,
+            media_urls=list(media_urls or []),
+            media_types=list(media_types or []),
+            reply_to_message_id=reply_to.get("message_id"),
+            reply_to_text=reply_to.get("text"),
+            reply_to_author_id=reply_to.get("author_id"),
+            reply_to_is_own_message=(
+                str(reply_to.get("author_id") or "") == self._bot_user_id
+            ),
         )
         await self.handle_message(event)
 
@@ -643,20 +829,20 @@ class XChatAdapter(BasePlatformAdapter):
         if len(content) > MAX_MESSAGE_LENGTH:
             content = content[:MAX_MESSAGE_LENGTH]
         try:
-            body = self._crypto.encrypt_text(chat_id, content)
+            body = self._encrypt_outbound(chat_id, content, reply_to=reply_to)
         except ValueError:
             # No verified conversation key cached yet. For a 1:1, the key
             # cache seeds from the conversation backlog; a brand-new
-            # conversation the bot initiates needs a key-change first —
-            # out of scope for reply flows (the poll loop always seeds
-            # keys before we ever reply).
+            # conversation the bot initiates needs a key handshake — see
+            # initiate_conversation() (used by the standalone sender).
             return SendResult(
                 success=False,
                 error=(
                     "No verified conversation key for this conversation yet. "
                     "The key cache seeds from inbound events — reply flows "
-                    "always have it; initiating brand-new conversations is "
-                    "not supported yet."
+                    "always have it. To message a brand-new user, use "
+                    "`hermes send xchat:<user-id>` (it performs the key "
+                    "handshake automatically)."
                 ),
             )
         except Exception as e:
@@ -674,6 +860,162 @@ class XChatAdapter(BasePlatformAdapter):
             if eid:
                 self._seen_event_ids[str(eid)] = time.time()
         return SendResult(success=True, message_id=msg_id)
+
+    def _encrypt_outbound(
+        self,
+        chat_id: str,
+        content: str,
+        *,
+        reply_to: Optional[str] = None,
+        attachments: Optional[List[Dict[str, Any]]] = None,
+    ) -> Dict[str, str]:
+        """Encrypt text (or media caption) — native threaded reply when the
+        replied-to event is in the decrypted-event cache."""
+        assert self._crypto is not None
+        if reply_to:
+            target = (self._event_cache.get(chat_id) or {}).get(str(reply_to))
+            if target is not None:
+                try:
+                    return self._crypto.encrypt_reply(
+                        chat_id, content, target, attachments=attachments
+                    )
+                except Exception:
+                    logger.debug(
+                        "[xchat] encrypt_reply failed conv=%s — plain send", chat_id,
+                        exc_info=True,
+                    )
+        return self._crypto.encrypt_text(chat_id, content, attachments=attachments)
+
+    def _conversation_key_for_send(self, chat_id: str) -> Optional[bytes]:
+        """Latest cached raw conversation key (for media stream encryption)."""
+        keys = self._conversation_keys.get(chat_id) or {}
+        if not keys:
+            return None
+        latest = self._latest_key_version.get(chat_id)
+        if latest and latest in keys:
+            return keys[latest]
+        # Highest numeric version wins when latest is unknown.
+        try:
+            return keys[max(keys, key=lambda v: int(v))]
+        except (ValueError, TypeError):
+            return next(iter(keys.values()))
+
+    async def _send_media_file(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str],
+        reply_to: Optional[str] = None,
+    ) -> SendResult:
+        """Encrypt + upload a file, then send a message carrying the attachment."""
+        if self._api is None or self._crypto is None:
+            return SendResult(success=False, error="xchat adapter not connected")
+        conv_key = self._conversation_key_for_send(chat_id)
+        if conv_key is None:
+            return SendResult(
+                success=False,
+                error="No conversation key cached — cannot encrypt media yet.",
+            )
+        try:
+            plaintext = Path(file_path).read_bytes()
+        except OSError as e:
+            return SendResult(success=False, error=f"cannot read media file: {e}")
+        try:
+            blob = self._crypto.encrypt_media(plaintext, conv_key)
+            media_hash_key = await self._api.media_upload(chat_id, blob)
+        except (XChatApiError, Exception) as e:
+            logger.warning("[xchat] media upload failed conv=%s: %s", chat_id, e)
+            return SendResult(success=False, error=f"media upload failed: {e}")
+
+        att: Dict[str, Any] = {
+            "attachment_type": "media",
+            "media_hash_key": media_hash_key,
+            "filesize_bytes": len(plaintext),
+            "filename": Path(file_path).name,
+        }
+        dims = detect_image_dimensions(plaintext)
+        att["width"], att["height"] = dims if dims else (0, 0)
+        try:
+            body = self._encrypt_outbound(
+                chat_id, caption or "", reply_to=reply_to, attachments=[att]
+            )
+            out = await self._api.send_message(chat_id, body)
+        except ValueError:
+            return SendResult(success=False, error="No verified conversation key.")
+        except XChatApiError as e:
+            return SendResult(success=False, error=str(e))
+        data = out.get("data") or {}
+        for eid_key in ("event_id", "id"):
+            eid = data.get(eid_key)
+            if eid:
+                self._seen_event_ids[str(eid)] = time.time()
+        return SendResult(
+            success=True,
+            message_id=str(data.get("message_id") or body.get("message_id") or ""),
+        )
+
+    async def send_image(
+        self,
+        chat_id: str,
+        image_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        path = image_url
+        if path.startswith("file://"):
+            from urllib.parse import unquote, urlparse
+
+            path = unquote(urlparse(path).path)
+        if not os.path.isfile(path):
+            # Remote URL — fall back to the base implementation (sends URL text).
+            return await super().send_image(chat_id, image_url, caption, reply_to, metadata)
+        return await self._send_media_file(chat_id, path, caption, reply_to)
+
+    async def send_image_file(
+        self,
+        chat_id: str,
+        image_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        return await self._send_media_file(chat_id, image_path, caption, reply_to)
+
+    async def send_voice(
+        self,
+        chat_id: str,
+        audio_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        return await self._send_media_file(chat_id, audio_path, caption, reply_to)
+
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        return await self._send_media_file(chat_id, video_path, caption, reply_to)
+
+    async def send_document(
+        self,
+        chat_id: str,
+        file_path: str,
+        caption: Optional[str] = None,
+        file_name: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        return await self._send_media_file(chat_id, file_path, caption, reply_to)
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
         if self._api is None:
@@ -706,6 +1048,7 @@ def _env_enablement() -> Optional[dict]:
         ("XCHAT_SIGNING_KEY_VERSION", "signing_key_version"),
         ("XCHAT_CONVERSATION_IDS", "conversation_ids"),
         ("XCHAT_POLL_INTERVAL", "poll_interval"),
+        ("XCHAT_SEND_READ_RECEIPTS", "send_read_receipts"),
     ):
         val = os.getenv(env, "").strip()
         if val:
@@ -731,10 +1074,12 @@ async def _standalone_send(
     """Out-of-process encrypted send for cron / send_message_tool.
 
     Opens an ephemeral API client + Chat XDK session, seeds the
-    conversation key from the conversation's event backlog, encrypts,
-    sends, and closes. ``thread_id`` / ``media_files`` are accepted for
-    signature parity — X Chat has no thread primitive and media requires
-    the full streaming-encrypt flow (not wired yet).
+    conversation key from the conversation's event backlog (or performs the
+    conversation-key handshake for a brand-new 1:1 given a bare user id),
+    encrypts, sends, and closes. ``media_files`` are encrypted with the
+    conversation key, uploaded via the 3-step chat-media flow, and attached
+    to the message. ``thread_id`` is accepted for signature parity — X Chat
+    has no thread primitive.
     """
     if not HTTPX_AVAILABLE:
         return {"error": "xchat standalone send: httpx not installed"}
@@ -772,11 +1117,18 @@ async def _standalone_send(
         # Seed the conversation key from the backlog (KeyChange events).
         # KeyChange verification needs the participants' signing keys in the
         # SDK store FIRST — decrypt_batch can't verify (and therefore can't
-        # seed the conversation key) without them.
+        # seed the conversation key) without them. KeyChange events arrive
+        # separately in meta.conversation_key_events.
         page = await api.get_events(chat_id, max_results=50)
         raw_events = page.get("data") or []
-        events_b64 = [e["encoded_event"] for e in raw_events if e.get("encoded_event")]
+        meta = page.get("meta") or {}
+        key_events = [k for k in (meta.get("conversation_key_events") or []) if k]
+        events_b64 = key_events + [
+            e["encoded_event"] for e in raw_events if e.get("encoded_event")
+        ]
         canonical = chat_id
+        raw_key: Optional[bytes] = None
+        raw_key_version: Optional[str] = None
         if events_b64:
             sender_ids = {
                 str(e.get("sender_id"))
@@ -807,18 +1159,85 @@ async def _standalone_send(
                     if conv:
                         canonical = str(conv)
                         break
+                conv_keys = (batch.get("conversation_keys") or {}).get("keys") or {}
+                latest = batch.get("latest_key_version")
+                if conv_keys:
+                    if latest and str(latest) in conv_keys:
+                        raw_key_version = str(latest)
+                    else:
+                        try:
+                            raw_key_version = max(conv_keys, key=lambda v: int(v))
+                        except (ValueError, TypeError):
+                            raw_key_version = next(iter(conv_keys))
+                    raw_key = conv_keys[raw_key_version]
             except Exception as e:
                 logger.debug("[xchat] standalone backlog decrypt: %s", e)
 
-        try:
-            body = crypto.encrypt_text(canonical, message)
-        except ValueError:
-            return {
-                "error": (
-                    "xchat: no verified conversation key — the target must have "
-                    "an existing conversation with the bot"
-                )
+        explicit_key: Optional[bytes] = None
+        explicit_key_version: Optional[str] = None
+
+        # Encrypt + upload media attachments (needs the RAW conversation key).
+        attachments: List[Dict[str, Any]] = []
+        media_errors: List[str] = []
+        for mf in media_files or []:
+            # send_message_tool passes (path, is_voice) tuples; accept bare
+            # strings/paths too for direct callers.
+            if isinstance(mf, (tuple, list)) and mf:
+                mpath = str(mf[0])
+            else:
+                mpath = str(getattr(mf, "path", None) or mf)
+            if raw_key is None:
+                media_errors.append(f"{Path(mpath).name}: no raw conversation key")
+                continue
+            try:
+                plaintext = Path(mpath).read_bytes()
+                blob = crypto.encrypt_media(plaintext, raw_key)
+                media_hash_key = await api.media_upload(canonical, blob)
+            except (OSError, XChatApiError, Exception) as e:
+                media_errors.append(f"{Path(mpath).name}: {e}")
+                continue
+            att: Dict[str, Any] = {
+                "attachment_type": "media",
+                "media_hash_key": media_hash_key,
+                "filesize_bytes": len(plaintext),
+                "filename": Path(mpath).name,
             }
+            dims = detect_image_dimensions(plaintext)
+            att["width"], att["height"] = dims if dims else (0, 0)
+            attachments.append(att)
+        if media_errors:
+            logger.warning("[xchat] standalone media skipped: %s", "; ".join(media_errors))
+
+        try:
+            body = crypto.encrypt_text(
+                canonical, message, attachments=attachments or None
+            )
+        except ValueError:
+            # No verified conversation key. For a bare recipient user id
+            # (brand-new 1:1), perform the conversation-key handshake:
+            # verify both parties' key bindings, wrap a fresh key for each,
+            # and POST it — then encrypt under the raw key directly.
+            if not _is_bare_user_id(chat_id):
+                return {
+                    "error": (
+                        "xchat: no verified conversation key — the target must have "
+                        "an existing conversation with the bot, or pass the "
+                        "recipient's bare user id to start a new one"
+                    )
+                }
+            try:
+                init = await _initiate_conversation(api, crypto, user_id, chat_id)
+            except (XChatApiError, ValueError) as e:
+                return {"error": f"xchat: conversation-key handshake failed: {e}"}
+            canonical = init["conversation_id"] or chat_id
+            explicit_key = init["conversation_key"]
+            explicit_key_version = init["conversation_key_version"]
+            body = crypto.encrypt_text(
+                canonical,
+                message,
+                conversation_key=explicit_key,
+                conversation_key_version=explicit_key_version,
+            )
         out = await api.send_message(canonical, body)
         data = out.get("data") or {}
         return {
@@ -833,6 +1252,53 @@ async def _standalone_send(
         return {"error": f"xchat standalone send failed: {e}"}
     finally:
         await api.aclose()
+
+
+def _is_bare_user_id(chat_id: str) -> bool:
+    """True for a bare numeric X user id (a 1:1 target with no conversation yet)."""
+    return str(chat_id).isdigit()
+
+
+async def _initiate_conversation(
+    api: "XChatApi", crypto: "XChatCrypto", bot_user_id: str, recipient_id: str
+) -> Dict[str, Any]:
+    """Conversation-key handshake for a brand-new 1:1 conversation.
+
+    Fetches both parties' public keys, verifies each record's
+    identity↔signing binding (a substituted identity key must never receive
+    the conversation key), wraps a fresh conversation key for every
+    participant, and POSTs it to the add-conversation-keys endpoint.
+
+    Returns ``{"conversation_id", "conversation_key", "conversation_key_version"}``.
+    """
+    participants: List[Dict[str, str]] = []
+    for uid in (bot_user_id, recipient_id):
+        records = await api.get_public_keys(uid)
+        if not records:
+            raise ValueError(f"user {uid} has no registered X Chat public keys")
+        rec = records[0]
+        if not crypto.verify_key_binding(
+            str(rec.get("public_key") or ""),
+            str(rec.get("signing_public_key") or ""),
+            str(rec.get("identity_public_key_signature") or ""),
+        ):
+            raise ValueError(f"public-key binding verification failed for user {uid}")
+        participants.append(
+            {
+                "user_id": uid,
+                "public_key": str(rec.get("public_key") or ""),
+                "key_version": str(rec.get("public_key_version") or "1"),
+            }
+        )
+
+    prepared = crypto.prepare_conversation_key_change(participants)
+    resp = await api.add_conversation_keys(recipient_id, prepared["body"])
+    data = resp.get("data") or {}
+    return {
+        "conversation_id": str(data.get("conversation_id") or ""),
+        "conversation_key": prepared["conversation_key"],
+        "conversation_key_version": prepared["conversation_key_version"],
+    }
 
 
 def register(ctx) -> None:
@@ -866,7 +1332,10 @@ def register(ctx) -> None:
             "direct messages. Treat replies like regular chat messages: "
             "short and conversational. Markdown is NOT rendered — use plain "
             "text. User identifiers are numeric X user ids; conversation ids "
-            "starting with 'g' are group chats."
+            "starting with 'g' are group chats. You can send files, images, "
+            "voice notes, and videos as encrypted attachments via MEDIA:<path> "
+            "tags; inbound attachments are decrypted locally and available "
+            "to your vision/file tools."
         ),
     )
 

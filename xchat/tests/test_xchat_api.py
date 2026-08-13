@@ -183,3 +183,69 @@ async def test_get_events_requests_documented_fields_and_hyphenates_id():
     requested = set((seen["fields"] or "").split(","))
     assert requested and requested <= _VALID_EVENT_FIELDS
     await api.aclose()
+
+
+@pytest.mark.asyncio
+async def test_media_upload_three_step_flow():
+    import base64 as _b64
+
+    calls: List[Dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        body = _json.loads(request.content) if request.content else {}
+        calls.append({"path": request.url.path, "body": body})
+        if request.url.path == "/2/chat/media/upload/initialize":
+            assert body["conversation_id"] == "111-999"
+            return httpx.Response(
+                200,
+                json={"data": {"session_id": "sess1", "media_hash_key": "mhk9",
+                               "conversation_id": "111-999"}},
+            )
+        return httpx.Response(200, json={"data": {}})
+
+    api = XChatApi("tok", client=_client(handler))
+    blob = b"E" * (3 * 1024)  # 3 chunks at 1KB chunk size
+    out = await api.media_upload("111:999", blob, chunk_size=1024)
+    assert out == "mhk9"
+
+    paths = [c["path"] for c in calls]
+    assert paths[0] == "/2/chat/media/upload/initialize"
+    appends = [c for c in calls if c["path"].endswith("/append")]
+    assert len(appends) == 3
+    assert [a["body"]["segment_index"] for a in appends] == [0, 1, 2]
+    reassembled = b"".join(_b64.b64decode(a["body"]["media"]) for a in appends)
+    assert reassembled == blob
+    assert paths[-1] == "/2/chat/media/upload/sess1/finalize"
+    await api.aclose()
+
+
+@pytest.mark.asyncio
+async def test_media_download_returns_raw_bytes():
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/2/chat/media/111-999/mhk9"
+        return httpx.Response(200, content=b"\x00ciphertext\xff")
+
+    api = XChatApi("tok", client=_client(handler))
+    blob = await api.media_download("111:999", "mhk9")
+    assert blob == b"\x00ciphertext\xff"
+    await api.aclose()
+
+
+@pytest.mark.asyncio
+async def test_mark_read_posts_sequence_id():
+    seen: Dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        seen["path"] = request.url.path
+        seen["body"] = _json.loads(request.content)
+        return httpx.Response(200, json={"data": {}})
+
+    api = XChatApi("tok", client=_client(handler))
+    await api.mark_read("111:999", "sq42")
+    assert seen["path"] == "/2/chat/conversations/111-999/read"
+    assert seen["body"] == {"seen_until_sequence_id": "sq42"}
+    await api.aclose()

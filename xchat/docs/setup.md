@@ -7,7 +7,7 @@
 ## Prerequisites
 
 - An **X developer account** with an app configured for **OAuth 2.0 user context** ([Developer Console](https://developer.x.com/en/portal/dashboard)). X Chat endpoints require API access on your developer plan.
-- A **user access token** for the bot account with scopes: `dm.read`, `dm.write`, `users.read`, `tweet.read` (add `offline.access` to receive a refresh token so Hermes can auto-renew the ~2-hour access token).
+- A **user access token** for the bot account with scopes: `dm.read`, `dm.write`, `users.read`, `tweet.read` (add `offline.access` to receive a refresh token so Hermes can auto-renew the ~2-hour access token, and `media.write` to send encrypted file/image attachments).
 - Python 3.10+ (the `chatxdk` E2EE binding is lazy-installed at first use).
 
 ## Setup
@@ -45,6 +45,7 @@ hermes xchat status
 | `XCHAT_ALLOW_ALL_USERS` | Optional | `true` allows every sender (dev only) |
 | `XCHAT_CONVERSATION_IDS` | Optional | Pin specific conversation ids to poll; omit to auto-discover |
 | `XCHAT_POLL_INTERVAL` | Optional | Seconds between event polls (default `10`, floor `2`) |
+| `XCHAT_SEND_READ_RECEIPTS` | Optional | `true` sends read receipts for processed messages (default `false`) |
 | `XCHAT_REQUIRE_MENTION` | Optional | In group conversations, only respond when a wake word matches (default `false`) |
 | `XCHAT_MENTION_PATTERNS` | Optional | Custom wake-word regexes (JSON list or comma-separated) |
 | `XCHAT_HOME_CHANNEL` | Optional | Default conversation/user id for cron delivery |
@@ -53,8 +54,10 @@ hermes xchat status
 ## How it works
 
 - **Inbound** — the adapter polls each conversation's events endpoint, keeping a **persistent per-conversation cursor** (`~/.hermes/xchat/cursors.json`) of the last processed event. On the very first sight of a conversation it batch-decrypts the backlog (`decrypt_events`) to seed the SDK's verified conversation-key cache **without replying to old messages**; after that every new event (including bursts larger than one page, and messages that arrived while the gateway was down) is processed exactly once. `KeyChange` events (conversation-key rotations) are verified and folded into the key cache automatically; message **edits** are treated as new messages.
-- **Outbound** — replies are encrypted and signed locally (`encrypt_message` with the session identity), then POSTed as ciphertext.
+- **Outbound** — replies are encrypted and signed locally (`encrypt_message` with the session identity), then POSTed as ciphertext. Replies to a specific message use the native threaded-reply event when the target is in the adapter's decrypted-event cache.
+- **Media** — both directions are fully encrypted. Inbound attachments are downloaded, decrypted with the conversation key for the *event's* key version, and cached locally so vision/file tools can read them. Outbound `MEDIA:<path>` files (images, voice notes, videos, documents) are encrypted with the latest conversation key, uploaded through the 3-step chat-media flow, and attached by `media_hash_key` (requires the `media.write` scope).
 - **Senders** — each new sender's public keys are fetched once and pushed into the XDK's signing-key store so their message signatures verify.
+- **New conversations** — standalone sends (`hermes send xchat:<user-id>`, cron delivery) to a bare numeric user id perform the conversation-key handshake automatically: both parties' key bindings are verified, a fresh conversation key is wrapped for each participant, and the key change is POSTed before the first message.
 - **Identity** — user ids are numeric X user ids; conversation ids look like `123-456` (1:1) or `g123…` (group).
 
 ## Authorization
@@ -95,7 +98,6 @@ Standalone delivery opens an ephemeral E2EE session, seeds the conversation key 
 
 ## Limitations
 
-- **Text only for now.** Encrypted media upload/download (the streaming-encrypt flow + `media_hash_key` endpoints) is not wired yet; inbound attachments surface as text-free events and are skipped.
-- **Reply flows only.** The bot answers conversations that exist; initiating a brand-new conversation (which requires a conversation-key handshake) is not supported yet.
 - **Polling latency.** Inbound uses REST polling (default 10s). Webhook / activity-stream delivery may come later.
-- **Access tier.** X Chat API availability depends on your X developer plan.
+- **Group creation.** The bot participates in existing group conversations but does not create new groups or manage membership.
+- **Access tier.** X Chat API availability depends on your X developer plan; media upload additionally requires the `media.write` scope.

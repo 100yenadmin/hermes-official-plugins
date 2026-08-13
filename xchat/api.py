@@ -15,6 +15,7 @@ every use).
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import time
 from typing import Any, Awaitable, Callable, Optional
@@ -279,3 +280,71 @@ class XChatApi:
             f"/2/chat/conversations/{self._conv_path_id(conversation_id)}/keys",
             json_body=body,
         )
+
+    async def mark_read(self, conversation_id: str, seen_until_sequence_id: str) -> None:
+        """POST /2/chat/conversations/{id}/read — read receipt up to a sequence id."""
+        await self._request(
+            "POST",
+            f"/2/chat/conversations/{self._conv_path_id(conversation_id)}/read",
+            json_body={"seen_until_sequence_id": str(seen_until_sequence_id)},
+        )
+
+    # -- media (encrypted attachments) ------------------------------------------
+
+    async def media_upload(
+        self, conversation_id: str, encrypted_blob: bytes, *, chunk_size: int = 1024 * 1024
+    ) -> str:
+        """Three-step encrypted-media upload; returns the ``media_hash_key``.
+
+        initialize → append (base64 JSON segments) → finalize. The size
+        reported to initialize is the ENCRYPTED blob size. Requires the
+        ``media.write`` OAuth scope.
+        """
+        conv = self._conv_path_id(conversation_id)
+        init = await self._request(
+            "POST",
+            "/2/chat/media/upload/initialize",
+            json_body={"conversation_id": conv, "total_bytes": len(encrypted_blob)},
+        )
+        data = init.get("data") or {}
+        session_id = str(data.get("session_id") or "")
+        media_hash_key = str(data.get("media_hash_key") or "")
+        if not session_id or not media_hash_key:
+            raise XChatApiError(500, f"media upload initialize returned no session: {init}")
+
+        for index in range(0, (len(encrypted_blob) + chunk_size - 1) // chunk_size):
+            segment = encrypted_blob[index * chunk_size:(index + 1) * chunk_size]
+            await self._request(
+                "POST",
+                f"/2/chat/media/upload/{session_id}/append",
+                json_body={
+                    "conversation_id": conv,
+                    "media_hash_key": media_hash_key,
+                    "segment_index": index,
+                    "media": base64.b64encode(segment).decode("ascii"),
+                },
+            )
+
+        await self._request(
+            "POST",
+            f"/2/chat/media/upload/{session_id}/finalize",
+            json_body={"conversation_id": conv, "media_hash_key": media_hash_key},
+        )
+        return media_hash_key
+
+    async def media_download(self, conversation_id: str, media_hash_key: str) -> bytes:
+        """GET /2/chat/media/{conversation_id}/{media_hash_key} — encrypted blob."""
+        await self.ensure_token()
+        resp = await self._http().get(
+            f"{self._base_url}/2/chat/media/{self._conv_path_id(conversation_id)}/{media_hash_key}",
+            headers={"Authorization": f"Bearer {self._access_token}"},
+        )
+        if resp.status_code == 401 and self.can_refresh:
+            await self._refresh_access_token()
+            resp = await self._http().get(
+                f"{self._base_url}/2/chat/media/{self._conv_path_id(conversation_id)}/{media_hash_key}",
+                headers={"Authorization": f"Bearer {self._access_token}"},
+            )
+        if resp.status_code >= 300:
+            raise XChatApiError(resp.status_code, resp.text[:300])
+        return resp.content

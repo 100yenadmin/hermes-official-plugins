@@ -37,23 +37,50 @@ class FakeCrypto:
         self.signing_keys: List[Dict[str, str]] = []
         self.decrypt_map: Dict[str, Dict[str, Any]] = {}
         self.fail_encrypt: Optional[Exception] = None
+        self.replies: List[tuple] = []
+        self.media_encrypted: List[bytes] = []
+        self.media_decrypted: List[bytes] = []
 
     def decrypt_one(self, event_b64, conversation_keys=None):
         return self.decrypt_map[event_b64]
 
     def decrypt_batch(self, events_b64):
         self.batch_calls.append(list(events_b64))
-        return {"messages": [], "conversation_keys": {"keys": {"1": b"k"}}, "errors": {}}
+        return {
+            "messages": [],
+            "conversation_keys": {"keys": {"1": b"k"}},
+            "latest_key_version": "1",
+            "errors": {},
+        }
 
-    def encrypt_text(self, conversation_id, text):
+    def encrypt_text(self, conversation_id, text, *, attachments=None, **kw):
         if self.fail_encrypt is not None:
             raise self.fail_encrypt
-        self.encrypted.append((conversation_id, text))
+        self.encrypted.append((conversation_id, text, attachments))
         return {
             "message_id": "mid-1",
             "encoded_message_create_event": "ZW5j",
             "encoded_message_event_signature": "c2ln",
         }
+
+    def encrypt_reply(self, conversation_id, text, reply_to_event, *, attachments=None):
+        if self.fail_encrypt is not None:
+            raise self.fail_encrypt
+        self.replies.append((conversation_id, text, reply_to_event, attachments))
+        return {
+            "message_id": "mid-r",
+            "encoded_message_create_event": "cmVw",
+            "encoded_message_event_signature": "c2ln",
+        }
+
+    def encrypt_media(self, plaintext, conversation_key):
+        self.media_encrypted.append(bytes(plaintext))
+        return b"ENC" + bytes(plaintext)
+
+    def decrypt_media(self, ciphertext, conversation_key):
+        self.media_decrypted.append(bytes(ciphertext))
+        assert bytes(ciphertext).startswith(b"ENC")
+        return bytes(ciphertext)[3:]
 
     def set_signing_keys(self, keys):
         self.signing_keys = list(keys)
@@ -65,6 +92,10 @@ class FakeApi:
     def __init__(self) -> None:
         self.sent: List[tuple] = []
         self.typing: List[str] = []
+        self.reads: List[tuple] = []
+        self.uploads: List[tuple] = []
+        self.key_changes: List[tuple] = []
+        self.media_blobs: Dict[str, bytes] = {}
         self.public_keys: Dict[str, List[Dict[str, Any]]] = {}
         self.events_pages: Dict[str, Dict[str, Any]] = {}
         # Optional multi-page feed: {conv_id: {pagination_token_or_None: page}}
@@ -96,6 +127,20 @@ class FakeApi:
 
     async def send_typing(self, conversation_id):
         self.typing.append(conversation_id)
+
+    async def mark_read(self, conversation_id, seen_until_sequence_id):
+        self.reads.append((conversation_id, seen_until_sequence_id))
+
+    async def media_upload(self, conversation_id, encrypted_blob, *, chunk_size=1024 * 1024):
+        self.uploads.append((conversation_id, bytes(encrypted_blob)))
+        return f"mhk-{len(self.uploads)}"
+
+    async def media_download(self, conversation_id, media_hash_key):
+        return self.media_blobs[media_hash_key]
+
+    async def add_conversation_keys(self, conversation_id, body):
+        self.key_changes.append((conversation_id, body))
+        return {"data": {"conversation_id": "111:999", "sequence_id": "sq1"}}
 
     async def aclose(self):
         pass
@@ -496,7 +541,7 @@ async def test_send_encrypts_and_posts(monkeypatch):
     result = await adapter.send("111:999", "hi there")
     assert result.success
     assert result.message_id == "mid-1"
-    assert crypto.encrypted == [("111:999", "hi there")]
+    assert crypto.encrypted == [("111:999", "hi there", None)]
     conv, body = api.sent[0]
     assert conv == "111:999"
     assert body["encoded_message_create_event"] == "ZW5j"
@@ -685,7 +730,7 @@ class StrictCrypto:
             "errors": {},
         }
 
-    def encrypt_text(self, conversation_id, text):
+    def encrypt_text(self, conversation_id, text, *, attachments=None, **kw):
         if not self.keys_seeded:
             raise ValueError("no verified conversation key")
         self.encrypted.append((conversation_id, text))
@@ -753,3 +798,262 @@ async def test_standalone_send_no_key_without_signing_roster(monkeypatch):
     cfg = PlatformConfig(enabled=True, extra={})
     out = await xchat_adapter._standalone_send(cfg, "111-999", "hello")
     assert "no verified conversation key" in out.get("error", "")
+
+
+# ---------------------------------------------------------------------------
+# Media, replies, read receipts, key-events meta
+
+
+@pytest.mark.asyncio
+async def test_inbound_attachment_downloaded_and_decrypted(monkeypatch, tmp_path):
+    """Encrypted inbound media is downloaded, decrypted with the event's
+    key version, cached locally, and surfaced on the MessageEvent."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    adapter = _make_adapter(monkeypatch)
+    api, crypto = _wire(adapter)
+    captured = _capture(adapter, monkeypatch)
+    adapter._cursors["111-999"] = "e1"
+    adapter._conversation_keys["111-999"] = {"1": b"k"}
+    adapter._latest_key_version["111-999"] = "1"
+
+    # PNG magic so mime sniffing (real chatxdk helper unavailable → fallback)
+    png = b"\x89PNG\r\n\x1a\n" + b"0" * 32
+    api.media_blobs["mhk-img"] = b"ENC" + png
+    crypto.decrypt_map["MED"] = {
+        "type": "Message",
+        "id": "e9",
+        "sender_id": "111",
+        "conversation_id": "111:999",
+        "key_version": "1",
+        "content": {
+            "text": "look at this",
+            "attachments": [{"media_hash_key": "mhk-img", "filename": "photo.png"}],
+        },
+    }
+    api.events_pages["111-999"] = {
+        "data": [{"id": "e9", "encoded_event": "MED", "sender_id": "111"}]
+    }
+    # detect_mime_type needs the native SDK — stub it.
+    monkeypatch.setattr(xchat_adapter, "detect_mime_type", lambda b: "image/png")
+
+    await adapter._poll_conversation("111-999")
+
+    assert len(captured) == 1
+    ev = captured[0]
+    assert ev.text == "look at this"
+    assert len(ev.media_urls) == 1
+    assert ev.media_types == ["image/png"]
+    from pathlib import Path as _P
+
+    assert _P(ev.media_urls[0]).read_bytes() == png
+    assert crypto.media_decrypted == [b"ENC" + png]
+
+
+@pytest.mark.asyncio
+async def test_outbound_media_encrypt_upload_attach(monkeypatch, tmp_path):
+    adapter = _make_adapter(monkeypatch)
+    api, crypto = _wire(adapter)
+    adapter._conversation_keys["111:999"] = {"2": b"k2"}
+    adapter._latest_key_version["111:999"] = "2"
+
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF-fake")
+    monkeypatch.setattr(xchat_adapter, "detect_image_dimensions", lambda b: None)
+
+    result = await adapter.send_document("111:999", str(f))
+    assert result.success, result.error
+    # Encrypted before upload...
+    assert crypto.media_encrypted == [b"%PDF-fake"]
+    assert api.uploads and api.uploads[0][1] == b"ENC%PDF-fake"
+    # ...and the send body carried the attachment descriptor.
+    conv, text, attachments = crypto.encrypted[0]
+    assert attachments and attachments[0]["media_hash_key"] == "mhk-1"
+    assert attachments[0]["filename"] == "doc.pdf"
+
+
+@pytest.mark.asyncio
+async def test_outbound_media_without_key_fails_cleanly(monkeypatch, tmp_path):
+    adapter = _make_adapter(monkeypatch)
+    _wire(adapter)
+    f = tmp_path / "a.png"
+    f.write_bytes(b"x")
+    result = await adapter.send_image("111:999", str(f))
+    assert not result.success
+    assert "conversation key" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_native_threaded_reply_uses_cached_event(monkeypatch):
+    adapter = _make_adapter(monkeypatch)
+    api, crypto = _wire(adapter)
+    target = {"type": "Message", "id": "e5", "sender_id": "111", "content": {"text": "orig"}}
+    adapter._cache_event("111:999", "e5", target)
+
+    result = await adapter.send("111:999", "threaded answer", reply_to="e5")
+    assert result.success
+    assert crypto.replies == [("111:999", "threaded answer", target, None)]
+    assert crypto.encrypted == []  # took the reply path, not plain encrypt
+
+    # Unknown reply target falls back to a plain send.
+    result = await adapter.send("111:999", "plain", reply_to="nope")
+    assert result.success
+    assert crypto.encrypted == [("111:999", "plain", None)]
+
+
+@pytest.mark.asyncio
+async def test_meta_key_events_absorbed_before_messages(monkeypatch):
+    """KeyChange events arrive in meta.conversation_key_events — they must
+    seed the key cache before this poll's messages are decrypted."""
+    adapter = _make_adapter(monkeypatch)
+    api, crypto = _wire(adapter)
+    captured = _capture(adapter, monkeypatch)
+    adapter._cursors["111-999"] = "e1"
+
+    crypto.decrypt_map["MSG"] = {
+        "type": "Message",
+        "id": "e2",
+        "sender_id": "111",
+        "conversation_id": "111:999",
+        "content": {"text": "post-rotation"},
+    }
+    api.events_pages["111-999"] = {
+        "data": [{"id": "e2", "encoded_event": "MSG", "sender_id": "111"}],
+        "meta": {"conversation_key_events": ["KEYCHG"]},
+    }
+    await adapter._poll_conversation("111-999")
+
+    assert crypto.batch_calls == [["KEYCHG"]]
+    assert adapter._conversation_keys["111-999"] == {"1": b"k"}
+    assert adapter._latest_key_version["111-999"] == "1"
+    assert [ev.text for ev in captured] == ["post-rotation"]
+
+
+@pytest.mark.asyncio
+async def test_read_receipts_opt_in(monkeypatch):
+    adapter = _make_adapter(monkeypatch)
+    api, crypto = _wire(adapter)
+    _capture(adapter, monkeypatch)
+    adapter._cursors["111-999"] = "e1"
+    crypto.decrypt_map["CCC"] = {
+        "type": "Message",
+        "id": "e3",
+        "sender_id": "111",
+        "conversation_id": "111:999",
+        "content": {"text": "hi"},
+    }
+    api.events_pages["111-999"] = {
+        "data": [{"id": "e3", "encoded_event": "CCC", "sender_id": "111", "sequence_id": "sq3"}]
+    }
+
+    # Default: off.
+    await adapter._poll_conversation("111-999")
+    assert api.reads == []
+
+    # Opt in.
+    adapter2 = _make_adapter(monkeypatch, send_read_receipts=True)
+    api2, crypto2 = _wire(adapter2)
+    _capture(adapter2, monkeypatch)
+    adapter2._cursors["111-888"] = "e1"
+    crypto2.decrypt_map["CCC"] = crypto.decrypt_map["CCC"]
+    api2.events_pages["111-888"] = api.events_pages["111-999"]
+    await adapter2._poll_conversation("111-888")
+    assert api2.reads == [("111-888", "sq3")]
+
+
+@pytest.mark.asyncio
+async def test_inbound_reply_context_propagates(monkeypatch):
+    adapter = _make_adapter(monkeypatch)
+    api, crypto = _wire(adapter)
+    captured = _capture(adapter, monkeypatch)
+    adapter._cursors["111-999"] = "e1"
+    crypto.decrypt_map["RPL"] = {
+        "type": "Message",
+        "id": "e7",
+        "sender_id": "111",
+        "conversation_id": "111:999",
+        "content": {"text": "and this one?"},
+        "reply_to": {"id": "e4", "sender_id": "999", "text": "earlier bot answer"},
+    }
+    api.events_pages["111-999"] = {
+        "data": [{"id": "e7", "encoded_event": "RPL", "sender_id": "111"}]
+    }
+    await adapter._poll_conversation("111-999")
+
+    ev = captured[0]
+    assert ev.reply_to_message_id == "e4"
+    assert ev.reply_to_text == "earlier bot answer"
+    assert ev.reply_to_is_own_message is True
+
+
+@pytest.mark.asyncio
+async def test_standalone_new_conversation_handshake(monkeypatch):
+    """Standalone send to a bare user id with no existing conversation
+    performs the verified key handshake, then sends under the fresh key."""
+    monkeypatch.setenv("XCHAT_ACCESS_TOKEN", "tok")
+    monkeypatch.setenv("XCHAT_PRIVATE_KEYS_B64", "YmxvYg==")
+    monkeypatch.setenv("XCHAT_USER_ID", "999")
+
+    api = FakeApi()
+    api.public_keys["999"] = [
+        {"public_key_version": "1", "public_key": "BOT-IPK",
+         "signing_public_key": "BOT-SPK", "identity_public_key_signature": "BOT-SIG"}
+    ]
+    api.public_keys["111"] = [
+        {"public_key_version": "2", "public_key": "USR-IPK",
+         "signing_public_key": "USR-SPK", "identity_public_key_signature": "USR-SIG"}
+    ]
+
+    class HandshakeCrypto(FakeCrypto):
+        def __init__(self):
+            super().__init__()
+            self.bindings: List[tuple] = []
+            self.prepared = False
+            self.explicit_key_used = None
+
+        def load_keys(self, blob, version="1"):
+            pass
+
+        def set_identity(self, user_id):
+            pass
+
+        def set_cache_keys(self, enabled=True):
+            pass
+
+        def verify_key_binding(self, ipk, spk, sig):
+            self.bindings.append((ipk, spk, sig))
+            return True
+
+        def prepare_conversation_key_change(self, public_keys, *, conversation_id=None):
+            self.prepared = True
+            return {
+                "body": {"conversation_key_version": "1",
+                         "conversation_participant_keys": [], "action_signatures": []},
+                "conversation_key": b"fresh-key",
+                "conversation_key_version": "1",
+            }
+
+        def encrypt_text(self, conversation_id, text, *, attachments=None,
+                         conversation_key=None, conversation_key_version=None):
+            if conversation_key is None:
+                raise ValueError("no verified conversation key")
+            self.explicit_key_used = conversation_key
+            return {
+                "message_id": "mid-new",
+                "encoded_message_create_event": "bmV3",
+                "encoded_message_event_signature": "c2ln",
+            }
+
+    crypto = HandshakeCrypto()
+    monkeypatch.setattr(xchat_adapter, "XChatApi", lambda *a, **kw: api)
+    monkeypatch.setattr(xchat_adapter, "XChatCrypto", lambda: crypto)
+
+    cfg = PlatformConfig(enabled=True, extra={})
+    out = await xchat_adapter._standalone_send(cfg, "111", "hello new friend")
+
+    assert out.get("success") is True, out
+    # Both parties' bindings verified, key change POSTed, canonical id adopted.
+    assert len(crypto.bindings) == 2
+    assert crypto.prepared
+    assert api.key_changes and api.key_changes[0][0] == "111"
+    assert crypto.explicit_key_used == b"fresh-key"
+    assert out["chat_id"] == "111:999"

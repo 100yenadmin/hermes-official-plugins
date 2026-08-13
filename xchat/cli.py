@@ -178,7 +178,8 @@ def cmd_setup(*, force: bool) -> int:
     print(
         "You need an X developer app with OAuth 2.0 user-context enabled and a\n"
         "user access token carrying: dm.read dm.write users.read tweet.read\n"
-        "(offline.access too if you want refresh tokens).\n"
+        "(offline.access too if you want refresh tokens; media.write to send\n"
+        "encrypted attachments).\n"
         "Docs: https://docs.x.com/xchat/getting-started\n"
     )
 
