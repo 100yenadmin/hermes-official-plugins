@@ -27,6 +27,38 @@ def _plain(block):
     return {k: v for k, v in block.items() if k != 'cache_control'} if isinstance(block, dict) else block
 
 
+def _frame_first(messages, queried):
+    """Put Hermes' first user turn ahead of the context native prepends to it (#77).
+
+    On the opening request native puts its per-request context block (the account-email
+    reminder) *before* the frame Hermes queried; on every later request that turn is replayed
+    without it. Nothing of the first turn therefore recurs, and call #2 re-writes the whole of
+    it, which is most of a cron run whose first turn carries a source pack. On later turns
+    native already appends its context after the host content. Moving the prepended text
+    blocks behind the frame uses that same order for the first turn: no block is added,
+    dropped or edited, and the frame becomes a prefix the next request replays byte-identically.
+
+    Only the conversation's first turn is touched (no assistant message yet), only when the
+    queried frame occurs exactly once, and only when everything before it is plain text.
+    Returns whether the order changed."""
+    if any(m.get('role') == 'assistant' for m in messages):
+        return False
+    first = next((m for m in messages if m.get('role') == 'user'), {})
+    content = first.get('content')
+    if not isinstance(content, list) or not queried or len(content) <= len(queried):
+        return False
+    want = [_plain(b) for b in queried]
+    starts = [k for k in range(len(content) - len(queried) + 1)
+              if [_plain(b) for b in content[k:k + len(queried)]] == want]
+    if len(starts) != 1 or starts[0] == 0:
+        return False
+    k = starts[0]
+    if not all(isinstance(b, dict) and b.get('type') == 'text' for b in content[:k]):
+        return False
+    first['content'] = content[k:k + len(queried)] + content[:k] + content[k + len(queried):]
+    return True
+
+
 def pin_message_breakpoint(payload, queried):
     """Keep the single message ``cache_control`` on content the next request replays unchanged.
 
@@ -48,6 +80,7 @@ def pin_message_breakpoint(payload, queried):
     try:
         body = json.loads(payload)
         messages = body['messages']
+        reordered = _frame_first(messages, queried)
         blocks = [(i, j, b) for i, m in enumerate(messages) if isinstance(m.get('content'), list)
                   for j, b in enumerate(m['content'])]
         marked = [(i, j, b) for i, j, b in blocks if isinstance(b, dict) and 'cache_control' in b]
@@ -68,9 +101,10 @@ def pin_message_breakpoint(payload, queried):
         target = next(((i, j, b) for i, j, b in reversed(stable)
                        if isinstance(b, dict) and b.get('type') not in UNCACHEABLE), None)
         i, j, block = marked[0]
-        if target is None or (target[0], target[1]) >= (i, j):
+        if target is not None and (target[0], target[1]) < (i, j):
+            target[2]['cache_control'] = block.pop('cache_control')
+        elif not reordered:
             return payload
-        target[2]['cache_control'] = block.pop('cache_control')
         return json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         return payload
