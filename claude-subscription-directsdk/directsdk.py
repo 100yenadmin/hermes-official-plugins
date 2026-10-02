@@ -63,6 +63,20 @@ NATIVE_ERROR_STATUS = {
 
 CARRIER = 'claude-subscription-directsdk-experimental.native_assistant'
 PREFIX = 'mcp__hermes__'
+# Claude reads Hermes' skills index at the top of a long prompt and, deep into a session or
+# after compaction, stops consulting it. Restating the rule next to the new user turn restores
+# skill loading (live A/B in the PR). It rides after the relay's cache breakpoint like native's
+# own per-request context and is never part of Hermes history.
+SKILLS_REMINDER = ('<system-reminder>Before replying, scan the available skills in your instructions. '
+                   'If one matches or is even partially relevant to this message, load it with '
+                   'skill_view(name) first.</system-reminder>')
+
+
+def skills_reminder(frame, names):
+    """The block to append to the queried frame: only a fresh user turn, only when skills are loadable."""
+    if 'skill_view' not in names or any(b.get('type') == 'tool_result' for b in frame['message']['content']):
+        return None
+    return {'type': 'text', 'text': SKILLS_REMINDER}
 
 
 class Object(SimpleNamespace):
@@ -665,10 +679,14 @@ class Client:
                             raise RuntimeError('Invalid native stream-json output: ' + repr((getattr(event, 'doc', None) or str(event))[:300])) from event
                         deadline = time.monotonic() + timeout
                         return event
+                reminder = skills_reminder(frames[-1], names)
                 for index, frame in enumerate(frames):
                     frame = copy.deepcopy(frame)
                     if frame['type'] == 'user' and index < len(frames) - 1:
                         frame['shouldQuery'] = False
+                    elif reminder and index == len(frames) - 1:
+                        # Admission was handed the frame without it, so the cache breakpoint stays on host content.
+                        frame['message']['content'].append(reminder)
                     p.stdin.write(json.dumps(frame, allow_nan=False) + '\n')
                     p.stdin.flush()
                     if frame.get('shouldQuery') is False:
