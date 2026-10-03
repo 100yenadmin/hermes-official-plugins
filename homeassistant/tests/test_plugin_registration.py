@@ -29,6 +29,15 @@ class RecordingCtx:
         self.tools.append(kwargs)
 
 
+_REAL_CORE_SHIPS_HA = homeassistant_plugin._core_ships_home_assistant
+
+
+@pytest.fixture(autouse=True)
+def _core_without_bundled_ha(monkeypatch):
+    """Exercise the wiring as on a core that dropped HA, whichever core the suite runs against."""
+    monkeypatch.setattr(homeassistant_plugin, "_core_ships_home_assistant", lambda: False)
+
+
 @pytest.fixture
 def ctx():
     c = RecordingCtx()
@@ -108,6 +117,22 @@ class TestPlatformRegistration:
         kw = c.platforms[0]
         assert not (NEW_ENTRY_KWARGS & set(kw))
         older(source="plugin", **kw)  # an older core would not raise TypeError
+
+
+class TestCoreStillBundlesHomeAssistant:
+    def test_registers_nothing_when_core_ships_home_assistant(self, monkeypatch, tmp_path, caplog):
+        """On a core that still bundles HA (``tools/homeassistant_tool.py``), loading the plugin too would
+        shadow core's ha_* tools and replace core's platform adapter; it must stay inert instead."""
+        import tools as core_tools
+
+        monkeypatch.setattr(homeassistant_plugin, "_core_ships_home_assistant", _REAL_CORE_SHIPS_HA)
+        (tmp_path / "homeassistant_tool.py").write_text("")
+        monkeypatch.setattr(core_tools, "__path__", [*core_tools.__path__, str(tmp_path)])
+        c = RecordingCtx()
+        with caplog.at_level("INFO"):
+            homeassistant_plugin.register(c)
+        assert (c.platforms, c.tools) == ([], [])
+        assert any("still ships Home Assistant" in r.getMessage() for r in caplog.records)
 
 
 class TestToolRegistration:

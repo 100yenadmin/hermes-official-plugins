@@ -12,6 +12,7 @@ Wiring goes only through the public plugin API (``ctx.register_platform`` / ``ct
 from __future__ import annotations
 
 import dataclasses
+import importlib.machinery
 import logging
 from typing import Any, Dict
 
@@ -79,8 +80,29 @@ def _platform_kwargs() -> Dict[str, Any]:
     return kwargs
 
 
+def _core_ships_home_assistant() -> bool:
+    """True on a Hermes core that still bundles Home Assistant (``tools/homeassistant_tool.py``, removed
+    together with ``plugins/platforms/homeassistant`` when core dropped it).
+
+    Looks only inside the imported ``tools`` package's own ``__path__``: a plain ``find_spec`` also
+    consults meta-path finders (e.g. an editable install of a different checkout) and can report a
+    module the running core does not have."""
+    try:
+        import tools as core_tools
+        search = list(getattr(core_tools, "__path__", None) or ())
+        return bool(search) and importlib.machinery.PathFinder.find_spec(
+            "tools.homeassistant_tool", search) is not None
+    except ImportError:
+        return False
+
+
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin loader."""
+    if _core_ships_home_assistant():
+        # Registering on top of the built-in would shadow core's ha_* tools and replace its adapter.
+        logger.info("homeassistant: this Hermes core still ships Home Assistant built in; "
+                    "the plugin stays inactive until core drops it")
+        return
     ctx.register_platform(**_platform_kwargs())
     register_tools(ctx)
 
