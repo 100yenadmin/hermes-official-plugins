@@ -24,10 +24,12 @@ from types import SimpleNamespace
 
 try:
     from .admission import Admission
+    from .pruned_skills import pruned_skills
     from .model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from .directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, _resolve as resolve_claude, apply_traffic_policy
 except ImportError:
     from admission import Admission
+    from pruned_skills import pruned_skills
     from model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, _resolve as resolve_claude, apply_traffic_policy
 
@@ -67,16 +69,25 @@ PREFIX = 'mcp__hermes__'
 # after compaction, stops consulting it. Restating the rule next to the new user turn restores
 # skill loading (live A/B in the PR). It rides after the relay's cache breakpoint like native's
 # own per-request context and is never part of Hermes history.
-SKILLS_REMINDER = ('<system-reminder>Before replying, scan the available skills in your instructions. '
-                   'If one matches or is even partially relevant to this message, load it with '
-                   'skill_view(name) first.</system-reminder>')
+REMINDER = ('<system-reminder>Before replying, scan the available skills in your instructions. '
+            'If one matches or is even partially relevant to this message, load it with '
+            'skill_view(name) first.{}</system-reminder>')
+SKILLS_REMINDER = REMINDER.format('')
+# Compaction swaps a loaded skill's text for a stub, and Claude goes on as if it were still loaded;
+# the generic rule above does not contradict that, naming the skill does.
+PRUNED_SKILLS = (' Compaction removed the full text of these previously loaded skills: {}. If any still '
+                 'applies to this conversation, reload it with skill_view(name) before replying.')
 
 
-def skills_reminder(frame, names):
+def skills_reminder(frames, names):
     """The block to append to the queried frame: only a fresh user turn, only when skills are loadable."""
-    if 'skill_view' not in names or any(b.get('type') == 'tool_result' for b in frame['message']['content']):
+    if 'skill_view' not in names or any(b.get('type') == 'tool_result' for b in frames[-1]['message']['content']):
         return None
-    return {'type': 'text', 'text': SKILLS_REMINDER}
+    pruned, more = pruned_skills(frames, PREFIX + 'skill_view')
+    if not pruned:
+        return {'type': 'text', 'text': SKILLS_REMINDER}
+    listed = ', '.join(pruned) + (f', and {more} more' if more else '')
+    return {'type': 'text', 'text': REMINDER.format(PRUNED_SKILLS.format(listed))}
 
 
 class Object(SimpleNamespace):
@@ -679,7 +690,7 @@ class Client:
                             raise RuntimeError('Invalid native stream-json output: ' + repr((getattr(event, 'doc', None) or str(event))[:300])) from event
                         deadline = time.monotonic() + timeout
                         return event
-                reminder = skills_reminder(frames[-1], names)
+                reminder = skills_reminder(frames, names)
                 for index, frame in enumerate(frames):
                     frame = copy.deepcopy(frame)
                     if frame['type'] == 'user' and index < len(frames) - 1:

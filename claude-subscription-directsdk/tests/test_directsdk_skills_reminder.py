@@ -31,7 +31,7 @@ def tool(name):
     return {'type': 'function', 'function': {'name': name, 'description': name, 'parameters': {'type': 'object', 'properties': {}}}}
 
 
-def sent(tmp_path, messages, tools):
+def rows(tmp_path, messages, tools):
     script, capture = tmp_path / 'native.py', tmp_path / 'rows.json'
     script.write_text(NATIVE)
     client = directsdk.Client(command=[sys.executable, str(script)], env={'PATH': os.defpath, 'HOME': str(tmp_path), 'ROWS_CAPTURE': str(capture)})
@@ -41,7 +41,11 @@ def sent(tmp_path, messages, tools):
     finally:
         client.close()
     assert messages == original, 'caller history mutated'
-    return json.loads(capture.read_text())[-1]['message']['content']
+    return json.loads(capture.read_text())
+
+
+def sent(tmp_path, messages, tools):
+    return rows(tmp_path, messages, tools)[-1]['message']['content']
 
 
 def test_fresh_user_turn_carries_the_reminder_after_host_content(tmp_path):
@@ -67,3 +71,47 @@ def test_cache_breakpoint_stays_on_host_content_not_the_reminder():
     pinned = json.loads(pin_message_breakpoint(json.dumps(wire).encode(), [host]))
     newest = pinned['messages'][-1]['content']
     assert 'cache_control' in newest[0] and 'cache_control' not in newest[1]
+
+
+def view(id_, name):
+    return {'role': 'assistant', 'content': '', 'tool_calls': [{'id': id_, 'type': 'function', 'function': {'name': 'skill_view', 'arguments': json.dumps({'name': name})}}]}
+
+
+PRUNED = [{'role': 'user', 'content': 'load brand-voice'}, view('v1', 'creative/brand-voice'),
+          {'role': 'tool', 'tool_call_id': 'v1', 'content': "[skill_view] name=creative/brand-voice (12,745 chars) "
+           "[SKILL_PRUNED: content lost in compression; reload with skill_view(name='creative/brand-voice')]"},
+          {'role': 'assistant', 'content': "[PRIOR CONTEXT: summary]\n## Pruned Skills\n"
+           "[SKILL_PRUNED: content lost in compression; reload with skill_view(name='social-posting')]"}]
+NAMED = ('<system-reminder>Before replying, scan the available skills in your instructions. If one matches or is even '
+         'partially relevant to this message, load it with skill_view(name) first. Compaction removed the full text of '
+         'these previously loaded skills: creative/brand-voice, social-posting. If any still applies to this '
+         'conversation, reload it with skill_view(name) before replying.</system-reminder>')
+
+
+def test_compaction_pruned_skills_are_named_until_reloaded(tmp_path):
+    question = {'role': 'user', 'content': 'draft the X post'}
+    tools = [tool('terminal'), tool('skill_view')]
+    sent_rows = rows(tmp_path, PRUNED + [question], tools)
+    assert sent_rows[-1]['message']['content'] == [{'type': 'text', 'text': 'draft the X post'}, {'type': 'text', 'text': NAMED}]
+    # Only the queried frame carries it: every replayed frame is exactly what Hermes' history converts to.
+    replayed = [row['message']['content'] for row in sent_rows[:-1]]
+    assert replayed == [frame['message']['content'] for frame in directsdk.prepare_history(PRUNED + [question])[1][:-1]]
+
+    reloaded = PRUNED + [view('v2', 'creative/brand-voice'),
+                         {'role': 'tool', 'tool_call_id': 'v2', 'content': json.dumps({'success': True, 'name': 'brand-voice', 'content': 'body'})},
+                         {'role': 'assistant', 'content': 'loaded'}, question]
+    assert sent(tmp_path, reloaded, tools)[1]['text'] == NAMED.replace('creative/brand-voice, ', '')
+
+    # The PR #89 gates still hold with markers in history.
+    assert sent(tmp_path, PRUNED + [question], [tool('terminal')]) == [{'type': 'text', 'text': 'draft the X post'}]
+    round_ = PRUNED + [question, view('v3', 'brand-voice'), {'role': 'tool', 'tool_call_id': 'v3', 'content': 'out'}]
+    assert [b['type'] for b in sent(tmp_path, round_, tools)] == ['tool_result']
+
+
+def test_reminder_text_without_and_beyond_the_name_cap():
+    def reminder(body):
+        frames = [{'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'text', 'text': body}]}}]
+        return directsdk.skills_reminder(frames, {'skill_view'})['text']
+    assert reminder('hi') == directsdk.SKILLS_REMINDER
+    markers = ''.join(f"[SKILL_PRUNED: content lost in compression; reload with skill_view(name='s{i}')]" for i in range(10))
+    assert 'skills: s2, s3, s4, s5, s6, s7, s8, s9, and 2 more. If any' in reminder(markers)
