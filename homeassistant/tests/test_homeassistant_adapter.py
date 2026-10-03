@@ -339,3 +339,62 @@ class TestLocalNetworkConnectHint:
         detail = _connect_error_detail(err)
         assert detail.startswith(str(err))
         assert len(detail) > len(str(err))  # a remedy hint is appended
+
+
+# ---------------------------------------------------------------------------
+# Multiplex profiles: the URL resolves through the same scope as the token
+# ---------------------------------------------------------------------------
+
+
+class TestMultiplexEndpointScope:
+    """Under ``gateway.multiplex_profiles`` os.environ holds the DEFAULT profile; a secondary profile's
+    HASS_TOKEN must never be posted to the default profile's HASS_URL.
+
+    Moved from hermes-agent core ``tests/gateway/test_multiplex_endpoint_identity_scope.py``."""
+
+    DEFAULT = {"HASS_URL": "http://default-ha.example:8123", "HASS_TOKEN": "default-ha-token"}
+    SECONDARY = {"HASS_URL": "http://bot2-ha.example:8123", "HASS_TOKEN": "bot2-ha-token"}
+
+    @pytest.fixture
+    def secondary_scope(self, monkeypatch):
+        from agent import secret_scope as ss
+
+        for key, value in self.DEFAULT.items():
+            monkeypatch.setenv(key, value)
+        ss.set_multiplex_active(True)
+        token = ss.set_secret_scope(self.SECONDARY)
+        yield
+        ss.reset_secret_scope(token)
+        ss.set_multiplex_active(False)
+
+    def test_adapter_url_follows_the_scoped_token(self, secondary_scope):
+        adapter = HomeAssistantAdapter(PlatformConfig(enabled=True))
+        assert (adapter._hass_url, adapter._hass_token) == (
+            self.SECONDARY["HASS_URL"], self.SECONDARY["HASS_TOKEN"])
+
+    @pytest.mark.asyncio
+    async def test_standalone_send_targets_scoped_url(self, secondary_scope, monkeypatch):
+        import aiohttp
+        from homeassistant_plugin import adapter as ha
+
+        seen = {}
+
+        class _Resp:
+            status = 200
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            async def text(self): return ""
+
+        class _Sess:
+            def __init__(self, *a, **k): pass
+            async def __aenter__(self): return self
+            async def __aexit__(self, *a): return False
+            def post(self, url, **kw):
+                seen["url"], seen["auth"] = url, kw["headers"]["Authorization"]
+                return _Resp()
+
+        monkeypatch.setattr(aiohttp, "ClientSession", _Sess)
+        result = await ha._standalone_send(PlatformConfig(enabled=True), "x", "hi")
+        assert result["success"] is True
+        assert seen["url"].startswith(self.SECONDARY["HASS_URL"] + "/")
+        assert self.SECONDARY["HASS_TOKEN"] in seen["auth"]

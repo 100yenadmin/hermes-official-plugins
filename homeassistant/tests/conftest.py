@@ -20,6 +20,10 @@ import pytest
 PACKAGE = "homeassistant_plugin"
 _ROOT = Path(__file__).resolve().parents[1]
 
+# ``python -m pytest`` from the repo root puts the root on sys.path, where this plugin's ``tools.py``
+# would shadow core's ``tools`` package when core is imported below.
+sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != _ROOT]
+
 
 def _load_plugin_package():
     if PACKAGE in sys.modules:
