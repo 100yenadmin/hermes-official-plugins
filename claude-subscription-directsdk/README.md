@@ -98,7 +98,7 @@ Read on every native spawn, including auth-status and model-discovery probes. Pr
 hermes config set plugins.entries.claude-subscription-directsdk-experimental.settings.claude_code_telemetry false
 ```
 
-It is read for the active profile on every spawn, so it applies to the next request without a restart. Whatever the setting, the plugin never lets the CLI auto-update itself or use its feedback upload path (`DISABLE_AUTOUPDATER`, `DISABLE_FEEDBACK_COMMAND`), and an opt-out you export yourself (`DISABLE_TELEMETRY`, `DO_NOT_TRACK`, ...) is passed through untouched.
+It is read for the active profile on every spawn, so it applies to the next request without a restart. Whatever the setting, the plugin never lets the CLI auto-update itself, use its feedback upload path or send its own session-title request (`DISABLE_AUTOUPDATER`, `DISABLE_FEEDBACK_COMMAND`, `CLAUDE_CODE_DISABLE_TERMINAL_TITLE`), and an opt-out you export yourself (`DISABLE_TELEMETRY`, `DO_NOT_TRACK`, ...) is passed through untouched.
 
 ## Ownership and replay
 
