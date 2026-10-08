@@ -60,8 +60,10 @@ QUIET_TRAFFIC = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEM
 # Never wanted from a child the plugin starts, setting or not: a background self-update of the
 # user's CLI mid-session, and the feedback path (/feedback, /bug, /share, Claude-drafted feedback)
 # that uploads a session to Anthropic. Neither gates feature flags. DISABLE_FEEDBACK_COMMAND is the
-# current name of DISABLE_BUG_COMMAND, which the CLI still accepts.
-ALWAYS_QUIET = {"DISABLE_AUTOUPDATER": "1", "DISABLE_FEEDBACK_COMMAND": "1"}
+# current name of DISABLE_BUG_COMMAND, which the CLI still accepts. CLAUDE_CODE_DISABLE_TERMINAL_TITLE
+# also stops native's own session-title request (#116): under an inherited Agent SDK or non-CLI
+# entrypoint, or a server flag, it races the turn for the one upstream request the relay admits.
+ALWAYS_QUIET = {"DISABLE_AUTOUPDATER": "1", "DISABLE_FEEDBACK_COMMAND": "1", "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"}
 _OFF = ("false", "0", "no", "off")
 
 
