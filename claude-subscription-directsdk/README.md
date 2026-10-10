@@ -1,5 +1,7 @@
 # Claude Subscription DirectSDK (Experimental) — Hermes plugin
 
+> Part of [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent. Formerly [`NousResearch/hermes-plugin-claude-subscription-directsdk`](https://github.com/NousResearch/hermes-plugin-claude-subscription-directsdk), which is archived; this directory carries its full history.
+
 ![Claude Subscription DirectSDK — a Hermes model-provider plugin: Hermes → claude CLI → stream-json, on your Claude Pro/Max subscription](assets/hero-technohellenic.png)
 
 Standalone Hermes Agent model-provider plugin: `claude-subscription-directsdk-experimental`, displayed as **Claude Subscription DirectSDK (Experimental)**. It drives the unmodified official Claude Code executable as a request-scoped model client for your Claude Pro/Max subscription. Hermes keeps its normal agent loop, tools, approvals and compaction. Despite the name, the implementation speaks native stream-json directly and does not require the Python Agent SDK package.
@@ -26,10 +28,7 @@ Install Claude Code with `npm install -g @anthropic-ai/claude-code`. `claude` is
 ```sh
 hermes plugins install claude-subscription-directsdk      # from the Hermes plugin catalog (pinned, reviewed)
 # or straight from GitHub (tracks main):
-hermes plugins install NousResearch/hermes-plugin-claude-subscription-directsdk
-# or, by hand:
-git clone https://github.com/NousResearch/hermes-plugin-claude-subscription-directsdk \
-    ~/.hermes/plugins/claude-subscription-directsdk-experimental
+hermes plugins install NousResearch/hermes-official-plugins#claude-subscription-directsdk
 
 claude auth login
 hermes model          # pick "Claude Subscription DirectSDK (Experimental)"
