@@ -11,4 +11,4 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/NousResearch/hermes-pantheon/tree/main/spotify"
+Homepage = "https://github.com/NousResearch/hermes-official-plugins/tree/main/spotify"

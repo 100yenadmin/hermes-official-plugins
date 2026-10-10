@@ -2,7 +2,7 @@
 
 # Home Assistant for Hermes Agent
 
-> Part of the [Hermes Pantheon](../README.md), Nous Research's official plugins for Hermes Agent. Formerly [`NousResearch/hermes-homeassistant`](https://github.com/NousResearch/hermes-homeassistant), which is archived; this directory carries its full history.
+> Part of the [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent. Formerly [`NousResearch/hermes-homeassistant`](https://github.com/NousResearch/hermes-homeassistant), which is archived; this directory carries its full history.
 
 Official [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin for
 [Home Assistant](https://www.home-assistant.io/). It provides two things:

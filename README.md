@@ -1,8 +1,8 @@
 <p align="center">
-  <img src="assets/banner.jpg" alt="Hermes Pantheon: official plugins for Hermes Agent" width="100%">
+  <img src="assets/banner.jpg" alt="Hermes Official Plugins, built and maintained by Nous Research" width="100%">
 </p>
 
-<h1 align="center">Hermes Pantheon ☤</h1>
+<h1 align="center">Hermes Official Plugins ☤</h1>
 
 <p align="center">
   <b>The official plugins for <a href="https://github.com/NousResearch/hermes-agent">Hermes Agent</a>, built and maintained by <a href="https://nousresearch.com">Nous Research</a>.</b><br>
@@ -12,7 +12,7 @@
 <p align="center">
   <a href="https://hermes-agent.nousresearch.com/docs/plugins"><img src="https://img.shields.io/badge/Plugin_Catalog-browse-FFDE1A?style=for-the-badge&labelColor=0B0C0E" alt="Plugin Catalog"></a>
   <a href="https://hermes-agent.nousresearch.com/docs/"><img src="https://img.shields.io/badge/Docs-hermes--agent-E5DEC9?style=for-the-badge&labelColor=0B0C0E" alt="Docs"></a>
-  <a href="https://github.com/NousResearch/hermes-pantheon/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/NousResearch/hermes-pantheon/tests.yml?branch=main&style=for-the-badge&label=tests&labelColor=0B0C0E&color=103CE7" alt="Tests"></a>
+  <a href="https://github.com/NousResearch/hermes-official-plugins/actions/workflows/tests.yml"><img src="https://img.shields.io/github/actions/workflow/status/NousResearch/hermes-official-plugins/tests.yml?branch=main&style=for-the-badge&label=tests&labelColor=0B0C0E&color=103CE7" alt="Tests"></a>
   <a href="https://discord.gg/NousResearch"><img src="https://img.shields.io/badge/Discord-join-E62B28?style=for-the-badge&logo=discord&logoColor=white&labelColor=0B0C0E" alt="Discord"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-E5DEC9?style=for-the-badge&labelColor=0B0C0E" alt="MIT"></a>
 </p>
@@ -57,7 +57,7 @@ Catalog entries come in two tiers:
 | **official** | Nous Research | **This repo**, one directory per plugin |
 | **community** | Vendors and independent authors | Their own repos, reviewed when they enter the catalog |
 
-## The Pantheon
+## The plugins
 
 <table>
 <tr>
@@ -76,23 +76,36 @@ Catalog entries come in two tiers:
 <p><code>spotify_playback</code> · <code>spotify_devices</code> · <code>spotify_queue</code> · <code>spotify_search</code> · <code>spotify_playlists</code> · <code>spotify_albums</code> · <code>spotify_library</code></p>
 </td>
 </tr>
+<tr>
+<td width="50%" valign="top">
+<a href="claude-subscription-directsdk/"><img src="assets/claude-subscription-directsdk.jpg" alt="Claude Subscription DirectSDK plugin"></a>
+<h3><a href="claude-subscription-directsdk/">Claude Subscription DirectSDK</a> <sup>experimental</sup></h3>
+<code>hermes plugins install claude-subscription-directsdk</code>
+<p>A model provider that runs Hermes turns on your Claude Pro or Max subscription through the official Claude Code CLI, with no separate API key or per-token bill. Hermes keeps its own agent loop, tools, approvals and compaction; the plugin drives the logged-in <code>claude</code> binary as a request-scoped model client, and refuses cleanly with an install hint when Claude Code is missing.</p>
+<p>Pick it in <code>hermes model</code> → <b>Claude Subscription DirectSDK (Experimental)</b></p>
+</td>
+<td width="50%" valign="top">
+<h3>More on the way</h3>
+<p>Official plugins move in here as they leave Hermes core or join from their own repos. Browse everything else, from Nous, vendors and the community, in the <a href="https://hermes-agent.nousresearch.com/docs/plugins">plugin catalog</a>.</p>
+</td>
+</tr>
 </table>
 
-More official plugins move in here as they leave Hermes core or join from their own repos.
 
 ### Already used one of these?
 
-Home Assistant and Spotify used to be built into Hermes core, and for a short time each had its own repo. **You don't need to do anything.**
+Each plugin here used to live somewhere else: Home Assistant and Spotify were built into Hermes core and then briefly had their own repos, and Claude Subscription DirectSDK had its own repo. **You don't need to do anything.**
 
-- **You used the built-in version:** `hermes update`, or the first start after updating, installs the plugin from the catalog with your existing config, env vars and login.
-- **You installed it from the catalog:** the catalog now points here, so `hermes plugins update homeassistant` (or `spotify`) moves your install to this repo and keeps your files.
-- **You installed it by URL** (`hermes plugins install NousResearch/hermes-homeassistant`): reinstall once from the catalog with `hermes plugins install homeassistant --force` to follow future updates. The old repos are archived and get no new fixes.
+- **You used the built-in Home Assistant or Spotify:** `hermes update`, or the first start after updating, installs the plugin from the catalog with your existing config, env vars and login.
+- **You installed it from the catalog:** the catalog now points here, so `hermes plugins update <name>` moves your install to this repo and keeps your files.
+- **You installed it by URL** (for example `hermes plugins install NousResearch/hermes-homeassistant`): reinstall once from the catalog with `hermes plugins install <name> --force` to follow future updates. The old repos are archived and get no new fixes.
 
 ## Repository layout
 
 ```
-hermes-pantheon/
+hermes-official-plugins/
 ├── assets/                 # README and catalog art
+├── claude-subscription-directsdk/
 ├── homeassistant/          # one self-contained plugin per directory
 │   ├── plugin.yaml         #   manifest: name, tools, env vars, Hermes version
 │   ├── __init__.py         #   register(ctx)
@@ -109,8 +122,8 @@ Every plugin is tested against **current Hermes core on Linux, macOS and Windows
 
 ```bash
 git clone https://github.com/NousResearch/hermes-agent
-git clone https://github.com/NousResearch/hermes-pantheon
-cd hermes-pantheon/spotify
+git clone https://github.com/NousResearch/hermes-official-plugins
+cd hermes-official-plugins/spotify
 HERMES_AGENT_REPO=../../hermes-agent PYTHONPATH=../../hermes-agent python -m pytest -q
 ```
 

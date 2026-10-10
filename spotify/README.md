@@ -2,7 +2,7 @@
 
 # Spotify for Hermes Agent
 
-> Part of the [Hermes Pantheon](../README.md), Nous Research's official plugins for Hermes Agent. Formerly [`NousResearch/hermes-spotify`](https://github.com/NousResearch/hermes-spotify), which is archived; this directory carries its full history.
+> Part of the [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent. Formerly [`NousResearch/hermes-spotify`](https://github.com/NousResearch/hermes-spotify), which is archived; this directory carries its full history.
 
 Official [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin for
 [Spotify](https://www.spotify.com/). It gives the agent seven tools over the Spotify Web API and adds

@@ -1,4 +1,4 @@
-# Contributing to the Hermes Pantheon
+# Contributing to the Hermes Official Plugins
 
 Thanks for helping. Each top-level directory is one self-contained Hermes plugin.
 
