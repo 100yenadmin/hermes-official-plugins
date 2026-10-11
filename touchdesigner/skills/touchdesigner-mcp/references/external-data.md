@@ -300,7 +300,7 @@ WebSocket server in TD
 1. **`webDAT` doesn't auto-fetch** — must explicitly pulse `par.fetch`. Easy to forget.
 2. **Blocking on slow APIs** — `webDAT` runs on the cook thread. A 30s API call freezes TD for 30s. Use `webclientDAT` (async) for anything potentially slow.
 3. **WebSocket reconnection** — TD does NOT auto-reconnect on disconnect. Implement backoff in `onDisconnect`.
-4. **Serial port permissions on macOS** — TD needs Full Disk Access OR the port needs to be unlocked via `sudo chmod 666 /dev/cu.usbmodem...` per session.
+4. **Serial port permissions on macOS** — TD needs Full Disk Access OR the port needs to be unlocked per session by running `chmod 666 /dev/cu.usbmodem...` as an administrator.
 5. **MQTT broker connection state** — `mqttClientDAT` may show `connected=true` but messages don't flow if QoS is wrong or topic ACL blocks. Check broker logs.
 6. **JSON parse errors crash callbacks silently** — wrap parses in try/except and log to textport. Otherwise the callback just stops firing.
 7. **Firewall on Windows** — first time `webserverDAT` binds, Windows pops a firewall dialog. Approve it or the server is unreachable.
