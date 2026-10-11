@@ -62,7 +62,9 @@ def test_chosen_directory_expands_user(profile, tmp_path, monkeypatch, source):
         _set_config_dir("  ~/login  ")
     else:
         env[OVERRIDE if source == "override" else NATIVE_DIR] = "~/login"
-    assert directsdk_setup.apply_config_dir(env) == {NATIVE_DIR: str(tmp_path / "login")}
+    chosen = directsdk_setup.apply_config_dir(env)
+    # expanduser keeps the separator it was given; Windows accepts either.
+    assert list(chosen) == [NATIVE_DIR] and os.path.normpath(chosen[NATIVE_DIR]) == str(tmp_path / "login")
 
 
 def test_empty_override_is_removed_and_falls_through(profile, tmp_path):
