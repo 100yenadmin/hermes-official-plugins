@@ -208,6 +208,8 @@ python evals/directsdk_admission.py /path/to/claude
 python evals/directsdk_cache_wire.py /path/to/claude
 ```
 
+CI runs both evals on Linux and macOS through `evals/ci.sh`, against a pinned Claude Code installed from npm (`CLAUDE_CODE_VERSION`, default 2.1.292). They need no credentials and make no inference calls. Bump the pin to qualify a new Claude Code release: a change in native's wire shape fails here before it reaches users.
+
 Transport invariant tests cover signed replay and harmless normalization, transformed projections, final tool batches/usage, async use, lazy failure, invalid parameters, conflicting auth, and active/paused/unstarted stream cleanup. The admission regression fails on the previous implementation (two upstream requests) and passes with one request, preserving first-response usage including zero values. Its cancellation control verifies upstream socket closure. A real-native ten-case loopback qualification covers normal text, tools, output/context limits, thinking-only recovery, refusal, HTTP errors, disconnects and cancellation, with one upstream request per call. Its responses are synthetic protocol fixtures, not paid-model evidence.
 
 Installed-plugin discovery (`$HERMES_HOME/plugins/<name>/`) and every missing-`claude` path are covered against a temporary `HERMES_HOME`, including constructing the bundled client without spawning native or accessing auth. A fresh subscription-backed AIAgent loop completed two API calls with host `read_file` execution and SQLite persistence; separate service requests accepted edited-assistant replay. Native loopback qualification also accepted 182K of tool schemas plus a 176K system prompt through file-backed settings. Loopback responses remain fixtures, not paid-model evidence.
