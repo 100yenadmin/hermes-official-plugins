@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.jpg" alt="Hermes Official Plugins, built and maintained by Nous Research" width="100%">
+  <img src="assets/hermes-official-plugins-banner.jpg" alt="Hermes Official Plugins, built and maintained by Nous Research" width="100%">
 </p>
 
 <h1 align="center">Hermes Official Plugins ☤</h1>
