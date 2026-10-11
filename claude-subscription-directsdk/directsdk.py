@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import copy
+import hashlib
 import inspect
 import json
 import math
@@ -157,7 +158,9 @@ def prepare_history(messages, names=None):
             blocks = content_blocks(message.get('content'))
             for call in projection(message)['tool_calls']:
                 # Inverse of the result mapping: a call outside the inventory (#39) replays as the model named it.
-                name = PREFIX + call['name'] if names is None or call['name'] in names else call['name']
+                name = call['name']
+                if names is None or name in names:
+                    name = PREFIX + (names.get(name, name) if isinstance(names, dict) else name)
                 blocks.append({'type': 'tool_use', 'id': call['id'], 'name': name, 'input': call['input']})
         elif role == 'tool':
             role = 'user'
@@ -274,24 +277,29 @@ def request_body(kwargs):
         raise ValueError('max_tokens must be a positive integer')
     if 'stop_sequences' in body and (not isinstance(body['stop_sequences'], list) or not all(isinstance(x, str) and x for x in body['stop_sequences'])):
         raise ValueError('stop_sequences must be a list of nonempty strings')
-    manifest, tools, names = [], [], set()
+    manifest, tools, names = [], [], {}
+    native_names = {}
     for tool in kwargs.get('tools') or []:
         if tool.get('type') != 'function':
             raise ValueError('Only function tools are supported')
         f = tool['function']
         name = f['name']
-        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,50}', name) or name in names:
-            raise ValueError('Tool names must be unique ASCII identifiers of at most 50 characters')
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name) or name in names:
+            raise ValueError('Tool names must be unique ASCII identifiers of at most 64 characters')
         if f.get('strict'):
             raise ValueError('Strict function schemas are unsupported')
-        names.add(name)
+        native_name = name if len(name) <= 50 else name[:41] + '_' + hashlib.sha256(name.encode()).hexdigest()[:8]
+        if native_name in native_names:
+            raise ValueError(f'Tool name collision: {name!r} and {native_names[native_name]!r} map to {native_name!r}')
+        names[name] = native_name
+        native_names[native_name] = name
         schema, description = f.get('parameters', {'type': 'object'}), f.get('description', '')
         if not isinstance(schema, dict) or not isinstance(description, str):
             raise ValueError('Tool schema must be an object and description a string')
         # The manifest (inert MCP server) and the request body must advertise the same shape.
         schema = normalize_input_schema(schema)
-        manifest.append({'name': name, 'description': description, 'inputSchema': schema})
-        tools.append({'name': PREFIX + name, 'description': description, 'input_schema': schema})
+        manifest.append({'name': native_name, 'description': description, 'inputSchema': schema})
+        tools.append({'name': PREFIX + native_name, 'description': description, 'input_schema': schema})
     body['tools'] = tools
     encoded = json.dumps(body, separators=(',', ':'), allow_nan=False)
     return encoded, manifest, names
@@ -587,6 +595,7 @@ class Client:
             stream.close()
 
     def _run(self, request, kwargs, body, manifest, names, system, frames):
+        hermes_names = {native: hermes for hermes, native in names.items()}
         p = None
         reader = None
         try:
@@ -742,11 +751,12 @@ class Client:
                         # Native built-ins are off (--tools '', inert MCP, dontAsk), so any other name is
                         # the model's, e.g. a Tool Search-deferred tool called directly (#39). Hermes owns
                         # validation and answers an unknown name with a recoverable error.
-                        if block['name'] in names:
+                        if block['name'] in hermes_names:
                             # Native sometimes drops the prefix on a tool it was offered (#62); carry the
                             # offered name so replayed history does not teach the slip back to the model.
                             block['name'] = PREFIX + block['name']
                         name = block['name'].removeprefix(PREFIX)
+                        name = hermes_names.get(name, name)
                         calls.append({'id': block['id'], 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(block['input'], separators=(',', ':'), allow_nan=False)}})
                 boundary = bool(calls) and final.get('subtype') == 'error_max_turns' and p.returncode == 1
                 if not boundary and not native_failure_handled and (p.returncode != 0 or final.get('is_error') or final.get('subtype') != 'success'):
