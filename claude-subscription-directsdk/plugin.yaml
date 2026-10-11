@@ -18,6 +18,11 @@ external_dependencies:
     check: "claude --version"
     install: "npm install -g @anthropic-ai/claude-code"
 config_schema:
+  claude_config_dir:
+    type: string
+    default: ""
+    label: Claude login config directory
+    description: Select this profile's logged-in Claude config directory, overriding process environment directories.
   claude_code_telemetry:
     type: bool
     default: true

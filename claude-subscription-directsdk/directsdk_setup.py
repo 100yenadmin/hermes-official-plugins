@@ -25,7 +25,8 @@ INSTALL_HINT = ("Claude Code is not installed (no `claude` on PATH or in the usu
 LOGIN_HINT = "Claude Code is installed but not logged in. Run `claude auth login`, then select this provider again."
 LOGGED_OUT_HINT = ("Claude Code is installed but has no usable login in the environment Hermes runs it in. Run `claude auth login` "
                    "as the user Hermes runs as, set CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) in Hermes' environment, "
-                   "or point CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR at a logged-in config directory, then try again.")
+                   "or point the claude_config_dir plugin setting (or CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR) "
+                   "at a logged-in config directory, then try again.")
 
 
 # Install prefixes probed after PATH, as core's anthropic_adapter does: a service or GUI launch (macOS
@@ -54,6 +55,7 @@ def _resolve(command, env):
 # config.yaml (plugin.yaml `config_schema`; Desktop → Capabilities → Plugins, or `hermes config set`).
 PLUGIN_ID = "claude-subscription-directsdk-experimental"
 TELEMETRY_SETTING = "claude_code_telemetry"
+CONFIG_DIR_SETTING = "claude_config_dir"
 # Any one of these turns off Claude Code's feature-flag fetch, and with it every model its picker
 # only offers through a flag (#86: 11 models become 5). Off only when the user turns the setting off.
 QUIET_TRAFFIC = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1"}
@@ -65,8 +67,8 @@ ALWAYS_QUIET = {"DISABLE_AUTOUPDATER": "1", "DISABLE_FEEDBACK_COMMAND": "1"}
 _OFF = ("false", "0", "no", "off")
 
 
-def telemetry_enabled():
-    """The ``claude_code_telemetry`` plugin setting, default on.
+def _setting(key, default=None):
+    """Read one plugin setting, with unreadable config or missing keys treated as not set.
 
     Read from the active profile's config on every call (``load_config_readonly`` resolves
     ``get_hermes_home()`` per call and caches on the file signature), so a multi-profile gateway
@@ -76,14 +78,30 @@ def telemetry_enabled():
         from hermes_cli.config import load_config_readonly
         value = load_config_readonly()
     except Exception:
-        return True
-    for segment in ("plugins", "entries", PLUGIN_ID, "settings", TELEMETRY_SETTING):
+        return default
+    for segment in ("plugins", "entries", PLUGIN_ID, "settings", key):
         if not isinstance(value, Mapping) or segment not in value:
-            return True
+            return default
         value = value[segment]
+    return value
+
+
+def telemetry_enabled():
+    """The active profile's ``claude_code_telemetry`` plugin setting, default on."""
+    value = _setting(TELEMETRY_SETTING, True)
     if isinstance(value, str):
         return value.strip().lower() not in _OFF
     return value is not False and value != 0
+
+
+def apply_config_dir(env):
+    """Select the active profile's Claude config directory on a child env, in place."""
+    override = env.pop("CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR", None)
+    setting = _setting(CONFIG_DIR_SETTING)
+    config = (setting.strip() if isinstance(setting, str) else "") or override or env.get("CLAUDE_CONFIG_DIR")
+    if config:
+        env["CLAUDE_CONFIG_DIR"] = os.path.expanduser(config)
+    return env
 
 
 def apply_traffic_policy(env, telemetry=None):
@@ -100,9 +118,7 @@ def apply_traffic_policy(env, telemetry=None):
 
 def _child_env(env):
     child = dict(env)
-    config = child.pop("CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR", None)
-    if config:
-        child["CLAUDE_CONFIG_DIR"] = config
+    apply_config_dir(child)
     return apply_traffic_policy(child)
 
 

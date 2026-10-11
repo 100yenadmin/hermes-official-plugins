@@ -124,6 +124,7 @@ def test_manifest_declares_the_setting_under_the_key_the_code_reads():
     import directsdk_setup
     root = Path(directsdk_setup.__file__).resolve().parent
     assert directsdk_setup.PLUGIN_ID == PLUGIN_NAME
-    (field,) = plugin_settings_fields(PLUGIN_NAME, root)
+    (field,) = [field for field in plugin_settings_fields(PLUGIN_NAME, root)
+               if field["key"] == directsdk_setup.TELEMETRY_SETTING]
     assert field["key"] == directsdk_setup.TELEMETRY_SETTING
     assert field["type"] == "boolean" and field["default"] is True
