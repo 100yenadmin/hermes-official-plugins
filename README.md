@@ -85,6 +85,54 @@ Catalog entries come in two tiers:
 <p>Pick it in <code>hermes model</code> → <b>Claude Subscription DirectSDK (Experimental)</b></p>
 </td>
 <td width="50%" valign="top">
+<a href="telegram-business/"><img src="assets/telegram-business.jpg" alt="Telegram Business Mode plugin"></a>
+<h3><a href="telegram-business/">Telegram Business Mode</a></h3>
+<code>hermes plugins install hermes-telegram-business</code>
+<p>Turns Hermes into an observe-with-approval secretary for your Telegram Business account. It drafts replies to your customers, and nothing is sent until you approve it.</p>
+<p>Gateway platform add-on · owner approval on every reply</p>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="memory-wiki/"><img src="assets/memory-wiki.jpg" alt="Memory Wiki plugin"></a>
+<h3><a href="memory-wiki/">Memory Wiki</a></h3>
+<code>hermes plugins install hermes-memory-wiki</code>
+<p>A dashboard and Desktop tab that turns your local session history into browsable subject pages and daily logs, plus a read-only audit panel for <code>MEMORY.md</code> and <code>USER.md</code>.</p>
+<p>Dashboard tab · reads local history, writes nothing</p>
+</td>
+<td width="50%" valign="top">
+<a href="blender/"><img src="assets/blender.jpg" alt="Blender plugin"></a>
+<h3><a href="blender/">Blender</a></h3>
+<code>hermes plugins install blender</code>
+<p>The official Blender Lab MCP server over stdio, pinned to upstream, with a Blender workflow skill, so Hermes can read and change your Blender scene. Needs Blender 5.1+ with its MCP add-on, Git and uv. Its tools run Python inside Blender, so use trusted workflows.</p>
+<p>MCP server + skill · Windows, macOS, Linux</p>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="snyk/"><img src="assets/snyk.jpg" alt="Snyk plugin"></a>
+<h3><a href="snyk/">Snyk</a></h3>
+<code>hermes plugins install snyk</code>
+<p>Scan code (SAST), dependencies, container images, IaC and SBOMs through Snyk's first-party MCP server, with the snyk-security-scan workflow skill. Needs Node.js/npm and a free Snyk account.</p>
+<p>MCP server + skill · browser login via <code>snyk_auth</code></p>
+</td>
+<td width="50%" valign="top">
+<a href="touchdesigner/"><img src="assets/touchdesigner.jpg" alt="TouchDesigner plugin"></a>
+<h3><a href="touchdesigner/">TouchDesigner</a></h3>
+<code>hermes plugins install touchdesigner</code>
+<p>Drive a live TouchDesigner session through 404.zero's free twozero MCP server, which runs inside TouchDesigner itself, with the touchdesigner-mcp workflow skill and 20+ reference files (operators, GLSL, audio-reactive, instancing) bundled.</p>
+<p>MCP server + skill · TouchDesigner on macOS or Windows</p>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+<a href="accent-picker/"><img src="assets/accent-picker.jpg" alt="Accent Picker plugin"></a>
+<h3><a href="accent-picker/">Accent Picker</a> <sup>desktop</sup></h3>
+<code>hermes plugins install accent-picker</code>
+<p>An OKLCH colour wheel in the Hermes Desktop status bar. Drag it and the whole theme retints live, so theme authors can try accents in place. The colour is scratch state and never persisted.</p>
+<p>Desktop plugin · status bar + palette commands</p>
+</td>
+<td width="50%" valign="top">
 <h3>More on the way</h3>
 <p>Official plugins move in here as they leave Hermes core or join from their own repos. Browse everything else, from Nous, vendors and the community, in the <a href="https://hermes-agent.nousresearch.com/docs/plugins">plugin catalog</a>.</p>
 </td>
@@ -94,7 +142,7 @@ Catalog entries come in two tiers:
 
 ### Already used one of these?
 
-Each plugin here used to live somewhere else: Home Assistant and Spotify were built into Hermes core and then briefly had their own repos, and Claude Subscription DirectSDK had its own repo. **You don't need to do anything.**
+Every plugin here used to live somewhere else: Home Assistant and Spotify were built into Hermes core and then briefly had their own repos, and the rest each had a standalone `NousResearch/hermes-*` repo. **You don't need to do anything.**
 
 - **You used the built-in Home Assistant or Spotify:** `hermes update`, or the first start after updating, installs the plugin from the catalog with your existing config, env vars and login.
 - **You installed it from the catalog:** the catalog now points here, so `hermes plugins update <name>` moves your install to this repo and keeps your files.
@@ -104,14 +152,15 @@ Each plugin here used to live somewhere else: Home Assistant and Spotify were bu
 
 ```
 hermes-official-plugins/
-├── assets/                 # README and catalog art
-├── claude-subscription-directsdk/
-├── homeassistant/          # one self-contained plugin per directory
-│   ├── plugin.yaml         #   manifest: name, tools, env vars, Hermes version
-│   ├── __init__.py         #   register(ctx)
-│   ├── pyproject.toml      #   plugin dependencies
-│   └── tests/              #   the plugin's own suite
-└── spotify/
+├── assets/                         # README and catalog art
+├── homeassistant/                  # one self-contained plugin per directory
+│   ├── plugin.yaml                 #   manifest: name, tools, env vars, Hermes version
+│   ├── __init__.py                 #   register(ctx)
+│   ├── pyproject.toml              #   plugin dependencies
+│   └── tests/                      #   the plugin's own suite
+├── blender/                        # portable plugins: plugin.json + mcp.json + skills/
+├── accent-picker/                  # Desktop plugins: plugin.yaml + desktop/plugin.js
+└── ...
 ```
 
 Each directory is a complete Hermes plugin. The catalog installs one by `repo` + `subdir` at a pinned commit, and Hermes fetches only that directory (a blobless sparse clone), so installing Spotify never downloads Home Assistant.

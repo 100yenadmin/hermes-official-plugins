@@ -21,9 +21,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - id: list
-        # A plugin is any top-level directory with a plugin.yaml (or plugin.json) and a tests/ dir.
+        # A plugin is any top-level directory with a plugin.yaml or plugin.json. Every plugin is validated;
+        # pytest runs only where the plugin ships a tests/ dir (portable MCP + skill packages have none).
         run: |
-          plugins=$(for d in */; do d=${d%/}; { [ -f "$d/plugin.yaml" ] || [ -f "$d/plugin.json" ]; } && [ -d "$d/tests" ] && echo "$d"; done | jq -R . | jq -sc .)
+          plugins=$(for d in */; do d=${d%/}; { [ -f "$d/plugin.yaml" ] || [ -f "$d/plugin.json" ]; } && echo "$d"; done | jq -R . | jq -sc .)
           echo "plugins=$plugins" >> "$GITHUB_OUTPUT"
           echo "Plugins: $plugins"
 
@@ -65,6 +66,7 @@ jobs:
           HERMES_HOME: ${{ runner.temp }}/hermes-home
           PYTHONPATH: ${{ github.workspace }}/hermes-agent
       - name: Run the plugin suite
+        if: hashFiles(format('pantheon/{0}/tests/**', matrix.plugin)) != ''
         working-directory: pantheon/${{ matrix.plugin }}
         env:
           HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
