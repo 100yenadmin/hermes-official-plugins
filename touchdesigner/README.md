@@ -1,4 +1,8 @@
+<p align="center"><img src="../assets/touchdesigner.jpg" alt="TouchDesigner: official Hermes Agent plugin" width="100%"></p>
+
 # hermes-plugin-touchdesigner
+
+> Part of [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent. Formerly [`NousResearch/hermes-plugin-touchdesigner`](https://github.com/NousResearch/hermes-plugin-touchdesigner), which is archived; this directory carries its full history.
 
 Drive a live [TouchDesigner](https://derivative.ca) session from Hermes Agent
 through 404.zero's free **twozero** plugin, which embeds an MCP server inside

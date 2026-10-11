@@ -1,4 +1,8 @@
+<p align="center"><img src="../assets/memory-wiki.jpg" alt="Memory Wiki: official Hermes Agent plugin" width="100%"></p>
+
 # hermes-memory-wiki
+
+> Part of [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent. Formerly [`NousResearch/hermes-memory-wiki`](https://github.com/NousResearch/hermes-memory-wiki), which is archived; this directory carries its full history.
 
 Memory Wiki dashboard plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent):
 a browsable **session-history wiki** (subject pages and daily logs derived deterministically from
@@ -44,7 +48,7 @@ hermes plugins install hermes-memory-wiki --enable
 Or directly from this repository:
 
 ```bash
-hermes plugins install https://github.com/NousResearch/hermes-memory-wiki --enable
+hermes plugins install hermes-memory-wiki --enable
 ```
 
 Then start (or restart) the dashboard — `hermes dashboard` — and open the **Memory Wiki** tab. The

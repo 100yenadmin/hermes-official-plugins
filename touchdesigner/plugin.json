@@ -7,8 +7,8 @@
     "name": "Nous Research",
     "url": "https://github.com/NousResearch"
   },
-  "homepage": "https://github.com/NousResearch/hermes-plugin-touchdesigner",
-  "repository": "https://github.com/NousResearch/hermes-plugin-touchdesigner",
+  "homepage": "https://github.com/NousResearch/hermes-official-plugins/tree/main/touchdesigner",
+  "repository": "https://github.com/NousResearch/hermes-official-plugins/tree/main/touchdesigner",
   "license": "MIT",
   "keywords": [
     "touchdesigner",

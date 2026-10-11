@@ -7,8 +7,8 @@
     "name": "Nous Research",
     "url": "https://github.com/NousResearch"
   },
-  "homepage": "https://github.com/NousResearch/hermes-plugin-snyk",
-  "repository": "https://github.com/NousResearch/hermes-plugin-snyk",
+  "homepage": "https://github.com/NousResearch/hermes-official-plugins/tree/main/snyk",
+  "repository": "https://github.com/NousResearch/hermes-official-plugins/tree/main/snyk",
   "license": "MIT",
   "keywords": [
     "snyk",

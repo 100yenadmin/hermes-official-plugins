@@ -3,7 +3,7 @@ version: 1.0.0
 description: "Memory Wiki dashboard tab: browsable subject pages and daily logs derived from local session history, plus a read-only Persistent Memory audit panel (MEMORY.md / USER.md)."
 author: "Abdullah Raja (@Araja119, original #31244), NousResearch (plugin port)"
 license: MIT
-homepage: https://github.com/NousResearch/hermes-memory-wiki
+homepage: https://github.com/NousResearch/hermes-official-plugins/tree/main/memory-wiki
 requires_hermes: ">=0.21"
 tags: [dashboard, memory, sessions]
 # Dashboard-only plugin: the UI lives in dashboard/ and its backend router is mounted by the

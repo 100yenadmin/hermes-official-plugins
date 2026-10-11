@@ -6,7 +6,7 @@
   "license": "MIT",
   "type": "module",
   "scripts": {
-    "build": "esbuild src/plugin.tsx --bundle --format=esm --platform=browser --jsx=automatic --external:@hermes/plugin-sdk --external:react --external:react/jsx-runtime --outfile=plugin.js"
+    "build": "esbuild src/plugin.tsx --bundle --format=esm --platform=browser --jsx=automatic --external:@hermes/plugin-sdk --external:react --external:react/jsx-runtime --outfile=desktop/plugin.js"
   },
   "devDependencies": {
     "esbuild": "0.28.1"

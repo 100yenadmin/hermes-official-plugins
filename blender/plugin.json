@@ -6,7 +6,7 @@
   "author": {
     "name": "Nous Research"
   },
-  "repository": "https://github.com/NousResearch/hermes-plugin-blender",
+  "repository": "https://github.com/NousResearch/hermes-official-plugins/tree/main/blender",
   "license": "MIT",
   "keywords": [
     "blender",

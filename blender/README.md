@@ -1,11 +1,15 @@
+<p align="center"><img src="../assets/blender.jpg" alt="Blender: official Hermes Agent plugin" width="100%"></p>
+
 # Blender integration for Hermes
+
+> Part of [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent. Formerly [`NousResearch/hermes-plugin-blender`](https://github.com/NousResearch/hermes-plugin-blender), which is archived; this directory carries its full history.
 
 A portable Hermes plugin containing MCP launch configuration and a workflow skill for the [official Blender Lab MCP server](https://www.blender.org/lab/mcp-server/).
 
 ## Install
 
 ```sh
-hermes plugins install NousResearch/hermes-plugin-blender
+hermes plugins install blender
 hermes plugins enable blender
 ```
 

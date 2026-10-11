@@ -1,4 +1,8 @@
+<p align="center"><img src="../assets/snyk.jpg" alt="Snyk: official Hermes Agent plugin" width="100%"></p>
+
 # hermes-plugin-snyk
+
+> Part of [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent. Formerly [`NousResearch/hermes-plugin-snyk`](https://github.com/NousResearch/hermes-plugin-snyk), which is archived; this directory carries its full history.
 
 Scan code, dependencies, container images, IaC and SBOMs from Hermes Agent
 through [Snyk](https://snyk.io)'s first-party MCP server. Snyk ships the

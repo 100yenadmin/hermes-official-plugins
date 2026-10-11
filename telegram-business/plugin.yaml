@@ -7,4 +7,4 @@ description: >
   buttons — nothing reaches the customer until the owner approves.
   No auto-send exists, even when can_reply is granted.
 author: "Nous Research"
-homepage: https://github.com/NousResearch/hermes-telegram-business
+homepage: https://github.com/NousResearch/hermes-official-plugins/tree/main/telegram-business

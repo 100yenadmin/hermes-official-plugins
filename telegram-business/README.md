@@ -1,4 +1,8 @@
+<p align="center"><img src="../assets/telegram-business.jpg" alt="Telegram Business Mode: official Hermes Agent plugin" width="100%"></p>
+
 # hermes-telegram-business
+
+> Part of [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent. Formerly [`NousResearch/hermes-telegram-business`](https://github.com/NousResearch/hermes-telegram-business), which is archived; this directory carries its full history.
 
 **Observe-with-approval Telegram Business Mode (secretary bot) for [Hermes Agent](https://github.com/NousResearch/hermes-agent).**
 
@@ -39,7 +43,7 @@ Discard → dropped, the customer sees nothing
 ## Install
 
 ```bash
-git clone https://github.com/NousResearch/hermes-telegram-business \
+git clone https://github.com/NousResearch/hermes-official-plugins/tree/main/telegram-business \
     ~/.hermes/plugins/telegram-business
 hermes plugins enable telegram-business
 ```
