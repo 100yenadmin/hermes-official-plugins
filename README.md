@@ -133,18 +133,28 @@ Catalog entries come in two tiers:
 <p>Desktop plugin · status bar + palette commands</p>
 </td>
 <td width="50%" valign="top">
+<a href="langfuse/"><img src="assets/langfuse.jpg" alt="Langfuse plugin"></a>
+<h3><a href="langfuse/">Langfuse</a></h3>
+<code>hermes plugins install langfuse</code>
+<p>Traces every Hermes turn to Langfuse: one span per turn, one generation per LLM call with usage and cost from Hermes' own pricing (cache and reasoning tokens included), one observation per tool call and subagent. Content capture is sanitized by default, with metadata-only and full modes.</p>
+<p>Observability hooks · Langfuse Cloud or self-hosted</p>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 <h3>More on the way</h3>
 <p>Official plugins move in here as they leave Hermes core or join from their own repos. Browse everything else, from Nous, vendors and the community, in the <a href="https://hermes-agent.nousresearch.com/docs/plugins">plugin catalog</a>.</p>
 </td>
+<td width="50%" valign="top"></td>
 </tr>
 </table>
 
 
 ### Already used one of these?
 
-Every plugin here used to live somewhere else: Home Assistant and Spotify were built into Hermes core and then briefly had their own repos, and the rest each had a standalone `NousResearch/hermes-*` repo. **You don't need to do anything.**
+Every plugin here used to live somewhere else: Home Assistant and Spotify were built into Hermes core and then briefly had their own repos, Langfuse shipped bundled with core as `observability/langfuse`, and the rest each had a standalone `NousResearch/hermes-*` repo. **You don't need to do anything.**
 
-- **You used the built-in Home Assistant or Spotify:** `hermes update`, or the first start after updating, installs the plugin from the catalog with your existing config, env vars and login.
+- **You used the built-in Home Assistant, Spotify or Langfuse:** `hermes update`, or the first start after updating, installs the plugin from the catalog with your existing config, env vars and login.
 - **You installed it from the catalog:** the catalog now points here, so `hermes plugins update <name>` moves your install to this repo and keeps your files.
 - **You installed it by URL** (for example `hermes plugins install NousResearch/hermes-homeassistant`): reinstall once from the catalog with `hermes plugins install <name> --force` to follow future updates. The old repos are archived and get no new fixes.
 
