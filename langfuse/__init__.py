@@ -246,8 +246,7 @@ def _build_client() -> Optional[Langfuse]:
     if Langfuse is None:
         logger.warning(
             "Langfuse plugin is enabled but the langfuse SDK is unavailable; "
-            "tracing is disabled. Run `hermes tools` and configure Langfuse "
-            "Observability to reinstall it."
+            "tracing is disabled. Reinstall it with `hermes plugins install langfuse --force`."
         )
         return None
 
