@@ -323,14 +323,19 @@ def _build_client() -> Optional[Langfuse]:
 
     # The SDK's OTel resource falls back to service.name=unknown_service, so every agent's traces
     # landed unattributed (hermes-agent#58322). Default only: an operator's OTEL_SERVICE_NAME or
-    # service.name in OTEL_RESOURCE_ATTRIBUTES still wins. Must precede the SDK's TracerProvider.
-    if "service.name=" not in os.environ.get("OTEL_RESOURCE_ATTRIBUTES", ""):
-        os.environ.setdefault("OTEL_SERVICE_NAME", "hermes-agent")
+    # service.name in OTEL_RESOURCE_ATTRIBUTES still wins. The SDK's TracerProvider reads it once at
+    # construction, so it is set only for that call: children (terminal, MCP) must not inherit it.
+    default_service = "OTEL_SERVICE_NAME" not in os.environ and "service.name=" not in os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "")
+    if default_service:
+        os.environ["OTEL_SERVICE_NAME"] = "hermes-agent"
     try:
         return Langfuse(**kwargs)
     except Exception as exc:  # pragma: no cover - fail-open
         logger.warning("Could not initialize Langfuse client: %s", exc)
         return None
+    finally:
+        if default_service:
+            os.environ.pop("OTEL_SERVICE_NAME", None)
 
 
 def _trace_key(task_id: str, session_id: str, *, turn_id: str = "", api_request_id: str = "") -> str:

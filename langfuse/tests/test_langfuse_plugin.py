@@ -622,21 +622,29 @@ class TestPlaceholderKeyDetection:
         assert "traces will NOT be emitted" in warnings[0]
         assert _FakeLangfuse.instances == []
 
-    @pytest.mark.parametrize(("resource_attrs", "expected"), [
-        ("", "hermes-agent"), ("service.name=my-agent", None),
+    @pytest.mark.parametrize(("service_name", "resource_attrs", "expected"), [
+        (None, "", "hermes-agent"), (None, "service.name=my-agent", None), ("my-agent", "", "my-agent"),
     ])
-    def test_client_build_defaults_otel_service_name(self, monkeypatch, resource_attrs, expected):
+    def test_client_build_defaults_otel_service_name(self, monkeypatch, service_name, resource_attrs, expected):
         """Without it the SDK's OTel resource exports service.name=unknown_service
-        (hermes-agent#58322); an operator-set service.name must not be overridden."""
+        (hermes-agent#58322); an operator-set service.name must not be overridden. The SDK's
+        TracerProvider reads the env once, in Langfuse(); the default must not outlive that call,
+        or every terminal-tool command and MCP server inherits OTEL_SERVICE_NAME=hermes-agent."""
+        import os
         self._clear_env(monkeypatch)
-        monkeypatch.setenv("OTEL_SERVICE_NAME", "restore-me")  # so teardown undoes the plugin's set
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "restore-me")  # so teardown undoes any leak
         monkeypatch.delenv("OTEL_SERVICE_NAME")
+        if service_name:
+            monkeypatch.setenv("OTEL_SERVICE_NAME", service_name)
         monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", resource_attrs)
         monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
         monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
-        assert self._fresh_plugin(monkeypatch)._get_langfuse() is not None
-        import os
-        assert os.environ.get("OTEL_SERVICE_NAME") == expected
+        plugin = self._fresh_plugin(monkeypatch)
+        seen = []
+        monkeypatch.setattr(plugin, "Langfuse", lambda **kw: seen.append(os.environ.get("OTEL_SERVICE_NAME")) or _FakeLangfuse(**kw))
+        assert plugin._get_langfuse() is not None
+        assert seen == [expected]  # what the SDK's resource captured
+        assert os.environ.get("OTEL_SERVICE_NAME") == service_name  # process env left as it was
 
 
 class TestRequestMessageCoercion:
