@@ -1142,6 +1142,17 @@ class TestCostTotal:
         assert components
         assert cost_details["total"] == pytest.approx(sum(components.values()))
 
+    def test_context_tier_breakdown_sums_to_total(self):
+        # gemini-2.5-pro bills the whole request at its *_above rates past 200k prompt
+        # tokens; the breakdown used the base rates (total 0.89 vs parts 0.4475).
+        from agent.usage_pricing import CanonicalUsage
+
+        mod = self._fresh_plugin()
+        usage = CanonicalUsage(input_tokens=350_000, output_tokens=1_000)
+        _, cost_details = mod._canonical_usage_and_cost(usage, provider="gemini", model="gemini-2.5-pro", base_url="")
+        components = {k: v for k, v in cost_details.items() if k != "total"}
+        assert components and cost_details["total"] == pytest.approx(sum(components.values()))
+
     def test_priced_model_with_no_tokens_reports_no_total(self):
         mod = self._fresh_plugin()
 

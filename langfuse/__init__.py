@@ -570,8 +570,12 @@ def _canonical_usage_and_cost(canonical: Any, *, provider: str, model: str,
         from agent.usage_pricing import get_pricing_entry
 
         entry = get_pricing_entry(model, provider=provider, base_url=base_url)
+        # Above the context tier, estimate_usage_cost bills the WHOLE request at the
+        # *_above rates; use them here too or the breakdown disagrees with "total".
+        above = bool(entry) and entry.tier_threshold_tokens is not None and canonical.prompt_tokens > entry.tier_threshold_tokens
         for key, attr, rate_attr in _USAGE_FIELDS if entry else ():
-            rate = getattr(entry, rate_attr, None) if rate_attr else None
+            rate_above = getattr(entry, f"{rate_attr}_above", None) if above and rate_attr else None
+            rate = rate_above if rate_above is not None else getattr(entry, rate_attr, None) if rate_attr else None
             tokens = getattr(canonical, attr)
             if rate is not None and tokens:
                 cost_details[key] = float(Decimal(tokens) * rate / Decimal(1000000))
