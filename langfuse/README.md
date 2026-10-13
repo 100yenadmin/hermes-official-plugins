@@ -60,7 +60,13 @@ via `HERMES_LANGFUSE_MAX_CHARS`).
 | `pre_tool_call` | Start a `tool` child observation with sanitized `args`. |
 | `post_tool_call` | Close the tool observation with sanitized `result`. `read_file` payloads get summarized (head + tail + omitted-line count) so a huge file read stays under `HERMES_LANGFUSE_MAX_CHARS`. |
 | `subagent_start` / `subagent_stop` | One observation per delegated subagent under the parent turn. |
-| `on_session_end` / `on_session_finalize` | Close any still-open traces for the session and flush, so interrupted or tool-only turns don't dangle. |
+| `on_session_end` / `on_session_finalize` | Close any still-open traces for the session, so interrupted or tool-only turns don't dangle. Only process exit flushes. |
+
+Ended observations export through the SDK's bounded background queue: turn completion, API errors
+and session rotation (`/new`, `/reset`, expiry) never wait for `flush()`, so a slow or unavailable
+Langfuse backend cannot hold up a finished turn (or a cron job past its watchdog). Process exit
+still flushes and can wait for the SDK. Traces may appear after the SDK's next batch; a full queue,
+failed export or abrupt kill can lose telemetry (there is no offline spool).
 
 Session grouping keys off the Hermes session ID (or task ID for subagents) via
 `langfuse.propagate_attributes`, so everything in one `hermes chat` session lives under one Langfuse

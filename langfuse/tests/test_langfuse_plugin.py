@@ -1304,7 +1304,7 @@ class TestSessionFinalizeHook:
         assert "session:sess-b:turn:1" in mod._TRACE_STATE
         assert r1.ended is True
         assert r2.ended is False
-        assert flushes  # flushed at least once
+        assert not flushes  # session rotation must not wait for network export
 
     def test_finalize_without_session_closes_all(self, monkeypatch):
         mod = self._fresh_plugin()
@@ -1373,7 +1373,48 @@ class TestSessionFinalizeHook:
         for reason in ("session_boundary", "new_session", "session_expired", ""):
             mod.on_session_finalize(session_id="sess-a", reason=reason)
         assert "shutdown" not in events
-        assert "flush" in events
+        assert "flush" not in events
+
+    @pytest.mark.parametrize("boundary", ["success", "error", "session"])
+    def test_live_boundary_returns_while_flush_is_blocked(self, monkeypatch, boundary):
+        """#87468: client.flush() waits on the network; a hung backend must not
+        hold up a finished turn (cron watchdog then discards the real output).
+        Live boundaries end spans and return; the SDK exporter delivers."""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        mod = self._fresh_plugin()
+        release = threading.Event()
+
+        class _Obs:
+            def update(self, **kw): pass
+            def end(self, **kw): pass
+
+        class _Client:
+            def flush(self):
+                release.wait(10)
+
+        client = _Client()
+        monkeypatch.setattr(mod, "_LANGFUSE_CLIENT", client)
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: client)
+        mod._TRACE_STATE.clear()
+        key = mod._trace_key("", "live", turn_id="turn")
+        mod._TRACE_STATE[key] = mod.TraceState(trace_id="t", root_ctx=None, root_span=_Obs(),
+                                               generations={"1": _Obs()})
+        finish = {
+            "success": lambda: mod.on_post_llm_call(session_id="live", turn_id="turn", api_call_count=1,
+                                                    assistant_response="done"),
+            "error": lambda: mod.on_api_request_error(session_id="live", turn_id="turn", api_call_count=1,
+                                                      retryable=False, error={"type": "APIError"}),
+            "session": lambda: mod.on_session_finalize(session_id="live", reason="session_boundary"),
+        }[boundary]
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            future = pool.submit(finish)
+            try:
+                future.result(timeout=2)
+                assert key not in mod._TRACE_STATE
+            finally:
+                release.set()
 
 
 # ---------------------------------------------------------------------------
