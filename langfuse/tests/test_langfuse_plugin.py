@@ -1259,6 +1259,36 @@ class TestApiRequestErrorHook:
         assert isinstance(meta["error_message"], dict)
         assert meta["error_message"]["omitted"] is True
 
+    def test_unanswered_calls_close_as_error_at_turn_end(self, monkeypatch):
+        """#81731: a generation/tool that never got its post hook used to close
+        at level DEFAULT, indistinguishable from a successful call."""
+        mod = self._fresh_plugin()
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
+        mod._TRACE_STATE.clear()
+        task_key = mod._trace_key("t", "s", turn_id="s:t:turn4")
+        gen, _root = self._seed_state(mod, task_key)
+        tool, _ = self._seed_state(mod, "unused")
+        mod._TRACE_STATE[task_key].tools["call_1"] = tool
+
+        mod._finish_trace(task_key)
+
+        for obs in (gen, tool):
+            assert obs.ended and any(u.get("level") == "ERROR" and u.get("status_message") for u in obs.updates)
+
+    def test_superseded_attempt_closes_as_warning(self, monkeypatch):
+        """#81731: a retry's pre_api_request supersedes an attempt that got no
+        response; that attempt is marked WARNING, not closed silently."""
+        mod = self._fresh_plugin()
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
+        monkeypatch.setattr(mod, "_start_child_observation", lambda *a, **k: object())
+        mod._TRACE_STATE.clear()
+        task_key = mod._trace_key("t", "s", turn_id="s:t:turn5")
+        gen, _root = self._seed_state(mod, task_key)
+
+        mod.on_pre_llm_request(task_id="t", session_id="s", turn_id="s:t:turn5", api_call_count=1)
+
+        assert gen.ended and any(u.get("level") == "WARNING" for u in gen.updates)
+
 
 # ---------------------------------------------------------------------------
 # on_session_finalize hook

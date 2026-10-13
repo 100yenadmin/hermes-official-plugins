@@ -626,13 +626,15 @@ def _start_child_observation(state: TraceState, *, name: str, as_type: str, inpu
 
 
 def _end_observation(observation: Any, *, output: Any = None, metadata: Optional[dict] = None,
-                     usage_details: Optional[dict] = None, cost_details: Optional[dict] = None) -> None:
+                     usage_details: Optional[dict] = None, cost_details: Optional[dict] = None,
+                     level: Optional[str] = None, status_message: Optional[str] = None) -> None:
     if observation is None:
         return
     with _failsafe("end observation"):
         update_kwargs = {**({} if output is None else {"output": output}),
                          **{k: v for k, v in (("metadata", metadata), ("usage_details", usage_details),
-                                              ("cost_details", cost_details)) if v}}
+                                              ("cost_details", cost_details), ("level", level),
+                                              ("status_message", status_message)) if v}}
         if update_kwargs:
             observation.update(**update_kwargs)
         observation.end()
@@ -640,8 +642,13 @@ def _end_observation(observation: Any, *, output: Any = None, metadata: Optional
 
 def _end_children(state: TraceState, *, include_subagents: bool = False) -> None:
     pending = [obs for queue in state.pending_tools_by_name.values() for obs in queue]
-    subagents = state.subagents.values() if include_subagents else ()
-    for observation in (*state.generations.values(), *state.tools.values(), *pending, *subagents):
+    # post_api_request / post_tool_call pop their entry on a normal finish, so a
+    # generation or tool still here never got its response/result (interrupt,
+    # exhausted retries, disconnect): mark it instead of closing it as a silent success.
+    for observation in (*state.generations.values(), *state.tools.values(), *pending):
+        _end_observation(observation, level="ERROR",
+                         status_message="Turn ended before this call's response/result was recorded.")
+    for observation in (state.subagents.values() if include_subagents else ()):
         _end_observation(observation)
 
 
@@ -826,7 +833,8 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
             api_mode=api_mode, messages=input_messages, client=client, turn_id=turn_id, api_request_id=api_request_id)
         previous = state.generations.pop(req_key, None)
         if previous is not None:
-            _end_observation(previous)
+            _end_observation(previous, level="WARNING",
+                             status_message="Retried: no response was recorded for this attempt.")
         gen_metadata = {
             "provider": provider, "platform": platform, "api_mode": api_mode, "base_url": base_url,
             "message_count": message_count, "approx_input_tokens": approx_input_tokens,
