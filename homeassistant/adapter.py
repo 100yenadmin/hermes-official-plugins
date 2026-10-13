@@ -10,6 +10,7 @@ import asyncio
 import errno
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -35,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 # Title of the persistent notification outbound replies are posted as.
 NOTIFICATION_TITLE = "Hermes Agent"
+# A notify service name (``notify.<name>``): the form cron delivery targets take.
+_NOTIFY_SERVICE = re.compile(r"[a-z0-9_]+")
 
 
 def check_ha_requirements() -> bool:
@@ -337,7 +340,12 @@ async def _standalone_send(
     pconfig, chat_id: str, message: str, *,
     thread_id: Optional[str] = None, media_files: Optional[list] = None, force_document: bool = False,
 ) -> Dict[str, Any]:
-    """Send via the HA ``notify.notify`` service without a live gateway adapter.
+    """Send through the HA notify service the target names, without a live gateway adapter.
+
+    The target (``HASS_HOME_CHANNEL`` or ``deliver=homeassistant:<target>``) is a notify service name such
+    as ``mobile_app_my_phone``, so the call is ``notify.<target>``. Home Assistant documents ``notify.notify``
+    as "the first notify action it can find" and answers it with a 500 when given a ``target`` it does not
+    own; that grouped call is kept only for a target HA has no service for (400) and for an empty target.
 
     Token: ``pconfig.token`` then ``HASS_TOKEN``; URL: ``pconfig.extra["url"]`` then ``HASS_URL``.
     ``thread_id``/``media_files``/``force_document`` are signature parity only (HA has no threads/attachments).
@@ -353,12 +361,20 @@ async def _standalone_send(
         return send_error(f"Home Assistant standalone send: {problem}")
     url = f"{hass_url}/api/services/notify/notify"
     payload = {"message": message, "target": chat_id}
+    calls = [(url, payload)]
+    service = (chat_id or "").strip().removeprefix("notify.")
+    if _NOTIFY_SERVICE.fullmatch(service):
+        calls.insert(0, (f"{hass_url}/api/services/notify/{service}", {"message": message}))
     try:
         async with HomeAssistantAdapter._new_session() as session:
-            async with session.post(url, headers=_auth_headers(token), json=payload) as resp:
-                if resp.status not in {200, 201}:
-                    return send_error(f"Home Assistant API error ({resp.status}): {await resp.text()}")
-        return {"success": True, "platform": "homeassistant", "chat_id": chat_id}
+            for i, (url, payload) in enumerate(calls):
+                async with session.post(url, headers=_auth_headers(token), json=payload) as resp:
+                    if resp.status in {200, 201}:
+                        return {"success": True, "platform": "homeassistant", "chat_id": chat_id}
+                    error = f"Home Assistant API error ({resp.status}) from {url.removeprefix(hass_url)}: {await resp.text()}"
+                    # Only "no such service" falls through to the grouped call; any other failure is final.
+                    if resp.status != 400 or i == len(calls) - 1:
+                        return send_error(error)
     except asyncio.TimeoutError:
         return send_error("Timeout sending notification to Home Assistant")
     except Exception as e:
