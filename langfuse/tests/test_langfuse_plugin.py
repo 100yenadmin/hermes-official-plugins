@@ -645,7 +645,7 @@ class TestToolCallOutputBackfill:
 
         ended = {}
 
-        def fake_end_observation(obs, *, output=None, metadata=None, usage_details=None, cost_details=None):
+        def fake_end_observation(obs, *, output=None, metadata=None, usage_details=None, cost_details=None, **_):
             ended["observation"] = obs
             ended["output"] = output
             ended["metadata"] = metadata
@@ -723,6 +723,24 @@ class TestToolObservationKeying:
         assert ended["obs"] is obs
         assert ended["output"] == {"ok": True}
         assert state.pending_tools_by_name.get("my_tool") is None
+
+    @pytest.mark.parametrize("status,level", [("error", "ERROR"), ("blocked", "WARNING"), ("ok", None)])
+    def test_tool_status_sets_observation_level(self, monkeypatch, status, level):
+        """#81731: core's post_tool_call status must surface as the Langfuse level,
+        else a failed tool call is indistinguishable from a successful one."""
+        mod = self._make_mod()
+        state = mod.TraceState(trace_id="t", root_ctx=None, root_span=None)
+        state.tools["call_1"] = object()
+        monkeypatch.setitem(mod._TRACE_STATE, mod._trace_key("task-1", "sess-1"), state)
+        ended = {}
+        monkeypatch.setattr(mod, "_end_observation", lambda o, **kw: ended.update(kw))
+
+        mod.on_post_tool_call(tool_name="read_file", args={}, result='{"error": "File not found"}',
+                              task_id="task-1", session_id="sess-1", tool_call_id="call_1",
+                              status=status, error_type="tool_error" if status == "error" else None)
+
+        assert ended.get("level") == level
+        assert bool(ended.get("status_message")) is bool(level)
 
 
     def test_threaded_post_calls_preserve_fifo_under_lock(self, monkeypatch):

@@ -919,7 +919,8 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
 
 def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = None,
                       task_id: str = "", session_id: str = "", tool_call_id: str = "",
-                      turn_id: str = "", api_request_id: str = "", **_: Any) -> None:
+                      turn_id: str = "", api_request_id: str = "", status: str = "",
+                      error_type: Any = None, **_: Any) -> None:
     task_key = _trace_key(task_id, session_id, turn_id=turn_id, api_request_id=api_request_id)
     with _STATE_LOCK:
         state = _TRACE_STATE.get(task_key)
@@ -946,8 +947,14 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
                 if isinstance(target, dict):
                     target["output"] = safe_result_value
 
+    # Hermes derives status ok/error (explicit blocked/cancelled) for observers; without a
+    # level a failed tool call lands at DEFAULT, indistinguishable from a successful one.
+    # status_message stays the error type: the message can echo result content, which the
+    # capture mode already governs via output.
+    level = {"error": "ERROR", "blocked": "WARNING", "cancelled": "WARNING"}.get(status)
     _end_observation(observation, output=safe_result_value,
-                     metadata={"tool_name": tool_name, "args": _capture_content(args, parse_json_strings=True)})
+                     metadata={"tool_name": tool_name, "args": _capture_content(args, parse_json_strings=True)},
+                     level=level, status_message=str(error_type or status)[:200] if level else None)
 
 
 def on_api_request_error(*, task_id: str = "", session_id: str = "", api_call_count: int = 0,
