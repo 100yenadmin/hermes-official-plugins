@@ -147,13 +147,11 @@ def _capture_mode() -> str:
 
 
 def _redact_secrets(value: str) -> str:
-    # force=True: redact even if the user disabled security.redact_secrets —
-    # this content is exported to an external service.
-    try:
-        from agent.redact import redact_sensitive_text
-        return redact_sensitive_text(value, force=True)
-    except Exception:
-        return value
+    # Core's telemetry-egress scrub: force=True (ignores security.redact_secrets:
+    # false, this content leaves the machine), sweeps opaque ``Bearer <token>``
+    # residue, and fails CLOSED — a redactor error never ships the raw text.
+    from agent.redact import redact_for_egress
+    return redact_for_egress(value)
 
 
 # (types, shape builder) for _describe_content; first match wins (bool handled before).
@@ -456,7 +454,12 @@ def _safe_value(value: Any, *, max_chars: Optional[int] = None, depth: int = 0,
         normalized = _normalize_payload(value)
         if normalized is not value:
             return recurse(normalized, depth)
-        return {str(k): recurse(v, depth + 1) for k, v in list(value.items())[:50]}
+        # Parsed JSON loses the key context the text redactor keys on: as text,
+        # '"access_token": "<opaque>"' is masked, the bare value is not.
+        from agent.redact import is_secret_field_name
+        mask = _capture_mode() == "sanitized"
+        return {str(k): "[REDACTED]" if mask and isinstance(v, str) and v and is_secret_field_name(k) else recurse(v, depth + 1)
+                for k, v in list(value.items())[:50]}
     if isinstance(value, (list, tuple, set)):
         return [recurse(v, depth + 1) for v in list(value)[:50]]
     if hasattr(value, "__dict__"):
@@ -863,6 +866,9 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
     has_system = bool(langfuse_input) and langfuse_input[0].get("role") == "system"
     system_chars = len(str(langfuse_input[0].get("content") or "")) if has_system else 0
     req_key = _request_key(api_call_count)
+    # Metadata skips content capture, but a proxy base_url can embed user:pass@ or ?api_key=.
+    from agent.redact import redact_sensitive_text
+    safe_base_url = redact_sensitive_text(base_url, force=True, redact_url_credentials=True)
 
     with _STATE_LOCK:
         state = _get_or_start_state_locked(
@@ -873,7 +879,7 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
             _end_observation(previous, level="WARNING",
                              status_message="Retried: no response was recorded for this attempt.")
         gen_metadata = {
-            "provider": provider, "platform": platform, "api_mode": api_mode, "base_url": base_url,
+            "provider": provider, "platform": platform, "api_mode": api_mode, "base_url": safe_base_url,
             "message_count": message_count, "approx_input_tokens": approx_input_tokens,
             **({"system_prompt_chars": system_chars} if system_chars else {}),
         }

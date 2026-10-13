@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 import logging
 import sys
 from decimal import Decimal
@@ -1248,6 +1249,26 @@ class TestCaptureModes:
         text = "here sk-abcdefghijklmnop1234 done"
         assert mod._capture_content(text) == text
 
+    def test_sanitized_mode_masks_secret_fields_in_parsed_json(self, monkeypatch):
+        # Tool results are JSON-parsed before redaction, which strips the key
+        # context: an opaque token under "access_token" used to export raw.
+        mod = self._fresh_plugin()
+        token = "opaqTok-" + "7Qm2Xv9LkP4zR8wN1bY6"  # opaque: no vendor prefix for the text redactor
+        inner = {"access_token": token, "username": "alice", "nested": [{"password": "hunter2"}], "total_tokens": "70"}
+        result = json.dumps({"output": json.dumps(inner), "exit_code": 0})
+        monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "sanitized")
+        out = mod._capture_content(result, tool_result_of=("terminal", {}))["output"]
+        assert out == {"access_token": "[REDACTED]", "username": "alice", "nested": [{"password": "[REDACTED]"}],
+                       "total_tokens": "70"}
+        monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "full")
+        assert mod._capture_content(result, tool_result_of=("terminal", {}))["output"] == inner
+
+    def test_sanitized_mode_masks_bare_bearer_token(self, monkeypatch):
+        mod = self._fresh_plugin()
+        monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "sanitized")
+        out = mod._capture_content("call it with Bearer 9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee please")
+        assert "9f8e7d6c5b4a" not in out
+
 
 # ---------------------------------------------------------------------------
 # api_request_error hook
@@ -1927,6 +1948,13 @@ class TestSystemPromptInGenerationInput:
         assert "part one" in first["content"]
         assert "part two" in first["content"]
 
+
+    def test_base_url_credentials_stripped_from_generation_metadata(self, monkeypatch):
+        mod = self._make_mod()
+        captured = self._capture_generation(mod, monkeypatch)
+        mod.on_pre_llm_request(task_id="task-1", session_id="sess-1", api_call_count=1, request_messages=[],
+                               base_url="https://user:s3cr3tpass@proxy.example/v1?api_key=abcdef123456&region=us")
+        assert captured["metadata"]["base_url"] == "https://***:***@proxy.example/v1?api_key=***&region=us"
 
     def test_absent_system_prompt_keeps_previous_shape(self, monkeypatch):
         mod = self._make_mod()
