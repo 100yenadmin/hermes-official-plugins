@@ -449,6 +449,7 @@ class TestPlaceholderKeyDetection:
         for k in (
             "HERMES_LANGFUSE_PUBLIC_KEY", "HERMES_LANGFUSE_SECRET_KEY",
             "LANGFUSE_PUBLIC_KEY", "LANGFUSE_SECRET_KEY",
+            "HERMES_LANGFUSE_BASE_URL", "LANGFUSE_BASE_URL",
         ):
             monkeypatch.delenv(k, raising=False)
 
@@ -559,6 +560,31 @@ class TestPlaceholderKeyDetection:
             f"Warning fired {len(warnings)} times across 15 calls; "
             "expected 1 (cached via _INIT_FAILED)"
         )
+
+    def test_custom_endpoint_accepts_operator_issued_keys(self, monkeypatch, caplog):
+        """A custom Langfuse-compatible endpoint may issue keys without the Cloud prefix;
+        it authenticates them itself (hermes-agent#72484). Templates still warn."""
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", "https://langfuse-compatible.example.internal")
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "custom-public-key")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "custom-secret-key")
+        plugin = self._fresh_plugin(monkeypatch)
+        with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
+            assert plugin._get_langfuse() is not None
+        assert "placeholders" not in caplog.text
+        assert _FakeLangfuse.instances[0].kwargs["public_key"] == "custom-public-key"
+        assert plugin._validate_langfuse_key("HERMES_LANGFUSE_PUBLIC_KEY", "...", require_prefix=False)
+
+    @pytest.mark.parametrize(("base_url", "guarded"), [
+        ("https://cloud.langfuse.com", True), ("https://us.cloud.langfuse.com.", True),
+        ("https://evil-langfuse.com", False), ("https://langfuse.com.evil.example", False),
+    ])
+    def test_prefix_guard_scoped_to_langfuse_cloud_hosts(self, monkeypatch, base_url, guarded):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", base_url)
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "custom-public-key")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "custom-secret-key")
+        assert (self._fresh_plugin(monkeypatch)._get_langfuse() is None) is guarded
 
 
 class TestRequestMessageCoercion:

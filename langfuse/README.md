@@ -35,6 +35,10 @@ HERMES_LANGFUSE_SECRET_KEY=sk-lf-...
 HERMES_LANGFUSE_BASE_URL=https://cloud.langfuse.com   # or your self-hosted URL
 ```
 
+Keys pasted straight from a template (`pk-lf-...`, `your-key`, ...) are refused with a warning. The
+`pk-lf-` / `sk-lf-` prefix is enforced only for Langfuse Cloud (`*.langfuse.com`); a custom
+Langfuse-compatible endpoint gets its own keys as issued and authenticates them itself.
+
 Restart Hermes and the next turn ships a trace. Plugins are installed per profile: use
 `hermes -p <profile> plugins install langfuse` for another profile. The only Python dependency is the
 `langfuse` SDK, which install prepares for you.

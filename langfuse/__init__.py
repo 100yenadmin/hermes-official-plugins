@@ -21,6 +21,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -196,18 +197,19 @@ def _capture_content(value: Any, *, parse_json_strings: bool = False, tool_resul
 _INIT_FAILED = object()
 
 
-def _validate_langfuse_key(env_name: str, value: str) -> Optional[str]:
-    """Log-ready error if ``value`` lacks the prefix for ``env_name``; the preview
+def _validate_langfuse_key(env_name: str, value: str, *, require_prefix: bool = True) -> Optional[str]:
+    """Log-ready error if ``value`` lacks the prefix for ``env_name`` (checked only when
+    ``require_prefix``) or is a leftover template; the preview
     exposes placeholders without echoing a real secret pasted into the wrong var."""
     expected = _LANGFUSE_KEY_PREFIXES.get(env_name, "")
     if not expected:
         return None
     preview = "<empty>" if not value else repr(value) if len(value) <= 12 else repr(value[:6] + "...")
-    if not value.startswith(expected):
+    if require_prefix and not value.startswith(expected):
         return f"{env_name}={preview} (expected {expected!r} prefix)"
-    remainder = value[len(expected):].lower()
+    remainder = value.removeprefix(expected).lower()
     if remainder in _PLACEHOLDER_REMAINDERS or any(f in remainder for f in _PLACEHOLDER_FRAGMENTS):
-        return f"{env_name}={preview} (has the {expected!r} prefix but looks like a template value)"
+        return f"{env_name}={preview} (looks like a template value, not an issued key)"
     return None
 
 
@@ -270,9 +272,15 @@ def _build_client() -> Optional[Langfuse]:
 
     # The SDK does not validate keys at construction; placeholder keys
     # would fail silently at flush time (#23823). Warn once here instead.
+    # Only Langfuse Cloud guarantees the pk-lf-/sk-lf- format: a custom endpoint may issue
+    # operator-defined keys and authenticates them itself (hermes-agent#72484), so there only
+    # the template check applies.
+    base_url = _secret("HERMES_LANGFUSE_BASE_URL") or _secret("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com"
+    host = (urlsplit(base_url).hostname or "").rstrip(".")
+    cloud = host == "langfuse.com" or host.endswith(".langfuse.com")
     placeholder_issues = [issue for issue in (
-        _validate_langfuse_key("HERMES_LANGFUSE_PUBLIC_KEY", public_key),
-        _validate_langfuse_key("HERMES_LANGFUSE_SECRET_KEY", secret_key),
+        _validate_langfuse_key("HERMES_LANGFUSE_PUBLIC_KEY", public_key, require_prefix=cloud),
+        _validate_langfuse_key("HERMES_LANGFUSE_SECRET_KEY", secret_key, require_prefix=cloud),
     ) if issue]
     if placeholder_issues:
         logger.warning(
