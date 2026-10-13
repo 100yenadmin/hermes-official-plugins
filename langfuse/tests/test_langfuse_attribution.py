@@ -17,7 +17,7 @@ class _Span:
     def update(self, **kw):
         pass
 
-    def update_trace(self, **kw):
+    def set_trace_io(self, **kw):
         pass
 
     def end(self, **kw):
@@ -27,14 +27,6 @@ class _Span:
         return _Span()
 
 
-class _RootCM:
-    def __enter__(self):
-        return _Span()
-
-    def __exit__(self, *exc):
-        return False
-
-
 class _Client:
     def __init__(self, roots):
         self._roots = roots
@@ -42,9 +34,9 @@ class _Client:
     def create_trace_id(self, seed=None):
         return f"trace::{seed}"
 
-    def start_as_current_observation(self, **kw):
+    def start_observation(self, **kw):
         self._roots.append(kw)
-        return _RootCM()
+        return _Span()
 
     def flush(self):
         pass

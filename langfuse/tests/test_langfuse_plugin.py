@@ -2528,9 +2528,11 @@ class TestChildObservationsInheritTraceAttributes:
         mod = importlib.import_module("langfuse_plugin")
         active: list = []
         children: list = []
+        opened: list = []
 
         @contextlib.contextmanager
         def _propagate(**kw):
+            opened.append(dict(kw))
             active.append(kw)
             try:
                 yield
@@ -2559,5 +2561,6 @@ class TestChildObservationsInheritTraceAttributes:
                              task_id="sess-p", session_id="sess-p", turn_id="sess-p:turn1")
 
         assert [name for name, _ in children] == ["LLM call 1", "Tool: terminal"]
+        assert opened[0]["session_id"] == "sess-p" and opened[0]["tags"][:2] == ["hermes", "langfuse"]
         for _, attrs in children:
-            assert attrs == {"session_id": "sess-p", "trace_name": "Hermes turn", "tags": ["hermes", "langfuse"]}
+            assert attrs == opened[0]  # exactly the root's session / trace name / tags
