@@ -99,6 +99,17 @@ def test_routed_turn_names_the_served_profile_not_the_launch_one(traced, monkeyp
     assert propagated[0]["metadata"] == {"profile": "arkana"}
 
 
+def test_kanban_worker_trace_names_its_board_task_and_run(traced, monkeypatch):
+    """hermes-agent#68384 / #72990: the dispatcher hands a worker HERMES_KANBAN_TASK / _RUN_ID, so its
+    traces can be joined back to the board card."""
+    mod, roots, propagated, _ = traced
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "t_8f2c")
+    monkeypatch.setenv("HERMES_KANBAN_RUN_ID", "42")
+    _open_turn(mod)
+    assert roots[0]["metadata"]["kanban_task_id"] == "t_8f2c" and roots[0]["metadata"]["kanban_run_id"] == "42"
+    assert propagated[0]["metadata"] == {"profile": "default", "kanban_task_id": "t_8f2c", "kanban_run_id": "42"}
+
+
 # Platform / trigger / cron-job tags (hermes-agent#102755, #74930, #88502).
 
 def test_interactive_turn_is_tagged_with_platform_and_trigger(traced):

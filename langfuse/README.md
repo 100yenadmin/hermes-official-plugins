@@ -57,7 +57,8 @@ via `HERMES_LANGFUSE_MAX_CHARS`).
 
 Root traces carry `platform:<name>` and `trigger:cron|interactive` tags (cron runs also
 `cron-job:<job-id>`), and their metadata names the Hermes `profile` the turn ran for, so scheduled
-runs and profiles sharing one project can be filtered apart.
+runs and profiles sharing one project can be filtered apart. Kanban worker turns also carry
+`kanban_task_id` / `kanban_run_id`, so a trace joins back to its board card.
 
 ## How it works
 
