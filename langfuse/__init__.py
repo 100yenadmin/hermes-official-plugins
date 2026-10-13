@@ -609,6 +609,18 @@ def _usage_and_cost(response: Any, *, provider: str, model: str, base_url: str, 
         return {}, {}
 
 
+def _trace_tags(platform: str) -> list[str]:
+    """Stable, content-free root tags so trigger type is filterable (hermes-agent#88502):
+    ``platform:<name>`` and ``trigger:cron|interactive``. A cron run also gets ``cron-job:<id>``:
+    each run opens a fresh session (``cron_<job-id>_<timestamp>``), so the job id is the only stable
+    handle across runs. Read from the scheduler's own ``ctx.current_cron_execution()`` rather than
+    parsed out of the session id, so legacy job ids and look-alike sessions need no special case."""
+    platform = (platform or "").strip().lower()
+    cron = _PLUGIN_CTX.current_cron_execution() if _PLUGIN_CTX is not None else None
+    return ["hermes", "langfuse", *([f"platform:{platform}"] if platform else []),
+            f"trigger:{'cron' if platform == 'cron' else 'interactive'}", *([f"cron-job:{cron.job_id}"] if cron else [])]
+
+
 def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform: str, provider: str, model: str,
                       api_mode: str, messages: Any, client: Langfuse,
                       turn_id: str = "", api_request_id: str = "") -> TraceState:
@@ -641,7 +653,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
                                         input=trace_input, metadata=metadata)
 
     root_span = None
-    propagated = {"session_id": session_id or task_key, "trace_name": "Hermes turn", "tags": ["hermes", "langfuse"]}
+    propagated = {"session_id": session_id or task_key, "trace_name": "Hermes turn", "tags": _trace_tags(platform)}
     if profile:
         propagated["metadata"] = {"profile": profile}
     if propagate_attributes is not None:

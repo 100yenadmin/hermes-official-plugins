@@ -54,6 +54,10 @@ Generation observations include the Hermes system prompt when the provider uses 
 param (Anthropic Messages API). Open an **LLM call** child span to inspect `role: system` (truncated
 via `HERMES_LANGFUSE_MAX_CHARS`).
 
+Root traces carry `platform:<name>` and `trigger:cron|interactive` tags (cron runs also
+`cron-job:<job-id>`), and their metadata names the Hermes `profile` the turn ran for, so scheduled
+runs and profiles sharing one project can be filtered apart.
+
 ## How it works
 
 | Hook | Behaviour |

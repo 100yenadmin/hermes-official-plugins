@@ -105,3 +105,25 @@ def test_routed_turn_names_the_served_profile_not_the_launch_one(traced, monkeyp
         reset_hermes_home_override(token)
     assert roots[0]["metadata"]["profile"] == "arkana"
     assert propagated[0]["metadata"] == {"profile": "arkana"}
+
+
+# Platform / trigger / cron-job tags (hermes-agent#102755, #74930, #88502).
+
+def test_interactive_turn_is_tagged_with_platform_and_trigger(traced):
+    mod, _, propagated, _ = traced
+    # A cron-shaped session id outside a cron execution must not be tagged with a job.
+    _open_turn(mod, session="cron_lookalike_20260101_000000", platform="Telegram")
+    assert propagated[0]["tags"] == ["hermes", "langfuse", "platform:telegram", "trigger:interactive"]
+
+
+def test_cron_run_is_tagged_with_its_stable_job_id(traced):
+    mod, _, propagated, _ = traced
+    from cron.execution_identity import enter_cron_execution, exit_cron_execution
+
+    # The scheduler binds the running job; legacy / hand-edited ids (not 12-hex) are valid too.
+    token = enter_cron_execution({"id": "test-job"}, "exec-1", {"source": "direct"})
+    try:
+        _open_turn(mod, session="cron_test-job_20261012_093000", platform="cron")
+    finally:
+        exit_cron_execution(token)
+    assert propagated[0]["tags"] == ["hermes", "langfuse", "platform:cron", "trigger:cron", "cron-job:test-job"]
