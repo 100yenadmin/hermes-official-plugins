@@ -1311,7 +1311,7 @@ class TestCaptureModes:
     @staticmethod
     def _exported_tool_output(mod, monkeypatch, result):
         """Drive on_post_tool_call and return what the tool observation would export."""
-        state = mod.TraceState(trace_id="trace-1", root_ctx=None, root_span=None)
+        state = mod.TraceState(trace_id="trace-1", root_span=None)
         state.tools["call-1"] = object()
         monkeypatch.setitem(mod._TRACE_STATE, mod._trace_key("task-1", "session-1"), state)
         ended = {}
