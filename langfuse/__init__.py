@@ -77,6 +77,13 @@ _LANGFUSE_KEY_PREFIXES: dict[str, str] = {
     "HERMES_LANGFUSE_PUBLIC_KEY": "pk-lf-",
     "HERMES_LANGFUSE_SECRET_KEY": "sk-lf-",
 }
+# Right-prefix templates are placeholders too: the docs print the keys as literally
+# ``pk-lf-...`` and that paste passes the prefix check (hermes-agent#51399). Matched on the
+# lowercased remainder after the prefix: whole-value for these, substring for the fragments.
+# Issued remainders are UUID-shaped hex, and every fragment has a non-hex letter.
+_PLACEHOLDER_REMAINDERS = frozenset({"", "...", "***"})
+_PLACEHOLDER_FRAGMENTS = ("placeholder", "your-", "your_", "changeme", "change-me", "test-key",
+                          "example", "unset", "dummy", "xxx")
 
 # (langfuse usage key, CanonicalUsage attribute / summary-dict key, PricingEntry attribute)
 _USAGE_FIELDS = (
@@ -193,10 +200,15 @@ def _validate_langfuse_key(env_name: str, value: str) -> Optional[str]:
     """Log-ready error if ``value`` lacks the prefix for ``env_name``; the preview
     exposes placeholders without echoing a real secret pasted into the wrong var."""
     expected = _LANGFUSE_KEY_PREFIXES.get(env_name, "")
-    if not expected or value.startswith(expected):
+    if not expected:
         return None
     preview = "<empty>" if not value else repr(value) if len(value) <= 12 else repr(value[:6] + "...")
-    return f"{env_name}={preview} (expected {expected!r} prefix)"
+    if not value.startswith(expected):
+        return f"{env_name}={preview} (expected {expected!r} prefix)"
+    remainder = value[len(expected):].lower()
+    if remainder in _PLACEHOLDER_REMAINDERS or any(f in remainder for f in _PLACEHOLDER_FRAGMENTS):
+        return f"{env_name}={preview} (has the {expected!r} prefix but looks like a template value)"
+    return None
 
 
 def _settled_client() -> Any:

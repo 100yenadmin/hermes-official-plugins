@@ -466,6 +466,25 @@ class TestPlaceholderKeyDetection:
             "HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz"
         ) is None
 
+    @pytest.mark.parametrize(("env_name", "value"), [
+        ("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-..."), ("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-***"),
+        ("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-"), ("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-PLACEHOLDER"),
+        ("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-your-secret-key"), ("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-xxxxxxxx"),
+    ])
+    def test_validate_langfuse_key_rejects_right_prefix_templates(self, monkeypatch, env_name, value):
+        """The docs' own ``pk-lf-...`` passes a prefix-only check and then drops every
+        trace at flush time (hermes-agent#51399)."""
+        self._clear_env(monkeypatch)
+        msg = self._fresh_plugin()._validate_langfuse_key(env_name, value)
+        assert msg is not None and env_name in msg and "template" in msg
+
+    def test_validate_langfuse_key_accepts_uuid_shaped_keys(self, monkeypatch):
+        """Issued remainders are hex + dashes; no template fragment can match them."""
+        self._clear_env(monkeypatch)
+        plugin = self._fresh_plugin()
+        assert plugin._validate_langfuse_key("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-1234abcd-12ab-4cd9-9f00-aabbccddeeff") is None
+        assert plugin._validate_langfuse_key("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-9f8e7d6c-5b4a-4321-8765-0123456789ab") is None
+
 
     # -- end-to-end _get_langfuse() behaviour --------------------------------
     # These tests pass `monkeypatch` to _fresh_plugin() so the helper can
