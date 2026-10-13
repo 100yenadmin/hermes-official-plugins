@@ -81,6 +81,8 @@ failed export or abrupt kill can lose telemetry (there is no offline spool).
 Session grouping keys off the Hermes session ID (or task ID for subagents) via
 `langfuse.propagate_attributes`, so everything in one `hermes chat` session lives under one Langfuse
 session. Under a multiplexed gateway each profile traces with its own keys.
+Each turn is its own trace, so `HERMES_LANGFUSE_SAMPLE_RATE` samples individual turns, not whole
+conversations.
 
 ## Optional tuning
 
