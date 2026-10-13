@@ -2307,3 +2307,49 @@ class TestCanonicalCostExport:
         # explicit zeros are treated as authoritative by Langfuse and block
         # its own model-based estimation (#43129).
         assert response_cost == {}
+
+
+class TestChildObservationsInheritTraceAttributes:
+    def test_children_are_created_inside_the_roots_propagate_attributes(self, monkeypatch):
+        """hermes-agent#81730: propagate_attributes() only stamps observations created inside its
+        scope. Children come from later hooks, after the root's ``with`` block closed, so they used
+        to carry no session_id/tags. Every child must be opened under the root's attributes."""
+        import contextlib
+
+        sys.modules.pop("langfuse_plugin", None)
+        mod = importlib.import_module("langfuse_plugin")
+        active: list = []
+        children: list = []
+
+        @contextlib.contextmanager
+        def _propagate(**kw):
+            active.append(kw)
+            try:
+                yield
+            finally:
+                active.pop()
+
+        class _Span:
+            def update(self, **kw): pass
+            def update_trace(self, **kw): pass
+            def end(self, **kw): pass
+            def start_observation(self, **kw):
+                children.append((kw["name"], dict(active[-1]) if active else None))
+                return _Span()
+
+        class _Client:
+            def create_trace_id(self, seed=None): return f"trace::{seed}"
+            def start_observation(self, **kw): return _Span()
+            def flush(self): pass
+
+        monkeypatch.setattr(mod, "propagate_attributes", _propagate)
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: _Client())
+        common = dict(task_id="sess-p", session_id="sess-p", model="m", provider="p", api_mode="chat",
+                      api_call_count=1, turn_id="sess-p:turn1", api_request_id="sess-p:turn1:api:1")
+        mod.on_pre_llm_request(request_messages=[{"role": "user", "content": "hi"}], **common)
+        mod.on_pre_tool_call(tool_name="terminal", args={"command": "ls"}, tool_call_id="c1",
+                             task_id="sess-p", session_id="sess-p", turn_id="sess-p:turn1")
+
+        assert [name for name, _ in children] == ["LLM call 1", "Tool: terminal"]
+        for _, attrs in children:
+            assert attrs == {"session_id": "sess-p", "trace_name": "Hermes turn", "tags": ["hermes", "langfuse"]}

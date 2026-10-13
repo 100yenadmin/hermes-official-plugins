@@ -46,6 +46,8 @@ class TraceState:
     # fan-out until the next one, so tool-loop turns would re-emit advisors.
     moa_emitted: set = field(default_factory=set)
     last_updated_at: float = field(default_factory=time.time)
+    # propagate_attributes() kwargs the root was opened with, re-applied to every child.
+    propagated: dict[str, Any] = field(default_factory=dict)
 
 
 _STATE_LOCK = threading.Lock()
@@ -587,10 +589,10 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
                                         input=trace_input, metadata=metadata)
 
     root_span = None
+    propagated = {"session_id": session_id or task_key, "trace_name": "Hermes turn", "tags": ["hermes", "langfuse"]}
     if propagate_attributes is not None:
         try:
-            with propagate_attributes(session_id=session_id or task_key, trace_name="Hermes turn",
-                                      tags=["hermes", "langfuse"]):
+            with propagate_attributes(**propagated):
                 root_span = open_root()
         except Exception:
             root_span = None
@@ -601,14 +603,21 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         root_span.update_trace(input=trace_input)
 
     _debug(f"started trace {trace_id} for {task_key}")
-    return TraceState(trace_id=trace_id, root_ctx=None, root_span=root_span)
+    return TraceState(trace_id=trace_id, root_ctx=None, root_span=root_span, propagated=propagated)
 
 
 def _start_child_observation(state: TraceState, *, name: str, as_type: str, input_value: Any,
                              metadata: Optional[dict] = None, model: Optional[str] = None,
                              model_parameters: Optional[dict] = None) -> Any:
-    return state.root_span.start_observation(name=name, as_type=as_type, input=input_value, metadata=metadata or {},
-                                             model=model, model_parameters=model_parameters)
+    # propagate_attributes() only stamps observations created inside its scope, and children are
+    # created by later hooks (often on another thread), so re-enter it per child; otherwise every
+    # generation/tool span carries no session_id/tags and observation-level analytics bucket all
+    # tokens and cost under a null session (hermes-agent#81730).
+    with propagate_attributes(**state.propagated) if propagate_attributes and state.propagated \
+            else contextlib.nullcontext():
+        return state.root_span.start_observation(name=name, as_type=as_type, input=input_value,
+                                                 metadata=metadata or {}, model=model,
+                                                 model_parameters=model_parameters)
 
 
 def _end_observation(observation: Any, *, output: Any = None, metadata: Optional[dict] = None,
