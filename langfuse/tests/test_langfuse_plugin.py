@@ -1450,15 +1450,19 @@ class TestApiRequestErrorHook:
         """#81731: a generation/tool that never got its post hook used to close
         at level DEFAULT, indistinguishable from a successful call."""
         mod = self._fresh_plugin()
-        monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
+        client = type("_Client", (), {"flush": lambda self: None})()
+        monkeypatch.setattr(mod, "_LANGFUSE_CLIENT", client)
+        monkeypatch.setattr(mod, "_get_langfuse", lambda: client)
         mod._TRACE_STATE.clear()
-        task_key = mod._trace_key("t", "s", turn_id="s:t:turn4")
-        gen, _root = self._seed_state(mod, task_key)
+        task_key = mod._trace_key("s", "s", turn_id="s:turn4")  # gateway shape: task_id == session_id
+        gen, root = self._seed_state(mod, task_key)
         tool, _ = self._seed_state(mod, "unused")
         mod._TRACE_STATE[task_key].tools["call_1"] = tool
 
-        mod._finish_trace(task_key)
+        # An interrupted turn never reaches post_llm_call; the session boundary closes it.
+        mod.on_session_finalize(session_id="s", reason="session_boundary")
 
+        assert root.ended and task_key not in mod._TRACE_STATE
         for obs in (gen, tool):
             assert obs.ended and any(u.get("level") == "ERROR" and u.get("status_message") for u in obs.updates)
 
