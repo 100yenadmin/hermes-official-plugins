@@ -2060,16 +2060,15 @@ class TestSystemPromptCrossesHookBoundary:
         self._derive_and_fire(mod, api_kwargs, api_kwargs["messages"])
         roles = [m["role"] for m in captured["input"]]
         assert roles.count("system") == 1
-class TestFinishTraceUsesUpdateTrace:
-    """Regression: SDK v3 has update_trace, not set_trace_io.
+class TestFinishTraceUsesSetTraceIo:
+    """Regression: the pinned SDK v4 has set_trace_io, not v3's update_trace.
 
-    Calling the non-existent set_trace_io raised AttributeError inside
-    _finish_trace's try block and skipped root_span.end(). Generations/tools
-    still exported, so the Langfuse list showed Observation Levels + Latency
-    but blank Input/Output columns (no CHAIN root).
+    Calling the missing method once skipped root_span.end() (blank Input/Output
+    columns, no CHAIN root); after that was guarded it still failed open on every
+    turn, so traces shipped without trace-level input/output (hermes-agent#94710).
     """
 
-    def test_finish_ends_root_and_calls_update_trace(self, monkeypatch):
+    def test_finish_ends_root_and_calls_set_trace_io(self, monkeypatch):
         sys.modules.pop("langfuse_plugin", None)
         mod = importlib.import_module("langfuse_plugin")
 
@@ -2087,13 +2086,13 @@ class TestFinishTraceUsesUpdateTrace:
             def end(self, **kw):
                 self.ended = True
 
-            def update_trace(self, **kw):
+            def set_trace_io(self, **kw):
                 self.trace_updates.append(kw)
 
             def start_observation(self, **kw):
                 return _Span()
 
-            # Deliberately NO set_trace_io — mirrors real LangfuseChain.
+            # Deliberately NO update_trace — mirrors the pinned SDK v4 LangfuseChain.
 
         class _RootCM:
             def __init__(self):
@@ -2149,11 +2148,12 @@ class TestFinishTraceUsesUpdateTrace:
         assert len(roots) == 1
         root = roots[0]
         assert root.ended is True
+        assert any("input" in u for u in root.trace_updates)
         assert any("output" in u for u in root.trace_updates)
         assert any("output" in u for u in root.updates)
         assert mod._TRACE_STATE == {}
 
-    def test_finish_still_ends_when_update_trace_raises(self, monkeypatch):
+    def test_finish_still_ends_when_set_trace_io_raises(self, monkeypatch):
         sys.modules.pop("langfuse_plugin", None)
         mod = importlib.import_module("langfuse_plugin")
 
@@ -2169,8 +2169,8 @@ class TestFinishTraceUsesUpdateTrace:
             def end(self, **kw):
                 self.ended = True
 
-            def update_trace(self, **kw):
-                raise RuntimeError("simulated update_trace failure")
+            def set_trace_io(self, **kw):
+                raise RuntimeError("simulated set_trace_io failure")
 
             def start_observation(self, **kw):
                 return _Span()

@@ -634,8 +634,10 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     if root_span is None:
         root_span = open_root()
 
-    with _failsafe("update_trace(input)"):  # SDK v3 uses update_trace()
-        root_span.update_trace(input=trace_input)
+    # Trace-level I/O: set_trace_io() in the pinned SDK v4 (v3's update_trace() is gone, and
+    # calling it failed open on every turn, leaving traces without input/output: hermes-agent#94710).
+    with _failsafe("set_trace_io(input)"):
+        root_span.set_trace_io(input=trace_input)
 
     _debug(f"started trace {trace_id} for {task_key}")
     return TraceState(trace_id=trace_id, root_ctx=None, root_span=root_span, propagated=propagated)
@@ -734,9 +736,9 @@ def _finish_trace(task_key: str, *, output: Any = None) -> None:
             final_output = dict(output) if isinstance(output, dict) else {"content": output}
             final_output["tool_calls"] = list(state.turn_tool_calls)
         if final_output is not None:
-            # update_trace sets TRACE-level I/O (SDK v3); root I/O via update().
+            # set_trace_io sets TRACE-level I/O (SDK v4); root I/O via update().
             # Neither may prevent end(), else children export without a root.
-            for method, label in (("update_trace", "update_trace(output)"), ("update", "root update(output)")):
+            for method, label in (("set_trace_io", "set_trace_io(output)"), ("update", "root update(output)")):
                 with _failsafe(label):
                     getattr(state.root_span, method)(output=final_output)
         _end_root(state, "root end()")
