@@ -127,3 +127,31 @@ def test_cron_run_is_tagged_with_its_stable_job_id(traced):
     finally:
         exit_cron_execution(token)
     assert propagated[0]["tags"] == ["hermes", "langfuse", "platform:cron", "trigger:cron", "cron-job:test-job"]
+
+
+# Responses API tool items in generation input (hermes-agent#84186).
+
+_RESPONSES_ITEMS = [
+    {"type": "function_call", "call_id": "call-1", "name": "web_extract",
+     "arguments": '{"urls": ["https://example.com"]}'},
+    {"type": "function_call_output", "call_id": "call-1", "output": '{"ok": true}'},
+]
+
+
+def test_serialize_messages_preserves_responses_tool_items():
+    sys.modules.pop("langfuse_plugin", None)
+    mod = importlib.import_module("langfuse_plugin")
+    assert mod._serialize_messages(_RESPONSES_ITEMS) == [
+        {"type": "function_call", "call_id": "call-1", "name": "web_extract",
+         "arguments": {"urls": ["https://example.com"]}},
+        {"type": "function_call_output", "call_id": "call-1", "output": {"ok": True}},
+    ]
+
+
+def test_responses_tool_payloads_follow_metadata_capture_mode(monkeypatch):
+    monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "metadata")
+    sys.modules.pop("langfuse_plugin", None)
+    mod = importlib.import_module("langfuse_plugin")
+    call, output = mod._serialize_messages(_RESPONSES_ITEMS)
+    assert call["arguments"] == {"omitted": True, "type": "text", "chars": 33}
+    assert output["output"]["omitted"] is True and output["call_id"] == "call-1"

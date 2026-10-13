@@ -503,6 +503,11 @@ def _messages_for_langfuse_input(*, request_messages: Any = None, messages: Any 
 
 
 def _serialize_message(message: dict[str, Any]) -> dict[str, Any]:
+    # Responses API input items carry type/call_id/name/arguments/output, no role/content: the
+    # chat shape below would export them as {"role": null, "content": null}.
+    if message.get("type") in ("function_call", "function_call_output"):
+        return {k: _capture_content(v, parse_json_strings=True) if k in ("arguments", "output") else v
+                for k, v in message.items() if k in ("type", "call_id", "name", "arguments", "output")}
     role, is_tool = message.get("role"), message.get("role") == "tool"
     return {
         "role": role, "content": _capture_content(message.get("content"), parse_json_strings=is_tool),
