@@ -123,10 +123,29 @@ def _pb_read(fetch: Callable[..., Any], args: dict, action: str) -> str:
 _CONTEXT_TYPES = (("album", "spotify:album:", "/album/"), ("playlist", "spotify:playlist:", "/playlist/"), ("artist", "spotify:artist:", "/artist/"))
 
 
+def _pb_play_tracks(client: SpotifyClient, args: dict, action: str, uris: list[str]) -> str:
+    """Play a bare list of tracks: the first inside its album, the rest queued behind it.
+
+    Spotify's desktop client (1.3.x since September 2026) answers ``{"uris": [...]}`` with 204 but
+    plays nothing and drops what was playing; requests that carry a context still play. The album
+    keeps playing after the queued tracks run out.
+    """
+    device = {"device_id": args.get("device_id")}
+    # from_token returns the copy playable in the user's market (relinked id and album).
+    track = client.request("GET", f"/tracks/{normalize_spotify_id(uris[0], 'track')}", params={"market": "from_token"})
+    body = {"context_uri": track["album"]["uri"], "offset": {"uri": track["uri"]}, "position_ms": args.get("position_ms")}
+    result = client.request("PUT", "/me/player/play", params=device, json_body=body)
+    for uri in uris[1:]:
+        client.request("POST", "/me/player/queue", params={"uri": uri, **device})
+    return _ok(action, result, started=track["uri"], context_uri=body["context_uri"], queued=uris[1:])
+
+
 def _pb_play(client: SpotifyClient, args: dict, action: str) -> str:
     offset = args.get("offset")
     payload_offset = {k: v for k, v in offset.items() if v is not None} if isinstance(offset, dict) else None
     uris = normalize_spotify_uris(_as_list(args.get("uris")), "track") if args.get("uris") else None
+    if uris and not args.get("context_uri"):
+        return _pb_play_tracks(client, args, action, uris)
     context_uri = None
     if args.get("context_uri"):
         raw = str(args.get("context_uri"))
