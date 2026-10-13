@@ -1,0 +1,107 @@
+"""Trace attribution: which profile a turn ran for (hermes-agent#135213).
+
+Several profiles can share one Langfuse project (and one gateway, when multiplexed). Driven
+through the real ``pre_api_request`` hook against the per-test HERMES_HOME; only the SDK client
+is replaced by a recorder.
+"""
+from __future__ import annotations
+
+import contextlib
+import importlib
+import sys
+
+import pytest
+
+
+class _Span:
+    def update(self, **kw):
+        pass
+
+    def update_trace(self, **kw):
+        pass
+
+    def end(self, **kw):
+        pass
+
+    def start_observation(self, **kw):
+        return _Span()
+
+
+class _RootCM:
+    def __enter__(self):
+        return _Span()
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _Client:
+    def __init__(self, roots):
+        self._roots = roots
+
+    def create_trace_id(self, seed=None):
+        return f"trace::{seed}"
+
+    def start_as_current_observation(self, **kw):
+        self._roots.append(kw)
+        return _RootCM()
+
+    def flush(self):
+        pass
+
+
+@pytest.fixture
+def traced(tmp_path, monkeypatch):
+    """Plugin wired to a recording client; returns (module, roots, propagated, home)."""
+    home = tmp_path / "hermes"
+    (home / "profiles" / "arkana").mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(tmp_path))  # so HERMES_HOME (tmp/hermes) is ~/.hermes
+    for name in ("HERMES_PROFILE", "HERMES_PROFILE_NAME"):
+        monkeypatch.delenv(name, raising=False)
+    sys.modules.pop("langfuse_plugin", None)
+    mod = importlib.import_module("langfuse_plugin")
+    roots: list = []
+    propagated: list = []
+
+    @contextlib.contextmanager
+    def _propagate(**kw):
+        propagated.append(kw)
+        yield
+
+    monkeypatch.setattr(mod, "_get_langfuse", lambda: _Client(roots))
+    monkeypatch.setattr(mod, "propagate_attributes", _propagate)
+    # Register through a real PluginContext: profile / cron identity come from its public seams.
+    from hermes_cli.plugins import PluginContext, PluginManager, PluginManifest
+    mod.register(PluginContext(PluginManifest(name="langfuse"), PluginManager()))
+    mod._TRACE_STATE.clear()
+    return mod, roots, propagated, home
+
+
+def _open_turn(mod, session="s1", platform="cli"):
+    mod.on_pre_llm_request(
+        task_id=session, session_id=session, platform=platform, model="m", provider="p", api_mode="chat",
+        api_call_count=1, request_messages=[{"role": "user", "content": "hi"}],
+        turn_id=f"{session}:t1", api_request_id=f"{session}:t1:api:1",
+    )
+
+
+def test_default_profile_is_named(traced):
+    mod, roots, propagated, _ = traced
+    _open_turn(mod)
+    assert roots[0]["metadata"]["profile"] == "default"
+    assert propagated[0]["metadata"] == {"profile": "default"}
+
+
+def test_routed_turn_names_the_served_profile_not_the_launch_one(traced, monkeypatch):
+    mod, roots, propagated, home = traced
+    # The launch profile's env pin must not relabel a routed turn.
+    monkeypatch.setenv("HERMES_PROFILE", "default")
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    token = set_hermes_home_override(str(home / "profiles" / "arkana"))
+    try:
+        _open_turn(mod, session="s2")
+    finally:
+        reset_hermes_home_override(token)
+    assert roots[0]["metadata"]["profile"] == "arkana"
+    assert propagated[0]["metadata"] == {"profile": "arkana"}

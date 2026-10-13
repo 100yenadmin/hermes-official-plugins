@@ -65,6 +65,8 @@ _LANGFUSE_CLIENT_BY_HOME: dict[str, Any] = {}
 # Separate from _STATE_LOCK (hot path) so the two never nest; serializes the
 # first client build so racing callers can't each construct a client.
 _LANGFUSE_CLIENT_LOCK = threading.Lock()
+# The registering PluginContext: the public seam for the served profile and the running cron job.
+_PLUGIN_CTX: Any = None
 _READ_FILE_LINE_RE = re.compile(r"^\s*(\d+)\|(.*)$")
 _READ_FILE_HEAD_LINES = 25
 _READ_FILE_TAIL_LINES = 15
@@ -619,10 +621,13 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     last_user = next((m for m in reversed(messages) if isinstance(m, dict) and m.get("role") == "user"), None) \
         if isinstance(messages, list) else None
     trace_input = None if last_user is None else {"role": "user", "content": _capture_content(last_user.get("content"))}
+    # The profile the turn runs FOR (ctx.profile_name follows the routed home under multiplexing,
+    # not the launch profile), so traces from several profiles in one project can be told apart.
+    profile = _PLUGIN_CTX.profile_name if _PLUGIN_CTX is not None else ""
     metadata = {
         "source": "hermes", "task_id": task_id, "turn_id": turn_id, "api_request_id": api_request_id,
         "platform": platform, "provider": provider, "model": model, "api_mode": api_mode,
-        "capture_mode": _capture_mode(),
+        "capture_mode": _capture_mode(), "profile": profile,
     }
     # session_id must be in trace_context for Langfuse session grouping.
     trace_ctx: dict[str, Any] = {"trace_id": trace_id, **({"session_id": session_id} if session_id else {})}
@@ -637,6 +642,8 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
 
     root_span = None
     propagated = {"session_id": session_id or task_key, "trace_name": "Hermes turn", "tags": ["hermes", "langfuse"]}
+    if profile:
+        propagated["metadata"] = {"profile": profile}
     if propagate_attributes is not None:
         try:
             with propagate_attributes(**propagated):
@@ -1130,6 +1137,8 @@ def register(ctx) -> None:
         logger.info("langfuse: this Hermes core still ships Langfuse built in; "
                     "the plugin stays inactive until core drops it")
         return
+    global _PLUGIN_CTX
+    _PLUGIN_CTX = ctx
     # Both hook-name variants so the plugin works across Hermes versions:
     # *_api_request fire per API call (preferred); *_llm_call once per turn.
     hooks = (
