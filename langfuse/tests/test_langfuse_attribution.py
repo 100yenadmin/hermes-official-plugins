@@ -147,3 +147,24 @@ def test_responses_tool_payloads_follow_metadata_capture_mode(monkeypatch):
     call, output = mod._serialize_messages(_RESPONSES_ITEMS)
     assert call["arguments"] == {"omitted": True, "type": "text", "chars": 33}
     assert output["output"]["omitted"] is True and output["call_id"] == "call-1"
+
+
+def test_responses_reasoning_and_compaction_items_keep_their_type(traced, monkeypatch):
+    """Codex Responses input also replays reasoning / compaction items (hermes-agent#84186): they must
+    not export as {"role": None, "content": None}, and their sealed encrypted_content stays out."""
+    mod, _, _, _ = traced
+    children: list = []
+    monkeypatch.setattr(_Span, "start_observation", lambda self, **kw: children.append(kw) or _Span())
+    mod.on_pre_llm_request(
+        task_id="s1", session_id="s1", model="m", provider="p", api_mode="codex_responses", api_call_count=1,
+        turn_id="s1:t1", api_request_id="s1:t1:api:1", request_messages=[
+            {"role": "user", "content": "hi"},
+            {"type": "reasoning", "encrypted_content": "gAAAA-sealed",
+             "summary": [{"type": "summary_text", "text": "checked the docs"}]},
+            {"type": "compaction", "encrypted_content": "gAAAA-sealed"},
+        ],
+    )
+    assert children[0]["input"][1:] == [
+        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "checked the docs"}]},
+        {"type": "compaction"},
+    ]
