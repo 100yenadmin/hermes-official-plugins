@@ -562,19 +562,39 @@ class TestPlaceholderKeyDetection:
             "expected 1 (cached via _INIT_FAILED)"
         )
 
-    def test_custom_endpoint_accepts_operator_issued_keys(self, monkeypatch, caplog):
-        """A custom Langfuse-compatible endpoint may issue keys without the Cloud prefix;
-        it authenticates them itself (hermes-agent#72484). Templates still warn."""
+    @pytest.mark.parametrize(("public", "secret"), [
+        ("custom-public-key", "custom-secret-key"), ("ollama", "sk-..."),
+        ("sk-lf-1234abcd-12ab", "pk-lf-9f8e7d6c-5b4a"),  # swapped
+    ])
+    def test_custom_endpoint_builds_but_warns_on_wrong_prefix(self, monkeypatch, caplog, public, secret):
+        """A custom Langfuse-compatible endpoint may issue keys without the Cloud prefix and
+        authenticates them itself (hermes-agent#72484), so the client is built. Self-hosted
+        Langfuse issues pk-lf-/sk-lf- keys too, so a wrong prefix (the `ollama` / `sk-...` /
+        swapped keys of hermes-agent#51399) still warns once instead of dying silently at flush."""
         self._clear_env(monkeypatch)
-        monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", "https://langfuse-compatible.example.internal")
-        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "custom-public-key")
-        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "custom-secret-key")
+        monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", "https://langfuse.mycorp.example")
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", public)
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", secret)
         plugin = self._fresh_plugin(monkeypatch)
         with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
-            assert plugin._get_langfuse() is not None
-        assert "placeholders" not in caplog.text
-        assert _FakeLangfuse.instances[0].kwargs["public_key"] == "custom-public-key"
-        assert plugin._validate_langfuse_key("HERMES_LANGFUSE_PUBLIC_KEY", "...", require_prefix=False)
+            for _ in range(3):
+                assert plugin._get_langfuse() is not None
+        warnings = [r.getMessage() for r in caplog.records if r.name == self.LOGGER_NAME]
+        assert len(warnings) == 1 and "expected 'pk-lf-' prefix" in warnings[0], warnings
+        assert "NOT be emitted" not in warnings[0]
+        assert _FakeLangfuse.instances[0].kwargs["public_key"] == public
+
+    def test_custom_endpoint_still_refuses_template_keys(self, monkeypatch, caplog):
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("HERMES_LANGFUSE_BASE_URL", "https://langfuse.mycorp.example")
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-...")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-1234abcd-12ab")
+        plugin = self._fresh_plugin(monkeypatch)
+        with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
+            assert plugin._get_langfuse() is None
+        warnings = [r.getMessage() for r in caplog.records if r.name == self.LOGGER_NAME]
+        assert len(warnings) == 1 and "template" in warnings[0] and "NOT be emitted" in warnings[0]
+        assert _FakeLangfuse.instances == []
 
     @pytest.mark.parametrize(("base_url", "guarded"), [
         ("https://cloud.langfuse.com", True), ("https://us.cloud.langfuse.com.", True),

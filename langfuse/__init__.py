@@ -283,15 +283,13 @@ def _build_client() -> Optional[Langfuse]:
     # The SDK does not validate keys at construction; placeholder keys
     # would fail silently at flush time (#23823). Warn once here instead.
     # Only Langfuse Cloud guarantees the pk-lf-/sk-lf- format: a custom endpoint may issue
-    # operator-defined keys and authenticates them itself (hermes-agent#72484), so there only
-    # the template check applies.
+    # operator-defined keys and authenticates them itself (hermes-agent#72484), so there a wrong
+    # prefix only warns (self-hosted Langfuse issues pk-lf-/sk-lf- too) and templates still refuse.
     base_url = _secret("HERMES_LANGFUSE_BASE_URL") or _secret("LANGFUSE_BASE_URL") or "https://cloud.langfuse.com"
     host = (urlsplit(base_url).hostname or "").rstrip(".")
     cloud = host == "langfuse.com" or host.endswith(".langfuse.com")
-    placeholder_issues = [issue for issue in (
-        _validate_langfuse_key("HERMES_LANGFUSE_PUBLIC_KEY", public_key, require_prefix=cloud),
-        _validate_langfuse_key("HERMES_LANGFUSE_SECRET_KEY", secret_key, require_prefix=cloud),
-    ) if issue]
+    keys = (("HERMES_LANGFUSE_PUBLIC_KEY", public_key), ("HERMES_LANGFUSE_SECRET_KEY", secret_key))
+    placeholder_issues = [issue for name, value in keys if (issue := _validate_langfuse_key(name, value, require_prefix=cloud))]
     if placeholder_issues:
         logger.warning(
             "Langfuse plugin: credentials look like placeholders, traces will "
@@ -301,6 +299,14 @@ def _build_client() -> Optional[Langfuse]:
             "; ".join(placeholder_issues),
         )
         return None
+    prefix_issues = [issue for name, value in keys if (issue := _validate_langfuse_key(name, value))]
+    if prefix_issues:
+        logger.warning(
+            "Langfuse plugin: credentials do not look like Langfuse keys (%s). Fine for a "
+            "Langfuse-compatible endpoint that issues its own keys; otherwise every trace is "
+            "rejected at flush: check for template values or swapped public/secret keys.",
+            "; ".join(prefix_issues),
+        )
 
     kwargs: dict[str, Any] = {"public_key": public_key, "secret_key": secret_key}
     for key, name, default in (("base_url", "BASE_URL", "https://cloud.langfuse.com"), ("environment", "ENV", ""),
