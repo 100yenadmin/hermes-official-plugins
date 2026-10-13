@@ -473,7 +473,9 @@ def _safe_value(value: Any, *, max_chars: Optional[int] = None, depth: int = 0,
         # '"access_token": "<opaque>"' is masked, the bare value is not.
         from agent.redact import is_secret_field_name
         mask = _capture_mode() == "sanitized"
-        return {str(k): "[REDACTED]" if mask and isinstance(v, str) and v and is_secret_field_name(k) else recurse(v, depth + 1)
+        # Any scalar but bool/None: {"password": 123456} parses to an int.
+        return {str(k): "[REDACTED]" if mask and isinstance(v, (str, int, float)) and not isinstance(v, bool)
+                and v != "" and is_secret_field_name(k) else recurse(v, depth + 1)
                 for k, v in list(value.items())[:50]}
     if isinstance(value, (list, tuple, set)):
         return [recurse(v, depth + 1) for v in list(value)[:50]]

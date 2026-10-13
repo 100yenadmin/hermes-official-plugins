@@ -1332,6 +1332,15 @@ class TestCaptureModes:
         monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "full")
         assert self._exported_tool_output(mod, monkeypatch, json.dumps({"output": text}))["output"] == text
 
+    def test_sanitized_mode_masks_numeric_secret_fields(self, monkeypatch):
+        """JSON parsing turns a numeric password into an int, which the str-only key mask skipped."""
+        mod = self._fresh_plugin()
+        monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "sanitized")
+        inner = {"password": 123456, "api_key": 9.5, "token": True, "secret": None, "total_tokens": 70, "port": 5432}
+        out = self._exported_tool_output(mod, monkeypatch, json.dumps({"output": json.dumps(inner)}))["output"]
+        assert out == {"password": "[REDACTED]", "api_key": "[REDACTED]", "token": True, "secret": None,
+                       "total_tokens": 70, "port": 5432}
+
 
 # ---------------------------------------------------------------------------
 # api_request_error hook
