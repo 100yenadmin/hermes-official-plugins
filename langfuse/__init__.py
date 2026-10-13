@@ -268,6 +268,16 @@ def _build_client() -> Optional[Langfuse]:
 
     public_key, secret_key = (_secret(f"HERMES_LANGFUSE_{n}") or _secret(f"LANGFUSE_{n}") for n in ("PUBLIC_KEY", "SECRET_KEY"))
     if not (public_key and secret_key):
+        # Enabled but half/un-configured used to return with zero log output, so a placeholder
+        # public key with the secret unset dropped every trace silently (hermes-agent#98631).
+        missing = [name for name, value in (("HERMES_LANGFUSE_PUBLIC_KEY", public_key),
+                                            ("HERMES_LANGFUSE_SECRET_KEY", secret_key)) if not value]
+        logger.warning(
+            "Langfuse plugin: missing credentials (%s), traces will NOT be emitted. Set both "
+            "HERMES_LANGFUSE_PUBLIC_KEY and HERMES_LANGFUSE_SECRET_KEY, or disable the plugin "
+            "(`hermes plugins disable langfuse`) to silence this warning.",
+            ", ".join(missing),
+        )
         return None
 
     # The SDK does not validate keys at construction; placeholder keys

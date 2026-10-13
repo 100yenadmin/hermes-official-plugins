@@ -586,6 +586,21 @@ class TestPlaceholderKeyDetection:
         monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "custom-secret-key")
         assert (self._fresh_plugin(monkeypatch)._get_langfuse() is None) is guarded
 
+    def test_missing_secret_key_warns_once_and_skips(self, monkeypatch, caplog):
+        """Placeholder public key + unset secret used to fail with zero log output
+        (hermes-agent#98631): the empty branch runs before the placeholder guard."""
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "your-public-key-here")
+        plugin = self._fresh_plugin(monkeypatch)
+        with caplog.at_level(logging.WARNING, logger=self.LOGGER_NAME):
+            for _ in range(3):
+                assert plugin._get_langfuse() is None
+        warnings = [r.getMessage() for r in caplog.records if r.name == self.LOGGER_NAME]
+        assert len(warnings) == 1
+        assert "missing credentials (HERMES_LANGFUSE_SECRET_KEY)" in warnings[0]
+        assert "traces will NOT be emitted" in warnings[0]
+        assert _FakeLangfuse.instances == []
+
 
 class TestRequestMessageCoercion:
     def test_prefers_request_messages_then_messages_then_history_then_user_message(self):

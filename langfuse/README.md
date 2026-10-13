@@ -10,8 +10,8 @@ platform. One span per turn, one generation per API call, one observation per to
 Usage totals, per-type token counts and cost estimates come from Hermes' own pricing, so Langfuse sees
 the same breakdown (input / output / cache read / cache write / reasoning tokens) as `hermes logs`.
 
-The plugin fails open: no SDK, no credentials or a transient Langfuse error all turn into a silent
-no-op in the hook. The agent loop is never affected.
+The plugin fails open: no SDK, no credentials or a transient Langfuse error all turn into a no-op in
+the hook (a missing SDK or missing/placeholder keys log one warning). The agent loop is never affected.
 
 **If you already used Langfuse with Hermes, you don't need to do anything.** `hermes update` (or the
 first start after updating) installs and enables this plugin for every profile that had
