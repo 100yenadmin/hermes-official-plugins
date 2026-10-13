@@ -732,7 +732,7 @@ class TestToolCallOutputBackfill:
         mod = importlib.import_module("langfuse_plugin")
 
         observation = object()
-        state = mod.TraceState(trace_id="trace-1", root_ctx=None, root_span=None)
+        state = mod.TraceState(trace_id="trace-1", root_span=None)
         state.tools["call-1"] = observation
         state.turn_tool_calls.append({
             "id": "call-1",
@@ -802,7 +802,7 @@ class TestToolObservationKeying:
     def test_empty_tool_call_id_single_tool_sets_output(self, monkeypatch):
         mod = self._make_mod()
         obs = object()
-        state = mod.TraceState(trace_id="t", root_ctx=None, root_span=None)
+        state = mod.TraceState(trace_id="t", root_span=None)
         state.pending_tools_by_name.setdefault("my_tool", []).append(obs)
 
         task_key = mod._trace_key("task-1", "sess-1")
@@ -834,7 +834,7 @@ class TestToolObservationKeying:
         """#81731: core's post_tool_call status must surface as the Langfuse level,
         else a failed tool call is indistinguishable from a successful one."""
         mod = self._make_mod()
-        state = mod.TraceState(trace_id="t", root_ctx=None, root_span=None)
+        state = mod.TraceState(trace_id="t", root_span=None)
         state.tools["call_1"] = object()
         monkeypatch.setitem(mod._TRACE_STATE, mod._trace_key("task-1", "sess-1"), state)
         ended = {}
@@ -858,7 +858,7 @@ class TestToolObservationKeying:
         mod = self._make_mod()
         n = 8
         observations = [object() for _ in range(n)]
-        state = mod.TraceState(trace_id="t", root_ctx=None, root_span=None)
+        state = mod.TraceState(trace_id="t", root_span=None)
         state.pending_tools_by_name["web_extract"] = list(observations)
 
         task_key = mod._trace_key("task-thr", "sess-thr")
@@ -897,7 +897,7 @@ class TestToolObservationKeying:
         """When tool_call_id is present, pending_tools_by_name is not touched."""
         mod = self._make_mod()
         obs = object()
-        state = mod.TraceState(trace_id="t", root_ctx=None, root_span=None)
+        state = mod.TraceState(trace_id="t", root_span=None)
         state.tools["call-99"] = obs
 
         task_key = mod._trace_key("task-1", "sess-1")
@@ -931,7 +931,7 @@ class TestUsageFromSanitizedResponse:
         # Active client so on_post_llm_call does not early-return.
         monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
         observation = object()
-        state = mod.TraceState(trace_id="trace-1", root_ctx=None, root_span=None)
+        state = mod.TraceState(trace_id="trace-1", root_span=None)
         state.generations[mod._request_key(1)] = observation
         monkeypatch.setitem(mod._TRACE_STATE, mod._trace_key("task-1", "session-1"), state)
         captured = {}
@@ -1085,7 +1085,7 @@ class TestModelAttribution:
 
         turn_id = "s:t:turn3"
         key = mod._trace_key("t", "s", turn_id=turn_id)
-        state = mod.TraceState(trace_id="x", root_ctx=None, root_span=_Root())
+        state = mod.TraceState(trace_id="x", root_span=_Root())
         state.generations["1"] = _Gen()
         mod._TRACE_STATE[key] = state
 
@@ -1142,7 +1142,7 @@ class TestCostTotal:
     def test_usage_summary_path_totals_the_breakdown(self, monkeypatch):
         mod = self._fresh_plugin()
         monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
-        state = mod.TraceState(trace_id="trace-1", root_ctx=None, root_span=None)
+        state = mod.TraceState(trace_id="trace-1", root_span=None)
         state.generations[mod._request_key(1)] = object()
         monkeypatch.setitem(mod._TRACE_STATE, mod._trace_key("task-1", "session-1"), state)
         captured = {}
@@ -1370,7 +1370,7 @@ class TestApiRequestErrorHook:
 
         gen = _Gen()
         root = _Root()
-        state = mod.TraceState(trace_id="t", root_ctx=None, root_span=root)
+        state = mod.TraceState(trace_id="t", root_span=root)
         state.generations[gen_key] = gen
         mod._TRACE_STATE[task_key] = state
         return gen, root
@@ -1500,7 +1500,7 @@ class TestSessionFinalizeHook:
             def end(self, **kw): self.ended = True
             def set_trace_io(self, **kw): pass
         root = _Root()
-        return mod.TraceState(trace_id="t", root_ctx=None, root_span=root), root
+        return mod.TraceState(trace_id="t", root_span=root), root
 
     def test_finalize_closes_matching_session_traces(self, monkeypatch):
         mod = self._fresh_plugin()
@@ -1616,7 +1616,7 @@ class TestSessionFinalizeHook:
         monkeypatch.setattr(mod, "_get_langfuse", lambda: client)
         mod._TRACE_STATE.clear()
         key = mod._trace_key("", "live", turn_id="turn")
-        mod._TRACE_STATE[key] = mod.TraceState(trace_id="t", root_ctx=None, root_span=_Obs(),
+        mod._TRACE_STATE[key] = mod.TraceState(trace_id="t", root_span=_Obs(),
                                                generations={"1": _Obs()})
         finish = {
             "success": lambda: mod.on_post_llm_call(session_id="live", turn_id="turn", api_call_count=1,
@@ -1667,7 +1667,7 @@ class TestSubagentTracing:
                 return obs
 
         monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
-        state = mod.TraceState(trace_id="trace-1", root_ctx=None, root_span=_Root())
+        state = mod.TraceState(trace_id="trace-1", root_span=_Root())
         monkeypatch.setitem(mod._TRACE_STATE, key, state)
         return state
 
@@ -1780,7 +1780,7 @@ class TestMoAReferenceGenerations:
                 return obs
 
         monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
-        return mod.TraceState(trace_id="t", root_ctx=None, root_span=_Root())
+        return mod.TraceState(trace_id="t", root_span=_Root())
 
     def _refs(self):
         return [
@@ -1974,7 +1974,7 @@ class TestSystemPromptInGenerationInput:
         generation observation kwargs."""
         captured = {}
         monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
-        state = mod.TraceState(trace_id="t", root_ctx=None, root_span=None)
+        state = mod.TraceState(trace_id="t", root_span=None)
         task_key = mod._trace_key("task-1", "sess-1")
         monkeypatch.setitem(mod._TRACE_STATE, task_key, state)
 
@@ -2064,7 +2064,7 @@ class TestSystemPromptCrossesHookBoundary:
     def _capture_generation(self, mod, monkeypatch):
         captured = {}
         monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
-        state = mod.TraceState(trace_id="t", root_ctx=None, root_span=None)
+        state = mod.TraceState(trace_id="t", root_span=None)
         task_key = mod._trace_key("task-1", "sess-1")
         monkeypatch.setitem(mod._TRACE_STATE, task_key, state)
 
@@ -2382,7 +2382,7 @@ class TestCanonicalCostExport:
     def _capture_summary_path(mod, monkeypatch, usage, *, provider, model, api_mode):
         monkeypatch.setattr(mod, "_get_langfuse", lambda: object())
         observation = object()
-        state = mod.TraceState(trace_id="trace-cost", root_ctx=None, root_span=None)
+        state = mod.TraceState(trace_id="trace-cost", root_span=None)
         state.generations[mod._request_key(1)] = observation
         task_key = mod._trace_key("task-cost", "session-cost")
         monkeypatch.setitem(mod._TRACE_STATE, task_key, state)

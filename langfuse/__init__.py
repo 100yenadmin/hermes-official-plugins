@@ -35,7 +35,6 @@ except Exception:  # pragma: no cover - fail-open when optional dep is missing
 @dataclass
 class TraceState:
     trace_id: str
-    root_ctx: Any  # always None: the root is opened detached (see _start_root_trace); kept so constructors stay valid
     root_span: Any
     generations: dict[str, Any] = field(default_factory=dict)
     tools: dict[str, Any] = field(default_factory=dict)
@@ -696,7 +695,7 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
         root_span.set_trace_io(input=trace_input)
 
     _debug(f"started trace {trace_id} for {task_key}")
-    return TraceState(trace_id=trace_id, root_ctx=None, root_span=root_span, propagated=propagated)
+    return TraceState(trace_id=trace_id, root_span=root_span, propagated=propagated)
 
 
 def _start_child_observation(state: TraceState, *, name: str, as_type: str, input_value: Any,
