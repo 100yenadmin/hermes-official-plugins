@@ -601,6 +601,22 @@ class TestPlaceholderKeyDetection:
         assert "traces will NOT be emitted" in warnings[0]
         assert _FakeLangfuse.instances == []
 
+    @pytest.mark.parametrize(("resource_attrs", "expected"), [
+        ("", "hermes-agent"), ("service.name=my-agent", None),
+    ])
+    def test_client_build_defaults_otel_service_name(self, monkeypatch, resource_attrs, expected):
+        """Without it the SDK's OTel resource exports service.name=unknown_service
+        (hermes-agent#58322); an operator-set service.name must not be overridden."""
+        self._clear_env(monkeypatch)
+        monkeypatch.setenv("OTEL_SERVICE_NAME", "restore-me")  # so teardown undoes the plugin's set
+        monkeypatch.delenv("OTEL_SERVICE_NAME")
+        monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", resource_attrs)
+        monkeypatch.setenv("HERMES_LANGFUSE_PUBLIC_KEY", "pk-lf-real-public-xyz")
+        monkeypatch.setenv("HERMES_LANGFUSE_SECRET_KEY", "sk-lf-real-secret-xyz")
+        assert self._fresh_plugin(monkeypatch)._get_langfuse() is not None
+        import os
+        assert os.environ.get("OTEL_SERVICE_NAME") == expected
+
 
 class TestRequestMessageCoercion:
     def test_prefers_request_messages_then_messages_then_history_then_user_message(self):

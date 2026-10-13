@@ -86,6 +86,7 @@ HERMES_LANGFUSE_MAX_CHARS=12000      # max chars per field (default: 12000)
 HERMES_LANGFUSE_MAX_DEPTH=4          # max payload depth (default: 4)
 HERMES_LANGFUSE_CAPTURE=sanitized    # content capture mode (see below)
 HERMES_LANGFUSE_DEBUG=true           # verbose plugin logging to agent.log
+OTEL_SERVICE_NAME=my-agent           # OTel service.name on traces (default: hermes-agent)
 ```
 
 The standard SDK names (`LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY`, `LANGFUSE_BASE_URL`) are

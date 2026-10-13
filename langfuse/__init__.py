@@ -315,6 +315,11 @@ def _build_client() -> Optional[Langfuse]:
         except ValueError:
             logger.warning("Invalid HERMES_LANGFUSE_SAMPLE_RATE=%r", sample_rate)
 
+    # The SDK's OTel resource falls back to service.name=unknown_service, so every agent's traces
+    # landed unattributed (hermes-agent#58322). Default only: an operator's OTEL_SERVICE_NAME or
+    # service.name in OTEL_RESOURCE_ATTRIBUTES still wins. Must precede the SDK's TracerProvider.
+    if "service.name=" not in os.environ.get("OTEL_RESOURCE_ATTRIBUTES", ""):
+        os.environ.setdefault("OTEL_SERVICE_NAME", "hermes-agent")
     try:
         return Langfuse(**kwargs)
     except Exception as exc:  # pragma: no cover - fail-open
