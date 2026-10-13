@@ -1308,6 +1308,30 @@ class TestCaptureModes:
         out = mod._capture_content("call it with Bearer 9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee please")
         assert "9f8e7d6c5b4a" not in out
 
+    @staticmethod
+    def _exported_tool_output(mod, monkeypatch, result):
+        """Drive on_post_tool_call and return what the tool observation would export."""
+        state = mod.TraceState(trace_id="trace-1", root_ctx=None, root_span=None)
+        state.tools["call-1"] = object()
+        monkeypatch.setitem(mod._TRACE_STATE, mod._trace_key("task-1", "session-1"), state)
+        ended = {}
+        monkeypatch.setattr(mod, "_end_observation", lambda obs, *, output=None, **_: ended.update(output=output))
+        mod.on_post_tool_call(tool_name="terminal", args={"command": "x"}, result=result,
+                              task_id="task-1", session_id="session-1", tool_call_id="call-1")
+        return ended["output"]
+
+    def test_sanitized_mode_masks_url_credentials_in_content(self, monkeypatch):
+        """Core's default leaves user:pass@ and ?api_key= in URLs alone (OAuth callbacks must
+        survive tool flows); a telemetry upload has no such need (hermes-agent#88608)."""
+        mod = self._fresh_plugin()
+        monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "sanitized")
+        text = "cloning https://bob:hunter2pass@git.internal/x.git via https://api.example/v1?api_key=opaq7Qm2Xv9LkP4zR8wN&q=1"
+        out = self._exported_tool_output(mod, monkeypatch, json.dumps({"output": text, "exit_code": 0}))["output"]
+        assert "hunter2pass" not in out and "opaq7Qm2Xv9LkP4zR8wN" not in out and "bob:" not in out, out
+        assert "git.internal/x.git" in out and "q=1" in out
+        monkeypatch.setenv("HERMES_LANGFUSE_CAPTURE", "full")
+        assert self._exported_tool_output(mod, monkeypatch, json.dumps({"output": text}))["output"] == text
+
 
 # ---------------------------------------------------------------------------
 # api_request_error hook

@@ -152,8 +152,10 @@ def _redact_secrets(value: str) -> str:
     # Core's telemetry-egress scrub: force=True (ignores security.redact_secrets:
     # false, this content leaves the machine), sweeps opaque ``Bearer <token>``
     # residue, and fails CLOSED — a redactor error never ships the raw text.
-    from agent.redact import redact_for_egress
-    return redact_for_egress(value)
+    # redact_url_credentials: core keeps user:pass@ / ?api_key= so OAuth callbacks
+    # survive tool flows; an upload to Langfuse has no such need (hermes-agent#88608).
+    from agent.redact import redact_for_egress, redact_sensitive_text
+    return redact_for_egress(redact_sensitive_text(value, force=True, redact_url_credentials=True))
 
 
 # (types, shape builder) for _describe_content; first match wins (bool handled before).
