@@ -1038,8 +1038,10 @@ class Client:
 # SDK MCP server parks until the next step brings Hermes' result. Sessions are found by history,
 # never by client identity (Hermes builds request-local clients and closes them freely).
 # ---------------------------------------------------------------------------------------------
-WARM_IDLE_SECONDS = float(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_IDLE_SECONDS') or 600)
-# Keep tool-parked sessions below native's 3,900 s clear_tool_uses idle trigger.
+# A user-idle session is kept about as long as native's prompt cache (1 h TTL from the last request): while it stays in
+# the pool and its cache is live, a reply reuses it and reads the history from cache, whereas a respawn replays the
+# history and writes part of it again. Both defaults stay below native's 3,900 s clear_tool_uses idle trigger.
+WARM_IDLE_SECONDS = float(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_IDLE_SECONDS') or 3600)
 WARM_PARKED_IDLE_SECONDS = float(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_PARKED_IDLE_SECONDS') or 3600)
 WARM_POOL_SIZE = int(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_POOL') or 8)
 # Native persists an MCP result longer than the tool's maxResultSizeChars (UTF-16 units; 50,000 for an MCP tool

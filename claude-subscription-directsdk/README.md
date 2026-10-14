@@ -119,7 +119,7 @@ Anything else kills the session, and the step takes the normal full replay. That
 |---|---|---|
 | `CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM` | unset | `1` enables and `0` disables warm sessions, overriding the profile's `warm_session` setting. A multi-profile desktop backend or gateway loads only its launch home's `.env` into the process, so a routed profile turns warm mode on with the setting. |
 | `CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_POOL` | `8` | Sessions retained at once. When the pool is full, the least-recently-used idle session is evicted first (user-idle before tool-parked); a step takes the per-call path only when every slot is busy. Each retained session is one native process (roughly 100+ MB). |
-| `CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_IDLE_SECONDS` | `600` | A user-idle session is killed after this many seconds. |
+| `CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_IDLE_SECONDS` | `3600` | A user-idle session is killed after this many seconds. The default matches native's 1-hour prompt cache (counted from the last request): while the session is still in the pool and its cache is live, a reply reuses it and reads the history from cache, whereas a respawned session replays the history and writes part of it again. Keep it below 3,900 s, where native starts clearing old tool results; lower it to free memory sooner. |
 | `CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_PARKED_IDLE_SECONDS` | `3600` | A session parked on a Hermes tool call is kept this long while the tool runs (at least `WARM_IDLE_SECONDS`). |
 
 Calls without tools stay per-call. Size the pool to your number of concurrent conversations. Warm mode is validated on Claude Code 2.1.286, and its control-protocol details are version-sensitive.

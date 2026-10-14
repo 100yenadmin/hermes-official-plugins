@@ -928,6 +928,15 @@ def test_a_tool_round_over_the_message_budget_is_replayed_not_answered_over_mcp(
     assert len(warm.spawned()) == 2 and upstream_results(warm.upstream.bodies[-1]) == texts
 
 
+def test_idle_defaults_cover_the_prompt_cache_and_stay_below_clear_tool_uses():
+    # A user-idle session must outlive native's 1-hour prompt cache, or a reply inside the hour respawns native and
+    # re-writes history the cache still holds; both limits stay below native's 3,900 s clear_tool_uses idle trigger.
+    if 'CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_IDLE_SECONDS' not in os.environ:
+        assert 3600 <= directsdk.WARM_IDLE_SECONDS < 3900
+    if 'CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_PARKED_IDLE_SECONDS' not in os.environ:
+        assert directsdk.WARM_PARKED_IDLE_SECONDS < 3900
+
+
 def test_a_session_parked_on_a_long_tool_survives_the_idle_limit(warm, monkeypatch):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(warm.client(), messages)
