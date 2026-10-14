@@ -8,7 +8,7 @@ operation and the next useful step; after repair, continue the investigation.
 
 | Observation | Meaning and next step |
 | --- | --- |
-| `tool_search` finds no REA tools | The plugin is disabled or the server failed to start. Ask the user to run `hermes plugins list` (the `rea` row must say enabled), then start a new session; a `mcp_servers.rea` entry in `config.yaml` (written by REA's own setup) replaces the plugin's server, so remove it. Do not run `rea setup`. |
+| `tool_search` finds no REA tools | The plugin is disabled or the server failed to start. Ask the user to run `hermes plugins list` (the `rea` row must say enabled), then start a new session; a `mcp_servers.rea` entry in `config.yaml` replaces the plugin's server. Inspect whether it is an accidental setup-generated duplicate or an intentional engine configuration before proposing changes; preserve deliberate user settings. Do not run `rea setup`. |
 | The server fails to start | REA runs through `npx -y rea-agents@6.4.0 mcp` and needs Node.js 22.19+, 24.11+ or 26+ (not 23 or 25) with `npx` on PATH. The first start downloads the package into npm's cache. Check `node --version` and `npx --version` in the shell Hermes uses. |
 | REA returns `provider_unavailable` or an unavailable tool entry | Read that operation's provider diagnostics or `binary_session.result.tool_availability`. Resolve only the prerequisite the task needs; a complete tool catalog does not mean every operation is available. |
 | A call is refused by Hermes | Hermes policy (a disabled toolset, a cron run, a profile restriction) blocked it before REA ran. Report it; do not retry the same call. |
@@ -22,6 +22,36 @@ without the user's go. Use supported inventory/static evidence when it answers
 part of the question, and name the unavailable evidence separately. Do not
 substitute another target. Label observations from ordinary shell tools as
 such; only actual REA output supplies REA Evidence.
+
+## Supply native engine locations explicitly
+
+Hermes filters arbitrary inherited environment variables before launching MCP
+servers. Exporting `GHIDRA_INSTALL_DIR` in the shell alone is not sufficient for
+this pinned REA build. Supply Ghidra and JDK paths in the server's explicit
+`env`. Do not weaken Hermes' environment filter or put these non-secret paths
+in the secrets file.
+
+For a durable user configuration, set a complete native `mcp_servers.rea`
+entry with the normal Hermes configuration interface. This is an intentional
+override, not the duplicate registration made by `rea setup`:
+
+```yaml
+mcp_servers:
+  rea:
+    command: npx
+    args: ["-y", "rea-agents@6.4.0", "mcp"]
+    timeout: 1000
+    env:
+      GHIDRA_INSTALL_DIR: /absolute/path/to/ghidra_12.1.4_PUBLIC
+      JAVA_HOME: /absolute/path/to/jdk-21
+      REA_GHIDRA_STARTUP_TIMEOUT_MS: "900000"
+```
+
+Replace the engine paths with the user's actual installations. The explicit
+entry replaces the plugin's MCP settings, so retain the reviewed package pin
+and both deadlines, and revisit the pin when updating the plugin. The bundled
+skill remains available. Restart the session after changing launch settings.
+Static JavaScript and PE-resource inspection do not require these engines.
 
 ## Native first-query timeouts
 
