@@ -18,8 +18,9 @@ import directsdk
 NATIVE = r'''
 import json, os, re, sys, urllib.request
 with open(os.environ['SPAWNS'], 'a') as f:
-    f.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv[1:]}) + '\n')
+    f.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv[1:], 'config_dir': os.environ.get('CLAUDE_CONFIG_DIR')}) + '\n')
 history, queue, rpc, answered, limits = [], [], [0], {}, {}
+first_query = True
 def out(row):
     print(json.dumps(row), flush=True)
 def persist(block, result, force=False):
@@ -64,9 +65,13 @@ def call_next():
     rpc[0] += 1
     out({'type':'control_request','request_id':'c%d' % rpc[0],'request':{'subtype':'mcp_message','server_name':'hermes','message':{'jsonrpc':'2.0','id':rpc[0],'method':'tools/call','params':{'name':block['name'][len('mcp__hermes__'):],'arguments':block['input'],'_meta':{'claudecode/toolUseId':block['id']}}}}})
 def wire():
+    global first_query
     # Real native merges consecutive user messages; NATIVE_CONTEXT adds its per-request context the way 2.1.287+
-    # does: a reminder before the first turn's frame or after (inside the last tool result of) a later one, a mark
-    # on the last assistant block and a marked trailing system message the next request never replays.
+    # does: the live process keeps its first-turn reminder in history; later context stays ephemeral.
+    reminder = '\n<system-reminder>userEmail: user@example.com</system-reminder>'
+    if first_query and os.environ.get('NATIVE_CONTEXT') and len(history) == 1:
+        history[0]['content'].insert(0, {'type':'text','text':reminder})
+    first_query = False
     messages = []
     for message in json.loads(json.dumps(history)):
         if messages and message['role'] == messages[-1]['role'] == 'user':
@@ -77,15 +82,13 @@ def wire():
         messages[-1]['content'].reverse()  # intact results, forwarded in another order
     if not os.environ.get('NATIVE_CONTEXT'):
         return messages
-    reminder, newest = '\n<system-reminder>userEmail: user@example.com</system-reminder>', messages[-1]['content']
-    if len(messages) == 1:
-        newest.insert(0, {'type':'text','text':reminder})
-    elif newest[-1]['type'] == 'tool_result':
+    newest = messages[-1]['content']
+    if len(messages) > 1 and newest[-1]['type'] == 'tool_result':
         if isinstance(newest[-1]['content'], str):
             newest[-1]['content'] += reminder
         else:
             newest[-1]['content'].append({'type':'text','text':reminder})
-    else:
+    elif len(messages) > 1:
         newest.append({'type':'text','text':reminder})
     if len(messages) > 1:
         messages[-2]['content'][-1]['cache_control'] = {'type':'ephemeral'}
@@ -491,12 +494,36 @@ def test_rauth_launch_identity_is_part_of_reuse(warm, tmp_path):
     assert len(warm.spawned()) == 2
 
 
+def test_warm_native_uses_active_profiles_config_dir(warm, profile, tmp_path):
+    from test_directsdk_config_dir import _set_config_dir
+    selected = str(tmp_path / 'profile-login')
+    _set_config_dir(selected)
+    response = step(warm.client(), [{'role': 'user', 'content': 'hello'}])
+    assert response.usage.model_dump()['native_admission']['warm'] == 'cold'
+    assert [child['config_dir'] for child in warm.spawned()] == [selected]
+
+
+def test_changed_profile_config_dir_rebuilds_warm_conversation(warm, profile, tmp_path):
+    from test_directsdk_config_dir import _set_config_dir
+    first_dir, changed_dir = (str(tmp_path / name) for name in ('first-login', 'changed-login'))
+    _set_config_dir(first_dir)
+    client = warm.client()
+    messages = [{'role': 'user', 'content': 'hello'}]
+    messages += [as_history(step(client, messages)), {'role': 'user', 'content': 'again'}]
+    old = warm.spawned()[0]['pid']
+    _set_config_dir(changed_dir)
+    response = step(client, messages)
+    assert response.usage.model_dump()['native_admission']['warm'] == 'rebuild:ident'
+    assert [child['config_dir'] for child in warm.spawned()] == [first_dir, changed_dir]
+    assert not alive(old)
+
+
 def test_rauth_conflicting_override_is_refused_on_reuse(warm, monkeypatch):
     """R-auth: the inherited-environment refusal runs on every warm step, not only at spawn."""
     url = f'http://127.0.0.1:{warm.upstream.server.server_port}'
     class Local(directsdk.Admission):
-        def __init__(self, upstream, timeout, queried=None):
-            super().__init__(url, timeout, queried)
+        def __init__(self, upstream, timeout, queried=None, first_turn=None):
+            super().__init__(url, timeout, queried, first_turn=first_turn)
     monkeypatch.setattr(directsdk, 'Admission', Local)
     fixture = warm.client()
     for key, value in fixture.env.items():
@@ -722,13 +749,34 @@ def prefix(body, at):
     return json.dumps(plain(body['messages'][:i] + [dict(body['messages'][i], content=body['messages'][i]['content'][:j + 1])]))
 
 
+def test_warm_live_first_turn_and_cached_prefix_replay_unchanged(warm):
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(context_client(warm), messages)
+    calls = first.choices[0].message.tool_calls
+    messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': k}
+                                      for c, k in zip(calls, ('APPLE', 'BANANA'))]
+    second = step(context_client(warm), messages)
+    messages += [as_history(second), {'role': 'user', 'content': 'next turn'}]
+    third = step(context_client(warm), messages)
+    assert [r.usage.model_dump()['native_admission']['warm'] for r in (first, second, third)] == ['cold', 'reused', 'reused']
+    assert len(warm.spawned()) == 1 and len(warm.upstream.bodies) == 3
+    bodies = warm.upstream.bodies
+    first_turn = (0, len(bodies[0]['messages'][0]['content']) - 1)
+    assert all(prefix(body, first_turn) == prefix(bodies[0], first_turn) for body in bodies[1:])
+    assert all([b['text'] for b in body['messages'][0]['content']] == ['call probe in parallel', REMINDER]
+               for body in bodies)
+    for before, after in zip(bodies, bodies[1:]):
+        mark = message_marks(before)[-1] if message_marks(before) else (0, 0)
+        assert prefix(after, mark) == prefix(before, mark)
+
+
 def test_warm_steps_get_mains_restoration_and_breakpoint_pinning(warm):
     """456fdb0/fda48c3/f8630df: every warm request passes through main's admission rewrites, anchored on the frame
     native replays next (Hermes' frame on a launch or user turn, native's own MCP result shape on a tool round)."""
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(context_client(warm), messages)
     calls = first.choices[0].message.tool_calls
-    # #77: the opening frame goes ahead of native's prepended reminder, so the next request replays it.
+    # #77: put the frame first; sticky memory preserves that order on later warm requests too.
     assert [b['text'] for b in warm.upstream.bodies[0]['messages'][0]['content']] == ['call probe in parallel', REMINDER]
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': k} for c, k in zip(calls, ('APPLE', 'BANANA'))]
     second = step(context_client(warm), messages)
@@ -748,6 +796,26 @@ def test_warm_steps_get_mains_restoration_and_breakpoint_pinning(warm):
     for before, after in ((warm.upstream.bodies[0], tool_round), (tool_round, turn)):
         mark = message_marks(before)[-1] if message_marks(before) else (0, 0)
         assert prefix(after, mark) == prefix(before, mark)
+
+
+def test_cold_replay_reads_the_warm_first_turn_frame_prefix(warm):
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(context_client(warm), messages)
+    before = warm.upstream.bodies[0]
+    assert [b['text'] for b in before['messages'][0]['content']] == ['call probe in parallel', REMINDER]
+    (session,) = directsdk._warm_pool
+    assert session.admission.first_turn['permutation'] == (1, 1)
+    directsdk._warm_shutdown()
+    messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'}
+                                     for c in first.choices[0].message.tool_calls]
+    second = step(context_client(warm), messages)
+    assert second.usage.model_dump()['native_admission']['warm'] == 'cold' and len(warm.spawned()) == 2
+    after = warm.upstream.bodies[1]
+    assert [b['text'] for b in after['messages'][0]['content']] == ['call probe in parallel']
+    mark = message_marks(before)[-1]
+    assert mark == (0, 0) and prefix(after, mark) == prefix(before, mark)
+    (fresh,) = directsdk._warm_pool
+    assert fresh.admission is not session.admission and fresh.admission.first_turn == {}
 
 
 def test_a_cold_launch_on_a_tool_result_frame_restores_hermes_results(warm):

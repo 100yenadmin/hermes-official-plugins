@@ -990,7 +990,7 @@ class Client:
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.
         env.update(MCP_TOOL_TIMEOUT='86400000', MAX_MCP_OUTPUT_TOKENS='100000000')
         # The queried frame lets the relay keep the cache breakpoint off native's per-request context.
-        session.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=frames[-1]['message']['content'])
+        session.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=frames[-1]['message']['content'], first_turn={})
         env['ANTHROPIC_BASE_URL'] = session.admission.url
         (root / 'settings.json').write_text(json.dumps({'env': {'CLAUDE_CODE_EXTRA_BODY': body}}), encoding='utf-8')
         (root / 'system.md').write_text(system, encoding='utf-8')

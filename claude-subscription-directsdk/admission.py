@@ -2,6 +2,7 @@
 import base64
 import codecs
 import copy
+import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import ipaddress
@@ -58,7 +59,7 @@ def _plain(block):
     return {k: v for k, v in block.items() if k != 'cache_control'} if isinstance(block, dict) else block
 
 
-def _frame_first(messages, queried):
+def _frame_first(messages, queried, memory=None):
     """Put Hermes' first user turn ahead of the context native prepends to it (#77).
 
     On the opening request native puts its per-request context block (the account-email
@@ -68,11 +69,23 @@ def _frame_first(messages, queried):
     native already appends its context after the host content. Moving the prepended text
     blocks behind the frame uses that same order for the first turn: no block is added,
     dropped or edited, and the frame becomes a prefix the next request replays byte-identically.
+    A live warm process replays the first turn as native first built it, so a warm session re-applies request 1's reorder on later requests.
 
     Only the conversation's first turn is touched (no assistant message yet), only when the
     queried frame occurs exactly once, and only when everything before it is plain text.
     Returns whether the order changed."""
     if any(m.get('role') == 'assistant' for m in messages):
+        if isinstance(memory, dict) and 'permutation' in memory:
+            first = next((m for m in messages if m.get('role') == 'user'), {})
+            content = first.get('content')
+            if not isinstance(content, list):
+                return False
+            digest = hashlib.sha256(json.dumps([_plain(b) for b in content], sort_keys=True).encode()).hexdigest()
+            if digest != memory['sha256']:
+                return False
+            k, n = memory['permutation']
+            first['content'] = content[k:k + n] + content[:k] + content[k + n:]
+            return True
         return False
     first = next((m for m in messages if m.get('role') == 'user'), {})
     content = first.get('content')
@@ -86,11 +99,14 @@ def _frame_first(messages, queried):
     k = starts[0]
     if not all(isinstance(b, dict) and b.get('type') == 'text' for b in content[:k]):
         return False
+    if isinstance(memory, dict):
+        memory.update(permutation=(k, len(queried)),
+                      sha256=hashlib.sha256(json.dumps([_plain(b) for b in content], sort_keys=True).encode()).hexdigest())
     first['content'] = content[k:k + len(queried)] + content[:k] + content[k + len(queried):]
     return True
 
 
-def pin_message_breakpoint(payload, queried):
+def pin_message_breakpoint(payload, queried, memory=None):
     """Keep the single message ``cache_control`` on content the next request replays unchanged.
 
     Native attaches per-request context (today's date, the account-email reminder, whatever a
@@ -118,7 +134,7 @@ def pin_message_breakpoint(payload, queried):
     try:
         body = json.loads(payload)
         messages = body['messages']
-        reordered = _frame_first(messages, queried)
+        reordered = _frame_first(messages, queried, memory)
         blocks = [(i, j, b) for i, m in enumerate(messages) if isinstance(m.get('content'), list)
                   for j, b in enumerate(m['content'])]
         marked = [(i, j, b) for i, j, b in blocks if isinstance(b, dict) and 'cache_control' in b]
@@ -369,9 +385,10 @@ def upstream_proxy(upstream):
 
 
 class Admission:
-    def __init__(self, upstream, timeout, queried=None):
+    def __init__(self, upstream, timeout, queried=None, first_turn=None):
         self.upstream = urlsplit(upstream)
         self.queried = queried
+        self.first_turn = first_turn
         host = self.upstream.hostname
         try:
             local = ipaddress.ip_address(host).is_loopback
@@ -474,7 +491,7 @@ class Handler(BaseHTTPRequestHandler):
                 # exactly as native built it (the pre-restoration behaviour), so a CLI that
                 # reshapes its tool results degrades to an uncached tail, never a failed turn.
                 gate.unrestored = str(exc)
-            payload = pin_message_breakpoint(payload, gate.queried)
+            payload = pin_message_breakpoint(payload, gate.queried, gate.first_turn)
             target = gate.upstream
             if target.scheme == 'https':
                 if gate.proxy:
