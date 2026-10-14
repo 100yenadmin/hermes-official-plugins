@@ -110,6 +110,26 @@ unadvertised tool; inspect `binary_session` with `{}` and its
 `result.tool_availability` for availability reasons and remediation. The tool
 list stays complete; availability depends on the operation, target, and host.
 
+## Native startup and interpretation
+
+Before the first Ghidra-backed query, explain that importing and analyzing a
+large executable can take several minutes. `open_binary` validates the target;
+it does not mean native analysis has completed. This plugin allows 900 seconds
+for Ghidra startup and 1000 seconds for a Hermes MCP call. The user can still
+cancel. Do not invent progress percentages or promise a fixed completion time.
+
+Keep the target open for related queries: the first native query does the
+expensive import, and later queries reuse that analysis. Do not reopen the
+binary or start another server to "check progress". On a timeout, read
+[connection and recovery](references/connection-and-recovery.md) before retrying.
+
+Generated pseudocode is an interpretation, not original source. Corroborate
+important branches with assembly, references and callers. Keep inferred
+function names/types distinct from symbols actually present in the artifact;
+report type-propagation warnings and missing symbols rather than filling gaps
+with plausible source. When evaluating an unfamiliar target, record findings
+before reading matching-version source, then label source-only corrections.
+
 ## Work summary-first
 
 Start with the default result and use its inline Evidence and graph context.

@@ -8,7 +8,10 @@
         "-y",
         "rea-agents@6.4.0",
         "mcp"
-      ]
+      ],
+      "env": {
+        "REA_GHIDRA_STARTUP_TIMEOUT_MS": "900000"
+      }
     }
   }
 }

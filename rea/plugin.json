@@ -10,6 +10,13 @@
   "homepage": "https://github.com/NousResearch/hermes-official-plugins/tree/main/rea",
   "repository": "https://github.com/NousResearch/hermes-official-plugins/tree/main/rea",
   "license": "MIT",
+  "extensions": {
+    "com.nousresearch.hermes": {
+      "servers": {
+        "rea": { "timeout": 1000 }
+      }
+    }
+  },
   "keywords": [
     "rea",
     "reverse-engineering",

@@ -50,6 +50,30 @@ Do not also run `npx rea-agents setup --client hermes`. It writes its own
 `mcp_servers.rea` entry to config.yaml, which replaces this plugin's pinned
 server.
 
+## Native analysis wait budget
+
+This revision needs Hermes' portable per-server timeout extension; keep its
+catalog admission blocked until that support ships. It declares a 1000-second
+Hermes call budget for REA only, and sets Ghidra's internal startup deadline to
+900 seconds. Other MCP servers keep their existing deadlines. Other clients
+ignore the Hermes extension and need their own call deadline configured.
+
+`open_binary` validates a target, but the first Ghidra-backed query imports and
+analyzes it. Large executables can take several minutes. Subsequent queries
+reuse that session; reopening or restarting discards its ephemeral analysis.
+Cancellation remains available, and a completed open is not a progress signal.
+
+In a binary-first test on WinSCP 6.7, the console launcher imported in about
+30 seconds. The GUI executable exceeded the upstream 330-second default and
+completed in 663 seconds with the longer budget. These are observations on one
+Linux host, not completion-time guarantees. See the bundled
+[recovery guide](skills/reverse-engineer-anything/references/connection-and-recovery.md)
+for deadline troubleshooting.
+
+Pseudocode is decompiler output, not reconstructed original source. The skill
+asks Hermes to cross-check consequential claims with assembly and references,
+label inferred names/types, and report missing symbols and analysis warnings.
+
 ## What you get
 
 About 170 tools from REA 6.4.0, registered as `mcp__rea__<tool>`

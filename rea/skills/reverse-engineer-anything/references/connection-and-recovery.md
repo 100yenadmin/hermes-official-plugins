@@ -23,6 +23,33 @@ part of the question, and name the unavailable evidence separately. Do not
 substitute another target. Label observations from ordinary shell tools as
 such; only actual REA output supplies REA Evidence.
 
+## Native first-query timeouts
+
+The first Ghidra-backed query performs import and auto-analysis. `open_binary`
+only validates the target; repeated opens do not make analysis faster. Keep one
+session for related questions and explain the initial wait before starting it.
+
+This plugin sets `REA_GHIDRA_STARTUP_TIMEOUT_MS` to `900000` in its server
+environment and declares a Hermes per-server `timeout` of `1000` seconds in
+`plugin.json`. There is no change to the timeout of unrelated MCP servers.
+If Hermes rejects the `timeout` extension, that Hermes version lacks the
+required support: report that compatibility blocker rather than deleting the
+setting or pretending the default will handle large executables.
+
+Distinguish REA's structured `provider_timeout` from a Hermes/client timeout.
+The client deadline must exceed the backend startup deadline so the backend can
+finish and return its result. If a user's same-name `mcp_servers.rea` entry
+replaces the plugin configuration, it must retain the pinned launch command,
+server environment and appropriate native `timeout` setting. Do not modify
+unrelated server budgets or silently override a deliberate user configuration.
+
+Do not immediately retry a cancelled or timed-out analysis: it can discard the
+Ghidra database and repeat the expensive import. Explain the observed limit,
+check the effective configuration and provider diagnostics, and retry only
+after resolving the cause. A longer budget permits waiting; it does not prove
+progress or guarantee completion. Honour user cancellation and do not restart
+cancelled work unless requested.
+
 ## Continue through the CLI
 
 When MCP is unavailable but the shell works, the same workflows run as CLI
