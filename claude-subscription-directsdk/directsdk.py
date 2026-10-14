@@ -599,8 +599,10 @@ class Client:
         if resolved is None:
             raise ClaudeCodeMissing(INSTALL_HINT)
         apply_config_dir(env)
-        # An inherited effort level would override the --effort Hermes passes below.
-        for key in ('CLAUDE_CODE_EXTRA_BODY', 'CLAUDE_CODE_EFFORT_LEVEL'):
+        # An inherited effort level would override the --effort Hermes passes below. An inherited entrypoint (Hermes
+        # started from a Claude Code or desktop session) makes native act as that host: the desktop one sends a summary
+        # request after each final answer, which the relay denies, and a denial ends a warm session.
+        for key in ('CLAUDE_CODE_EXTRA_BODY', 'CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_ENTRYPOINT'):
             env.pop(key, None)
         env.update(ENABLE_TOOL_SEARCH='false', CLAUDE_CODE_MAX_RETRIES='0', DISABLE_AUTO_COMPACT='1', DISABLE_COMPACT='1')
         # Telemetry and feature flags follow the user's claude_code_telemetry setting, read per spawn.
