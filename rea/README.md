@@ -1,0 +1,97 @@
+<p align="center"><img src="../assets/rea.jpg" alt="REA: official Hermes Agent plugin" width="100%"></p>
+
+# REA
+
+> Part of [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent.
+
+Reverse engineer programs from Hermes with [REA](https://rea.tools)
+([morluto/rea](https://github.com/morluto/rea), MIT): inspect native
+executables and libraries, .NET assemblies, Electron and JavaScript
+applications, Android packages, firmware images, packet and browser captures,
+and the running behaviour of browser, Electron and terminal programs. REA
+returns structured Evidence (decompiled code, call graphs, application graphs,
+captures) and Hermes explains it or builds from it.
+
+This is a portable [Agent Plugins v1](https://agent-plugins.org) package. One
+install ships:
+
+- `mcp.json`: the REA MCP server (`rea`), launched as
+  `npx -y rea-agents@6.4.0 mcp` over stdio for every new session while the
+  plugin is enabled. No `mcp_servers` edit in config.yaml.
+- `skills/reverse-engineer-anything/`: REA's own workflow skill (target
+  routing, summary-first evidence paging, investigation planning), adapted for
+  Hermes: it connects through this plugin instead of `rea setup`, finds tools
+  through Hermes' tool search, and asks before steps that run or change
+  something.
+
+## Install
+
+```bash
+hermes plugins install rea        # from the Nous plugin catalog
+hermes plugins enable rea
+```
+
+Then start a new Hermes session and ask, for example, "Use REA to inspect
+/Applications/Notes.app and explain how CSV export works."
+
+Requirements:
+
+- Node.js 22.19+, 24.11+ or 26+ with `npx` on PATH (REA does not support Node
+  23 or 25). The first start downloads the pinned package into npm's cache.
+- Nothing else for static JavaScript/Electron/ASAR analysis, archive and
+  package inventory, Go/Rust binary metadata, PE resources, .NET metadata and
+  saved HAR captures.
+- Bring your own engine for the rest: Ghidra plus a JDK, Hopper or IDA for
+  native decompilation; JADX and Java for Android code; Binwalk/Unblob for
+  firmware extraction; TShark, sigrok or WABT for their formats. REA never
+  installs these, and the skill tells the agent not to either.
+
+Do not also run `npx rea-agents setup --client hermes`. It writes its own
+`mcp_servers.rea` entry to config.yaml, which replaces this plugin's pinned
+server.
+
+## What you get
+
+About 170 tools from REA 6.4.0, registered as `mcp__rea__<tool>`
+(`mcp__rea__open_binary`, `mcp__rea__analyze_function`,
+`mcp__rea__analyze_javascript_application`, `mcp__rea__inspect_android_package`,
+...). Their schemas total roughly 460 KB, so Hermes keeps them behind its
+on-demand tool search instead of the model's visible tool list: a session pays
+only for the tools it looks up. REA's six MCP prompts are available through
+the server's prompt tools.
+
+## What runs on your machine
+
+Most REA tools read files you name and never execute the target. A few run or
+change things, and Hermes does not prompt before them:
+
+- `capture_process_scenario` runs a command you or the agent choose under a
+  PTY and records what it does.
+- `capture_browser_scenario`, `capture_electron_scenario` and
+  `capture_native_ui_scenario` launch or drive an application window.
+- `install_adb_package`, `uninstall_adb_package`, `push_adb_file`,
+  `start_adb_app`, `start_adb_activity` and `stop_adb_app` change a connected
+  Android device.
+- `export_evidence_bundle` and `close_binary` can overwrite a file at a path
+  you give them.
+
+The bundled skill tells the agent to name the exact command, app or device and
+ask you before any of these, and to skip them in unattended runs. Analyse
+untrusted programs in an environment you chose for it. REA sends no
+telemetry. Its tools reach the network only for the target you point them at:
+a debugging endpoint, a device, or a web page whose source maps a browser
+capture fetches.
+
+## Version pinning
+
+`mcp.json` pins `rea-agents@6.4.0` (published 2026-10-11) and the skill is
+REA's `reverse-engineer-anything` skill from the same release tag. Bumping
+either is a commit to this repo followed by a reviewed SHA bump in the
+[hermes-agent plugin catalog](https://github.com/NousResearch/hermes-agent/tree/main/plugin-catalog).
+`@latest` is deliberately not used.
+
+## Attribution
+
+REA is made by [morluto](https://github.com/morluto) and released under the MIT
+license. The skill in `skills/reverse-engineer-anything/` is adapted from REA's
+bundled skill; its license is reproduced in [LICENSE](LICENSE).
