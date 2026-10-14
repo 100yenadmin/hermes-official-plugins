@@ -52,11 +52,16 @@ server.
 
 ## Native analysis wait budget
 
-This revision needs Hermes' portable per-server timeout extension; keep its
-catalog admission blocked until that support ships. It declares a 1000-second
-Hermes call budget for REA only, and sets Ghidra's internal startup deadline to
-900 seconds. Other MCP servers keep their existing deadlines. Other clients
-ignore the Hermes extension and need their own call deadline configured.
+This revision requires a Hermes build containing the
+[per-server deadline fix](https://github.com/NousResearch/hermes-agent/pull/138491)
+(merged as `f974222e69278b856b1b75053774e10014c4797b`). The current stable
+release, v0.22.0, predates it; catalog admission remains blocked until a release
+includes this support. No future version number is assumed.
+
+The plugin declares a 1000-second Hermes call budget for REA only, and sets
+Ghidra's internal startup deadline to 900 seconds. Other MCP servers keep
+their existing deadlines. Other clients ignore the Hermes extension and need
+their own call deadline configured.
 
 `open_binary` validates a target, but the first Ghidra-backed query imports and
 analyzes it. Large executables can take several minutes. Subsequent queries
@@ -65,8 +70,12 @@ Cancellation remains available, and a completed open is not a progress signal.
 
 In a binary-first test on WinSCP 6.7, the console launcher imported in about
 30 seconds. The GUI executable exceeded the upstream 330-second default and
-completed in 663 seconds with the longer budget. These are observations on one
-Linux host, not completion-time guarantees. See the bundled
+completed in 663 seconds with the longer budget. A subsequent real Hermes
+chat using the same native target completed its first query in 580 seconds,
+then made successful follow-up decompilation and caller queries. Both runs
+recovered 28,701 procedures. The Windows executable was analyzed statically,
+never launched. These are observations on one Linux host, not completion-time
+guarantees. See the bundled
 [recovery guide](skills/reverse-engineer-anything/references/connection-and-recovery.md)
 for deadline troubleshooting.
 
