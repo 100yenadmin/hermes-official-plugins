@@ -169,7 +169,7 @@ def isolated_env(tmp, port, warm, subscription=False):
         # Tn() reads this cached account only when hl() selects OAuth. The
         # injected token defaults to inference-only scopes, so native needs no
         # profile fetch, refresh token or credential-store fixture.
-        env.update(CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-public-offline-fixture",
+        env.update(CLAUDE_CODE_OAUTH_TOKEN="fake-token",
                    CLAUDE_CODE_SUBSCRIPTION_TYPE="max")
         config = Path(env["CLAUDE_CONFIG_DIR"])
         config.mkdir(exist_ok=True)
