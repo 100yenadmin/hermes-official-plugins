@@ -173,9 +173,10 @@ def settle_login(resolved, env, timeout):
     refresh token the CLI never saved, which forces a re-login. ``-p /usage`` is a local command that needs a
     valid token, so it waits for that refresh to be saved before exiting; it sends no Messages request. The
     plugin cannot tell whether a refresh is due without opening the credential store, so it always runs it."""
-    reap_orphaned_refresh_lock(env)
+    child = _child_env(env)
+    reap_orphaned_refresh_lock(child)
     try:
-        subprocess.run(resolved + ["-p", "/usage"], env=_child_env(env), stdin=subprocess.DEVNULL,
+        subprocess.run(resolved + ["-p", "/usage"], env=child, stdin=subprocess.DEVNULL,
                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
     except (OSError, ValueError, subprocess.SubprocessError):
         pass

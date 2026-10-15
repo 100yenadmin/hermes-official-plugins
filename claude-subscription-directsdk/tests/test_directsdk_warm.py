@@ -80,6 +80,8 @@ def wire():
             messages.append(message)
     if os.environ.get('FAKE_REVERSE'):
         messages[-1]['content'].reverse()  # intact results, forwarded in another order
+    if os.environ.get('FAKE_CACHE_MARK'):
+        messages[-1]['content'][-1]['cache_control'] = {'type':'ephemeral'}
     if not os.environ.get('NATIVE_CONTEXT'):
         return messages
     newest = messages[-1]['content']
@@ -129,6 +131,8 @@ for line in sys.stdin:
         out({'type':'control_response','response':{'subtype':'success','request_id':row['request_id'],'response':{}}})
         out({'type':'control_request','request_id':'list','request':{'subtype':'mcp_message','server_name':'hermes','message':{'jsonrpc':'2.0','id':0,'method':'tools/list'}}})
     elif row['type'] == 'control_response' and row['response']['request_id'] == 'list':
+        with open(os.environ['SPAWNS'] + '.tools', 'a') as f:
+            f.write(json.dumps(row['response']['response']['mcp_response']['result']['tools']) + '\n')
         # Without _meta an MCP tool persists past min(100,000, 50,000); _meta counts up to the 500,000 ceiling.
         for tool in row['response']['response']['mcp_response']['result']['tools']:
             meta = (tool.get('_meta') or {}).get('anthropic/maxResultSizeChars')
@@ -169,6 +173,8 @@ def sse(message_id, blocks, stop, details=None):
         if block['type'] == 'tool_use':
             events += [{'type': 'content_block_start', 'index': index, 'content_block': dict(block, input={})},
                        {'type': 'content_block_delta', 'index': index, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])}}]
+        elif block['type'] == 'thinking':
+            events.append({'type': 'content_block_start', 'index': index, 'content_block': block})
         else:
             events += [{'type': 'content_block_start', 'index': index, 'content_block': {'type': 'text', 'text': ''}},
                        {'type': 'content_block_delta', 'index': index, 'delta': {'type': 'text_delta', 'text': block['text']}}]
@@ -181,6 +187,7 @@ class Upstream:
     """Answers the newest native message: a user text asks for two parallel probe calls, tool results get echoed."""
     def __init__(self, hang=None):
         self.bodies, self.hang = [], hang or threading.Event()
+        self.reply = None
         outer = self
         class Peer(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -222,6 +229,8 @@ class Upstream:
                                             {'type': 'tool_use', 'id': f'toolu_{n}b', 'name': 'mcp__hermes__probe', 'input': {'key': 'b'}}], 'tool_use')
                 else:
                     payload = sse(f'm{n}', [{'type': 'text', 'text': 'echo ' + content[0].get('text', '')}], 'end_turn')
+                if outer.reply:
+                    payload = outer.reply(n, body)
                 self.send_response(200)
                 self.send_header('Content-Type', 'text/event-stream')
                 self.end_headers()
@@ -253,7 +262,9 @@ def warm(tmp_path):
         return clients[-1]
     def spawned():
         return [json.loads(line) for line in spawns.read_text().splitlines()] if spawns.exists() else []
-    yield SimpleFixture(client, spawned, upstream)
+    fixture = SimpleFixture(client, spawned, upstream)
+    fixture.manifests = lambda: [json.loads(line) for line in Path(str(spawns) + '.tools').read_text().splitlines()]
+    yield fixture
     for c in clients:
         c.close()
     directsdk._warm_shutdown()
@@ -287,6 +298,112 @@ def alive(pid):
         return psutil.Process(pid).status() != psutil.STATUS_ZOMBIE
     except psutil.NoSuchProcess:
         return False
+
+
+@pytest.mark.parametrize('bare', [False, True])
+def test_warm_long_tool_name_round_trips_and_retains_session(warm, bare):
+    name = 'public_probe_' + 'x' * 48
+    tools = [{'type': 'function', 'function': {'name': name}}]
+    encoded, manifest, names = directsdk.request_body({'tools': tools})
+    alias = names[name]
+    native_name = alias if bare else directsdk.PREFIX + alias
+    warm.upstream.reply = lambda n, body: sse(f'm{n}', [
+        {'type': 'tool_use', 'id': f'toolu_{n}', 'name': native_name, 'input': {}}
+    ], 'tool_use') if n == 1 else sse(f'm{n}', [{'type': 'text', 'text': 'done'}], 'end_turn')
+    history = [{'role': 'user', 'content': 'long-tool'}]
+    client = warm.client()
+    first = client.create(model='sonnet', messages=history, tools=tools)
+    call = first.choices[0].message.tool_calls[0]
+    assert call.function.name == name
+    assert first.choices[0].message.reasoning_details[0]['messages'][0]['content'][0]['name'] == directsdk.PREFIX + alias
+    history += [as_history(first), {'role': 'tool', 'tool_call_id': call.id, 'content': 'public result'}]
+    second = client.create(model='sonnet', messages=history, tools=tools)
+    # A bare call is repaired for replay, but native did not park it on the MCP server.
+    assert second.usage.native_admission.warm == ('cold' if bare else 'reused')
+    assert second.choices[0].message.content == 'done'
+    assert len(warm.spawned()) == (2 if bare else 1)
+    advertised = warm.manifests()[0]
+    assert [{k: v for k, v in t.items() if k != '_meta'} for t in advertised] == manifest
+    assert json.loads(encoded)['tools'][0]['name'] == directsdk.PREFIX + advertised[0]['name']
+
+
+def test_warm_skills_reminder_survives_reuse_tool_round_and_restart(warm):
+    tools = TOOLS + [{'type': 'function', 'function': {'name': 'skill_view'}}]
+    client = warm.client()
+    client.env['FAKE_CACHE_MARK'] = '1'
+    history = [{'role': 'user', 'content': 'call probe in parallel'}]
+    original = json.loads(json.dumps(history))
+    first = client.create(model='sonnet', messages=history, tools=tools)
+    assert history == original
+    sent = warm.upstream.bodies[0]['messages'][0]['content']
+    assert sent[-1]['text'] == directsdk.SKILLS_REMINDER
+    assert 'cache_control' in sent[0] and 'cache_control' not in sent[-1]
+    assert directsdk._warm_pool[0].admission.queried == [{'type': 'text', 'text': original[0]['content']}]
+    history += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'result'}
+                                    for c in first.choices[0].message.tool_calls]
+    second = client.create(model='sonnet', messages=history, tools=tools)
+    assert second.usage.native_admission.warm == 'reused'
+    assert all(b.get('text') != directsdk.SKILLS_REMINDER
+               for b in warm.upstream.bodies[-1]['messages'][-1]['content'])
+    history += [as_history(second), {'role': 'user', 'content': 'next turn'}]
+    third = client.create(model='sonnet', messages=history, tools=tools)
+    assert third.usage.native_admission.warm == 'reused'
+    live = json.loads(json.dumps(warm.upstream.bodies[-1]['messages']))
+    assert live[-1]['content'][-1]['text'] == directsdk.SKILLS_REMINDER
+    assert directsdk._warm_pool[0].admission.queried == [{'type': 'text', 'text': 'next turn'}]
+    directsdk._warm_shutdown()
+    # Replaying the same request must recreate every reminder the kept-alive native held.
+    restarted = client.create(model='sonnet', messages=history, tools=tools)
+    assert restarted.usage.native_admission.warm == 'cold'
+    def user_texts(messages):
+        return [[b for b in m['content'] if b['type'] == 'text'] for m in messages if m['role'] == 'user']
+    assert user_texts(warm.upstream.bodies[-1]['messages']) == user_texts(live)
+    # The default per-call replay continues to omit the warm-only carrier metadata.
+    assert directsdk.prepare_history(history)[1][0]['message']['content'] == [
+        {'type': 'text', 'text': original[0]['content']}]
+    # A changed skills inventory must still replay historical bytes, without adding a new reminder.
+    history += [as_history(third), {'role': 'user', 'content': 'without skills'}]
+    client.create(model='sonnet', messages=history, tools=TOOLS)
+    replayed = warm.upstream.bodies[-1]['messages']
+    assert replayed[0]['content'][-1]['text'] == directsdk.SKILLS_REMINDER
+    assert replayed[-1]['content'] == [{'type': 'text', 'text': 'without skills', 'cache_control': {'type': 'ephemeral'}}]
+
+
+@pytest.mark.parametrize('text', ['', 'done'])
+def test_warm_thinking_only_matches_per_call(warm, text):
+    signed = {'type': 'thinking', 'thinking': 'Public reasoning', 'signature': 'public-signature'}
+    blocks = [signed] + ([{'type': 'text', 'text': text}] if text else [])
+    warm.upstream.reply = lambda n, body: sse(f'm{n}', blocks, 'end_turn')
+    for stream in (False, True):
+        result = step(warm.client(), [{'role': 'user', 'content': 'think'}], stream=stream)
+        message = result.choices[0].message
+        assert result.choices[0].finish_reason == 'stop'
+        assert message.content == (text or None) and message.tool_calls is None
+        assert message.reasoning_content == ('Public reasoning' if text else None)
+        assert message.reasoning_details[0]['messages'][0]['content'][0] == signed
+
+
+def test_warm_setup_reaps_the_normalized_probe_config(tmp_path, monkeypatch):
+    import directsdk_setup as setup
+    selected, inherited = tmp_path / 'selected', tmp_path / 'inherited'
+    for directory in (selected, inherited):
+        lock = directory / '.oauth_refresh.lock'
+        lock.mkdir(parents=True)
+        os.utime(lock, (time.time() - 120, time.time() - 120))
+    monkeypatch.setattr(setup, '_setting', lambda key, default=None: str(selected) if key == setup.CONFIG_DIR_SETTING else default)
+    seen = []
+    def probe(argv, **kwargs):
+        seen.append(kwargs['env'])
+        assert not (Path(kwargs['env']['CLAUDE_CONFIG_DIR']) / '.oauth_refresh.lock').exists()
+    monkeypatch.setattr(setup.subprocess, 'run', probe)
+    env = {'HOME': str(tmp_path), 'CLAUDE_CONFIG_DIR': str(inherited),
+           'CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR': str(tmp_path / 'override'),
+           'CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM': '1'}
+    setup.settle_login(['offline-native'], env, 5)
+    assert seen[0]['CLAUDE_CONFIG_DIR'] == str(selected)
+    assert 'CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR' not in seen[0]
+    assert (inherited / '.oauth_refresh.lock').is_dir()
+    assert env['CLAUDE_CONFIG_DIR'] == str(inherited)
 
 
 def test_one_native_serves_tool_rounds_and_turns_with_hermes_results(warm):

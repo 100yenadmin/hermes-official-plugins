@@ -70,7 +70,7 @@ PREFIX = 'mcp__hermes__'
 # Claude reads Hermes' skills index at the top of a long prompt and, deep into a session or
 # after compaction, stops consulting it. Restating the rule next to the new user turn restores
 # skill loading (live A/B in the PR). It rides after the relay's cache breakpoint like native's
-# own per-request context and is never part of Hermes history.
+# own per-request context. Warm assistant carriers retain it only for exact native replay.
 REMINDER = ('<system-reminder>Before replying, scan the available skills in your instructions. '
             'If one matches or is even partially relevant to this message, load it with '
             'skill_view(name) first.{}</system-reminder>')
@@ -150,7 +150,7 @@ def content_blocks(content):
     return result
 
 
-def prepare_history(messages, names=None):
+def prepare_history(messages, names=None, *, warm=False):
     system, frames = [], []
     for message in messages:
         role = message.get('role')
@@ -168,6 +168,11 @@ def prepare_history(messages, names=None):
                 if len(carriers) != 1 or carriers[0].get('version') != 1:
                     raise ValueError('Unsupported native assistant carrier version')
                 carrier = carriers[0]
+                # A live warm native retains the reminder sent with this assistant's user turn.
+                # Replay its exact bytes even if the skills inventory or pruned-skill state changed.
+                # Per-call history continues to omit these uncached per-request reminders.
+                if warm and carrier.get('user_reminder') and frames and frames[-1]['type'] == 'user':
+                    frames[-1]['message']['content'].append(copy.deepcopy(carrier['user_reminder']))
                 expected = {**carrier['projection'], 'content': carrier['projection']['content'].strip()}
                 if projection(message) == expected:
                     for native in carrier['messages']:
@@ -858,6 +863,8 @@ class Client:
 
     def _run_warm(self, request, kwargs, body, manifest, names, system, frames):
         """One Hermes step on a live native session; any mismatch rebuilds it from the full history."""
+        hermes_names = {native: hermes for hermes, native in names.items()}
+        reminder = skills_reminder(frames, names)
         started = time.monotonic()
         timeout = kwargs.get('timeout', self.timeout)
         timeout = getattr(timeout, 'read', timeout)
@@ -890,7 +897,10 @@ class Client:
                 session.attach(request)
                 if session.expect == 'user':
                     session.admission.rearm(timeout, frames[-1]['message']['content'])
-                    session.send(frames[-1])
+                    frame = copy.deepcopy(frames[-1])
+                    if reminder:
+                        frame['message']['content'].append(reminder)
+                    session.send(frame)
                 else:
                     results = {m['tool_call_id']: (m['content'], bool(m.get('is_error'))) for m in messages[n:]}
                     # Native replays the MCP results it holds, in its own call order, not Hermes' tool messages: anchor on that.
@@ -900,7 +910,7 @@ class Client:
                                                       for tool_id in order])
                     session.deliver(results)
             else:
-                self._warm_spawn(session, request, kwargs, body, manifest, system, frames, timeout, env, resolved)
+                self._warm_spawn(session, request, kwargs, body, manifest, system, frames, timeout, env, resolved, names, reminder)
             emitted, native_error, native_error_code, final = '', None, None, None
             while True:
                 event = session.receive(request, timeout)
@@ -962,12 +972,13 @@ class Client:
                 if block.get('type') == 'tool_use':
                     # As baseline (#39, #62): a name outside the inventory goes to Hermes, a bare offered name carries
                     # the prefix. Native parks neither on the hermes MCP server, so the session cannot continue.
-                    if block['name'] in names:
+                    if block['name'] in hermes_names:
                         block['name'] = PREFIX + block['name']
                         poisoned = True
-                    elif not block['name'].startswith(PREFIX) or block['name'][len(PREFIX):] not in names:
+                    elif not block['name'].startswith(PREFIX) or block['name'][len(PREFIX):] not in hermes_names:
                         poisoned = True
-                    calls.append({'id': block['id'], 'type': 'function', 'function': {'name': block['name'].removeprefix(PREFIX), 'arguments': json.dumps(block['input'], separators=(',', ':'), allow_nan=False)}})
+                    name = block['name'].removeprefix(PREFIX)
+                    calls.append({'id': block['id'], 'type': 'function', 'function': {'name': hermes_names.get(name, name), 'arguments': json.dumps(block['input'], separators=(',', ':'), allow_nan=False)}})
             usage = assistant['usage']
             text = ''.join(b.get('text', '') for b in blocks if b.get('type') == 'text')
             if emitted != text:
@@ -975,9 +986,12 @@ class Client:
                     yield self._chunk(kwargs['model'], {'content': text[len(emitted):]})
                 else:
                     raise RuntimeError('Native final text differs from incremental stream')
+            thinking = ''.join(b.get('thinking', '') for b in blocks if b.get('type') == 'thinking') or None
             message = {'role': 'assistant', 'content': text or None, 'tool_calls': calls or None,
-                       'reasoning_content': ''.join(b.get('thinking', '') for b in blocks if b.get('type') == 'thinking') or None}
+                       'reasoning_content': thinking if text or calls else None}
             carrier = {'type': CARRIER, 'version': 1, 'messages': [assistant], 'projection': projection(message)}
+            if reminder:
+                carrier['user_reminder'] = copy.deepcopy(reminder)
             message['reasoning_details'] = [carrier]
             # A refusal is Hermes' content_filter with its reason, and a cut-off call stays out of tool_calls (baseline).
             if refused:
@@ -1033,7 +1047,7 @@ class Client:
             with self._lock:
                 self._requests.discard(request)
 
-    def _warm_spawn(self, session, request, kwargs, body, manifest, system, frames, timeout, env, resolved):
+    def _warm_spawn(self, session, request, kwargs, body, manifest, system, frames, timeout, env, resolved, names, reminder):
         root = Path(tempfile.mkdtemp(prefix='claude-directsdk-warm-'))
         session.root, session.manifest = root, manifest
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.
@@ -1059,10 +1073,13 @@ class Client:
         session.pid = session.process.pid
         threading.Thread(target=session.read, daemon=True).start()
         session.send({'type': 'control_request', 'request_id': 'hermes-init', 'request': {'subtype': 'initialize', 'hooks': None}})
-        for index, frame in enumerate(frames):
+        replay = prepare_history(kwargs['messages'], names, warm=True)[1]
+        for index, frame in enumerate(replay):
             frame = copy.deepcopy(frame)
-            if frame['type'] == 'user' and index < len(frames) - 1:
+            if frame['type'] == 'user' and index < len(replay) - 1:
                 frame['shouldQuery'] = False
+            elif reminder and index == len(replay) - 1:
+                frame['message']['content'].append(reminder)
             session.send(frame)
             if frame.get('shouldQuery') is False:
                 while True:

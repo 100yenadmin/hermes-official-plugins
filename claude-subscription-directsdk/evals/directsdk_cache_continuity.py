@@ -29,8 +29,11 @@ import time
 from directsdk_cache_wire import Peer as WirePeer, USAGE, content, cut, digest, nodes
 
 
+LONG_NAME = "public_probe_" + "x" * 48  # 61 chars: native must use #57's deterministic alias.
+LONG_ALIAS = LONG_NAME[:41] + "_" + hashlib.sha256(LONG_NAME.encode()).hexdigest()[:8]
 TOOLS = [{"type": "function", "function": {"name": name, "description": "Public probe",
-          "parameters": {"type": "object", "properties": {}}}} for name in ("probe", "probe2")]
+          "parameters": {"type": "object", "properties": {}}}}
+         for name in ("probe", "probe2", LONG_NAME, "skill_view")]
 SCENARIOS = {"S1": "per-call", "S2": "warm alive", "S3": "idle restart",
              "S4": "LRU restart", "S5": "gateway restart", "S6": "review fork",
              "S7": "model swap and back", "S8": "restart after first turn"}
@@ -63,11 +66,12 @@ class Peer(WirePeer):
         number = len(self.server.wires)
         count = self.server.tool_count
         offered = {tool["name"].split("__")[-1]: tool["name"] for tool in body["tools"]}
+        names = (LONG_ALIAS,) if self.server.long_tool else ("probe", "probe2")[:count]
         blocks = ([{"type": "thinking", "thinking": f"PUBLIC SYNTHETIC THINKING {number}",
                     "signature": f"public-fixture-signature-{number}"}] + [
             {"type": "tool_use", "id": f"toolu_public_{number}_{i}",
              "name": offered[name], "input": {}}
-            for i, name in enumerate(("probe", "probe2")[:count])]) if count else [
+            for i, name in enumerate(names)]) if count else [
                 {"type": "text", "text": f"PUBLIC SYNTHETIC ANSWER {number}"}]
         stop = "tool_use" if count else "end_turn"
         message = {"id": f"msg_public_{number}", "type": "message", "role": "assistant",
@@ -202,6 +206,7 @@ def scenario(native, binary, model, name, log, subscription=False):
 
         def request(messages, chosen_model, turn, round_number, tool_count, main=True):
             peer.tool_count = tool_count
+            peer.long_tool = main and round_number == 2
             original, start, logs = copy.deepcopy(messages), len(peer.wires), len(log.events)
             result = client.create(model=chosen_model, messages=messages, tools=TOOLS)
             wires = peer.wires[start:]
@@ -285,6 +290,10 @@ def scenario(native, binary, model, name, log, subscription=False):
                 report["pass"] = False
                 report.setdefault("shape_errors", []).append({"turn": turn, "round": round_number,
                     "expected_tool_calls": tool_count, "actual_tool_calls": len(assistant.get("tool_calls") or [])})
+            if peer.long_tool:
+                restored = [c["function"]["name"] for c in assistant.get("tool_calls") or []] == [LONG_NAME]
+                report.setdefault("long_tool_round_trips", []).append({"turn": turn, "pass": restored})
+                report["pass"] &= restored
             return assistant
 
         try:
