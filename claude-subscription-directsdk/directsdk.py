@@ -1050,13 +1050,7 @@ class Client:
                 self._requests.discard(request)
 
     def _warm_spawn(self, session, request, kwargs, body, manifest, system, frames, timeout, env, resolved, names, reminder):
-        # MCP replies enter a kept-alive native as text-block lists. Replaying
-        # Hermes' scalar tool results must use that same cache-prefix shape.
-        frames = copy.deepcopy(frames)
-        for frame in frames:
-            for block in frame['message']['content']:
-                if block.get('type') == 'tool_result' and isinstance(block.get('content'), str):
-                    block['content'] = [{'type': 'text', 'text': block['content']}]
+        frames = _as_mcp_results(frames)
         root = Path(tempfile.mkdtemp(prefix='claude-directsdk-warm-'))
         session.root, session.manifest = root, manifest
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.
@@ -1082,7 +1076,7 @@ class Client:
         session.pid = session.process.pid
         threading.Thread(target=session.read, daemon=True).start()
         session.send({'type': 'control_request', 'request_id': 'hermes-init', 'request': {'subtype': 'initialize', 'hooks': None}})
-        replay = prepare_history(kwargs['messages'], names, warm=True)[1]
+        replay = _as_mcp_results(prepare_history(kwargs['messages'], names, warm=True)[1])
         for index, frame in enumerate(replay):
             frame = copy.deepcopy(frame)
             if frame['type'] == 'user' and index < len(replay) - 1:
@@ -1134,6 +1128,19 @@ _warm_reaper = None
 _WARM_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
                      'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy')
 _WARM_LAUNCH_PREFIXES = ('ANTHROPIC_', 'CLAUDE_SUBSCRIPTION_DIRECTSDK_', 'CLAUDE_CODE_USE_')
+
+
+def _as_mcp_results(frames):
+    """A copy of ``frames`` whose scalar tool results are one text block each.
+
+    MCP replies enter a kept-alive native as text-block lists, so a respawned native replaying Hermes' scalar
+    tool results must use that same shape, or the cached prefix breaks at the first replayed result."""
+    frames = copy.deepcopy(frames)
+    for frame in frames:
+        for block in frame['message']['content']:
+            if block.get('type') == 'tool_result' and isinstance(block.get('content'), str):
+                block['content'] = [{'type': 'text', 'text': block['content']}]
+    return frames
 
 
 def _warm_enabled(env):
