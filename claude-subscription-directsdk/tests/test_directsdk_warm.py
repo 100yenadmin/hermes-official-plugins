@@ -315,6 +315,28 @@ def test_one_native_serves_tool_rounds_and_turns_with_hermes_results(warm):
     assert second.choices[0].message.reasoning_details[0]['type'] == directsdk.CARRIER
 
 
+def test_restart_replays_string_tool_results_as_kept_alive_mcp_blocks(warm):
+    client = warm.client()
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(client, messages)
+    messages += [as_history(first)] + [
+        {'role': 'tool', 'tool_call_id': call.id, 'content': f'Result {i}'}
+        for i, call in enumerate(first.choices[0].message.tool_calls)]
+    second = step(client, messages)
+
+    def results(body):
+        return [b['content'] for m in body['messages'] for b in m['content'] if b['type'] == 'tool_result']
+
+    kept_alive = results(warm.upstream.bodies[-1])
+    assert kept_alive == [[{'type': 'text', 'text': f'Result {i}'}] for i in range(2)]
+    messages += [as_history(second), {'role': 'user', 'content': 'next turn'}]
+    original = json.dumps(messages)
+    directsdk._warm_shutdown()
+    step(client, messages)
+    assert results(warm.upstream.bodies[-1]) == kept_alive
+    assert json.dumps(messages) == original
+
+
 def test_divergence_kills_the_session_and_replays_full_history(warm):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(warm.client(), messages)
@@ -334,7 +356,8 @@ def test_divergence_kills_the_session_and_replays_full_history(warm):
     # The rebuild replayed the full (edited) history: every tool result's text, not an excerpt.
     replayed = warm.upstream.bodies[-1]['messages']
     results = [b for m in replayed if isinstance(m['content'], list) for b in m['content'] if b.get('type') == 'tool_result']
-    assert [r['content'] for r in results] == ['[compacted] R0', 'R1' * 50]
+    assert [r['content'] for r in results] == [
+        [{'type': 'text', 'text': text}] for text in ('[compacted] R0', 'R1' * 50)]
     # The rebuilt session is warm again for the next step.
     messages += [as_history(third), {'role': 'user', 'content': 'again'}]
     assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] == 'reused'
@@ -842,8 +865,8 @@ def test_a_cold_launch_on_a_tool_result_frame_restores_hermes_results(warm):
     second = step(context_client(warm), messages)
     assert second.usage.model_dump()['native_admission']['warm'] == 'cold' and len(warm.spawned()) == 2
     assert warm.upstream.bodies[-1]['messages'][2]['content'] == [
-        {'type': 'tool_result', 'tool_use_id': calls[0].id, 'content': 'APPLE'},
-        {'type': 'tool_result', 'tool_use_id': calls[1].id, 'content': 'BANANA', 'cache_control': MARK}]
+        {'type': 'tool_result', 'tool_use_id': calls[0].id, 'content': [{'type': 'text', 'text': 'APPLE'}]},
+        {'type': 'tool_result', 'tool_use_id': calls[1].id, 'content': [{'type': 'text', 'text': 'BANANA'}], 'cache_control': MARK}]
 
 
 # ---- v8: review of PR #99 ----

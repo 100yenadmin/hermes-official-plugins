@@ -170,9 +170,64 @@ def relay():
         peer.server_close()
 
 
-def test_warm_dict_skips_transform_through_real_relay(relay):
+def test_warm_relay_moves_only_date_and_keeps_reminders(relay):
     payload = wire(native())
+    out = json.loads(relay(payload, [FRAME], warm=True))['messages']
+    assert out[0]['content'] == ENV + '\n\n' + DATE
+    assert out[1] == ASSISTANT
+    assert out[-1]['content'] == [REMINDER, FRAME]
+
+
+@pytest.mark.parametrize('env', [ENV, [{'type': 'text', 'text': ENV}]])
+def test_warm_relay_restores_kept_alive_prefix_across_restart_and_tool_steps(relay, env):
+    opening = copy.deepcopy(env)
+    if isinstance(opening, str):
+        opening += '\n\n' + DATE
+    else:
+        opening[-1]['text'] += '\n\n' + DATE
+    first = {'role': 'user', 'content': [{'type': 'text', 'text': 'Opening question'}]}
+    prefix = [first, {'role': 'system', 'content': opening}, copy.deepcopy(ASSISTANT)]
+    # Native builds the opening env with the date, but a restarted process splits
+    # it out on its first query and on every subsequent tool/result step.
+    for frame in ([FRAME], [{'type': 'tool_result', 'tool_use_id': 'fixture', 'content': 'output'}]):
+        messages = [first, {'role': 'system', 'content': env}, copy.deepcopy(ASSISTANT),
+                    {'role': 'user', 'content': frame},
+                    {'role': 'system', 'content': [{'type': 'text', 'text': DATE, 'cache_control': MARK}]}]
+        original = copy.deepcopy(messages)
+        out = json.loads(relay(wire(messages), frame, warm=True))['messages']
+        assert out[:len(prefix)] == prefix
+        assert len(out) == len(prefix) + 1
+        assert out[-1]['content'] == [{**frame[0], 'cache_control': MARK}]
+        assert messages == original
+
+
+@pytest.mark.parametrize('env', [ENV, [{'type': 'text', 'text': ENV}]])
+def test_warm_date_rollover_with_existing_date_stays_native_built(relay, env):
+    old = DATE.replace('2031-01-01', '2030-12-31')
+    if isinstance(env, str):
+        env += '\n\n' + old
+    else:
+        env[-1]['text'] += '\n\n' + old
+    payload = wire(native(env=env))
     assert relay(payload, [FRAME], warm=True) == payload
+
+
+def test_warm_date_like_user_content_is_never_relocated(relay):
+    messages = native()[:-1]
+    messages[-1]['content'] = [{'type': 'text', 'text': DATE}]
+    payload = wire(messages)
+    assert relay(payload, messages[-1]['content'], warm=True) == payload
+
+
+@pytest.mark.parametrize('date', [DATE, [{'type': 'text', 'text': DATE}]])
+def test_warm_date_inside_replayed_history_returns_to_environment(relay, date):
+    messages = native(tail=date)
+    frame = [{'type': 'tool_result', 'tool_use_id': 'fixture', 'content': 'output'}]
+    messages += [copy.deepcopy(ASSISTANT), {'role': 'user', 'content': frame}]
+    expected = copy.deepcopy(messages)
+    expected[0]['content'] += '\n\n' + DATE
+    expected.pop(3)
+    assert json.loads(relay(wire(messages), frame, warm=True))['messages'] == expected
 
 
 def test_consecutive_per_call_requests_share_byte_identical_prompt_prefix(relay):
