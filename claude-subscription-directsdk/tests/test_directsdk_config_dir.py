@@ -155,7 +155,7 @@ def test_setup_probes_pass_the_profile_directory(profile, tmp_path, monkeypatch,
     env = {"PATH": os.defpath, "HOME": str(tmp_path), OVERRIDE: str(tmp_path / "override")}
     result = getattr(directsdk_setup, probe)(command=[sys.executable], env=env)
     assert result["logged_in"] if probe == "setup_status" else result
-    assert len(captured) == (1 if probe == "setup_status" else 2)
+    assert len(captured) == (2 if probe == "setup_status" else 3)  # settle_login (#25) runs one `-p /usage` first
     assert all(child[NATIVE_DIR] == selected and OVERRIDE not in child for child in captured)
     assert NATIVE_DIR not in env and OVERRIDE in env
 
