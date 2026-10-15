@@ -341,9 +341,11 @@ class Request:
         self.lock = threading.Lock()
 
     def cancel(self):
-        self.cancelled.set()
-        if self.admission is not None:
-            self.admission.abort()
+        with self.lock:
+            self.cancelled.set()
+            admission = self.admission
+        if admission is not None:
+            admission.abort()
         with self.lock:
             if self.process is not None:
                 kill_process_tree(self.process)
@@ -1048,6 +1050,13 @@ class Client:
                 self._requests.discard(request)
 
     def _warm_spawn(self, session, request, kwargs, body, manifest, system, frames, timeout, env, resolved, names, reminder):
+        # MCP replies enter a kept-alive native as text-block lists. Replaying
+        # Hermes' scalar tool results must use that same cache-prefix shape.
+        frames = copy.deepcopy(frames)
+        for frame in frames:
+            for block in frame['message']['content']:
+                if block.get('type') == 'tool_result' and isinstance(block.get('content'), str):
+                    block['content'] = [{'type': 'text', 'text': block['content']}]
         root = Path(tempfile.mkdtemp(prefix='claude-directsdk-warm-'))
         session.root, session.manifest = root, manifest
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.
