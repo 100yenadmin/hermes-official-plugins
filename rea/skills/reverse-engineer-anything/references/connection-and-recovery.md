@@ -60,11 +60,11 @@ only validates the target; repeated opens do not make analysis faster. Keep one
 session for related questions and explain the initial wait before starting it.
 
 This plugin sets `REA_GHIDRA_STARTUP_TIMEOUT_MS` to `900000` in its server
-environment and declares a Hermes per-server `timeout` of `1000` seconds in
-`plugin.json`. There is no change to the timeout of unrelated MCP servers.
-If Hermes rejects the `timeout` extension, that Hermes version lacks the
-required support: report that compatibility blocker rather than deleting the
-setting or pretending the default will handle large executables.
+environment. REA calls use Hermes' normal MCP tool deadline (300 seconds by
+default), which a large executable's first native query can exceed. When it
+does, explain the limit; on Hermes v0.23.0 or newer, offer the native
+`mcp_servers.rea` entry above with `timeout: 1000`. Do not pretend the
+default will handle large executables.
 
 Distinguish REA's structured `provider_timeout` from a Hermes/client timeout.
 The client deadline must exceed the backend startup deadline so the backend can

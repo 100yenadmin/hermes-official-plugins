@@ -36,7 +36,6 @@ Then start a new Hermes session and ask, for example, "Use REA to inspect
 
 Requirements:
 
-- Hermes v0.22.1 or newer, which supports this package's per-server call budget.
 - Node.js 22.19+, 24.11+ or 26+ with `npx` on PATH (REA does not support Node
   23 or 25). The first start downloads the pinned package into npm's cache.
 - Nothing else for static JavaScript/Electron/ASAR analysis, archive and
@@ -53,15 +52,11 @@ server.
 
 ## Native analysis wait budget
 
-Hermes v0.22.1 includes the
-[per-server deadline fix](https://github.com/NousResearch/hermes-agent/pull/138491)
-required by this package. Update older Hermes installations before installing
-REA; v0.22.0 predates this support.
-
-The plugin declares a 1000-second Hermes call budget for REA only, and sets
-Ghidra's internal startup deadline to 900 seconds. Other MCP servers keep
-their existing deadlines. Other clients ignore the Hermes extension and need
-their own call deadline configured.
+Every REA call runs under Hermes' normal MCP tool deadline (300 seconds by
+default). The plugin sets Ghidra's internal startup deadline to 900 seconds
+so a large import is not cut short on REA's side. A per-server Hermes call
+budget for REA ships with Hermes v0.23.0; this package will declare it once
+that release is out, so it installs on every current Hermes release today.
 
 `open_binary` validates a target, but the first Ghidra-backed query imports and
 analyzes it. Large executables can take several minutes. Subsequent queries
@@ -70,7 +65,8 @@ Cancellation remains available, and a completed open is not a progress signal.
 
 In a binary-first test on WinSCP 6.7, the console launcher imported in about
 30 seconds. The GUI executable exceeded the upstream 330-second default and
-completed in 663 seconds with the longer budget. A subsequent real Hermes
+completed in 663 seconds with a 1000-second Hermes budget, which needs
+Hermes v0.23.0 or newer. A subsequent real Hermes
 chat using the same native target completed its first query in 580 seconds,
 then made successful follow-up decompilation and caller queries. Both runs
 recovered 28,701 procedures. The Windows executable was analyzed statically,
