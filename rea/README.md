@@ -36,6 +36,7 @@ Then start a new Hermes session and ask, for example, "Use REA to inspect
 
 Requirements:
 
+- Hermes v0.22.1 or newer, which supports this package's per-server call budget.
 - Node.js 22.19+, 24.11+ or 26+ with `npx` on PATH (REA does not support Node
   23 or 25). The first start downloads the pinned package into npm's cache.
 - Nothing else for static JavaScript/Electron/ASAR analysis, archive and
@@ -52,11 +53,10 @@ server.
 
 ## Native analysis wait budget
 
-This revision requires a Hermes build containing the
+Hermes v0.22.1 includes the
 [per-server deadline fix](https://github.com/NousResearch/hermes-agent/pull/138491)
-(merged as `f974222e69278b856b1b75053774e10014c4797b`). The current stable
-release, v0.22.0, predates it; catalog admission remains blocked until a release
-includes this support. No future version number is assumed.
+required by this package. Update older Hermes installations before installing
+REA; v0.22.0 predates this support.
 
 The plugin declares a 1000-second Hermes call budget for REA only, and sets
 Ghidra's internal startup deadline to 900 seconds. Other MCP servers keep
