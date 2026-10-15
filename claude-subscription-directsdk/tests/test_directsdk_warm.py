@@ -518,6 +518,20 @@ def test_changed_profile_config_dir_rebuilds_warm_conversation(warm, profile, tm
     assert not alive(old)
 
 
+def test_a_fork_on_another_model_leaves_the_chat_session_warm(warm):
+    """A review on another model shares the chat's history but must not retire the chat's native."""
+    client = warm.client()
+    messages = [{'role': 'user', 'content': 'hello'}]
+    messages += [as_history(step(client, messages)), {'role': 'user', 'content': 'again'}]
+    chat = warm.spawned()[0]['pid']
+    fork = client.create(model='opus', messages=messages, tools=TOOLS)
+    assert fork.usage.model_dump()['native_admission']['warm'] == 'cold'
+    assert alive(chat)
+    assert step(client, messages).usage.model_dump()['native_admission']['warm'] == 'reused'
+    assert warm.spawned()[0]['pid'] == chat and len(warm.spawned()) == 2
+    client.close()
+
+
 def test_rauth_conflicting_override_is_refused_on_reuse(warm, monkeypatch):
     """R-auth: the inherited-environment refusal runs on every warm step, not only at spawn."""
     url = f'http://127.0.0.1:{warm.upstream.server.server_port}'

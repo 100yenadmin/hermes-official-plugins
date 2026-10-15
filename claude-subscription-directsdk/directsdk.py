@@ -824,10 +824,11 @@ class Client:
         # Only what decides native auth/config; per-process values (CLAUDE_PID, session ids) must not force rebuilds.
         launch = [resolved, sorted((k, v) for k, v in env.items() if k in _WARM_LAUNCH_KEYS or k.startswith(_WARM_LAUNCH_PREFIXES))]
         ident = hashlib.sha256(json.dumps([kwargs['model'], body, system, launch]).encode('utf-8')).hexdigest()
+        login = hashlib.sha256(json.dumps(launch).encode('utf-8')).hexdigest()
         first = next((k for k, m in zip(keys, messages) if m.get('role') == 'assistant'), None)
-        session, how = _warm_checkout(ident, keys, messages, first)
+        session, how = _warm_checkout(ident, keys, messages, first, login)
         if session is None:
-            session = WarmSession(ident, first)
+            session = WarmSession(ident, first, login)
             if not _warm_admit(session):
                 # Every warm slot is busy: this step takes the per-call path instead of exceeding the cap.
                 yield from self._run(request, kwargs, body, manifest, names, system, frames)
@@ -1114,8 +1115,8 @@ def _native_text(content):
 
 
 class WarmSession:
-    def __init__(self, ident, first):
-        self.ident, self.first = ident, first
+    def __init__(self, ident, first, login=None):
+        self.ident, self.first, self.login = ident, first, login
         self.consumed, self.expect = [], None
         self.process = self.admission = self.root = self.pid = None
         self.manifest = []
@@ -1228,8 +1229,13 @@ class WarmSession:
             shutil.rmtree(self.root, ignore_errors=True)
 
 
-def _warm_checkout(ident, keys, messages, first):
-    """The idle session whose consumed history prefixes this request and expects its suffix, marked busy."""
+def _warm_checkout(ident, keys, messages, first, login=None):
+    """The idle session whose consumed history prefixes this request and expects its suffix, marked busy.
+
+    A session of the same conversation (same first answer) is retired when that conversation diverged
+    or its launch configuration (CLI, auth, config dir) changed. One that differs only in model,
+    system prompt, tools or generation fields is a fork, such as a review on another model: both stay,
+    and the idle limit and pool LRU reclaim whichever goes unused."""
     now, stale, matches, how, oversize = time.monotonic(), [], [], 'cold', None
     with _warm_lock:
         for session in list(_warm_pool):
@@ -1240,7 +1246,7 @@ def _warm_checkout(ident, keys, messages, first):
                 stale.append(session)
             elif session.ident == ident and keys[:n] == session.consumed and _warm_expects(session.expect, messages[n:]):
                 matches.append(session)
-            elif first is not None and session.first == first:
+            elif first is not None and session.first == first and (session.ident == ident or session.login != login):
                 # This conversation diverged (compaction, edit, interrupt, changed prompt/tools/model).
                 why = 'ident' if session.ident != ident else ('prefix' if keys[:n] != session.consumed else 'suffix')
                 stale.append(session)
