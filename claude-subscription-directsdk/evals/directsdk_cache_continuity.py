@@ -6,6 +6,8 @@ Proves exact marker-prefix continuity, signed-thinking replay and caller isolati
 for six turns in eight scenarios, not vendor cache hits, costs or real-model
 behaviour. Usage and signatures are public synthetic fixtures. Only compact
 hash receipts are printed; no raw prompts, traces or credentials are retained.
+With --subscription, emulate native's account context using public fixtures;
+this does not authenticate a real account.
 """
 import argparse
 from collections import Counter
@@ -33,14 +35,22 @@ SCENARIOS = {"S1": "per-call", "S2": "warm alive", "S3": "idle restart",
              "S4": "LRU restart", "S5": "gateway restart", "S6": "review fork",
              "S7": "model swap and back", "S8": "restart after first turn"}
 SYSTEM = "PUBLIC SYNTHETIC SYSTEM\n" * 300
+PUBLIC_EMAIL = "public@example.invalid"
+PUBLIC_UUID = "00000000-0000-0000-0000-000000000000"
+EMAIL_REMINDER = "The user's email address is"
 
 
 class Peer(WirePeer):
     """The base SSE peer with a per-create script and distinct thinking signatures."""
 
+    def do_GET(self):
+        self.server.paths.append({"method": "GET", "path": self.path.split("?")[0]})
+        self.send_error(501, "Unsupported method ('GET')")
+
     def do_POST(self):
-        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         path = self.path.split("?")[0]
+        self.server.paths.append({"method": "POST", "path": path})
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         if path == "/v1/messages/count_tokens":
             self.send_response(200)
             self.end_headers()
@@ -134,7 +144,14 @@ class WarmLog(logging.Handler):
             self.events.append(message)
 
 
-def isolated_env(tmp, port, warm):
+def isolated_env(tmp, port, warm, subscription=False):
+    # Native prefetches macOS credentials even with an injected token. Shadow
+    # its PATH-resolved `security` command so no real keychain item is read.
+    commands = Path(tmp) / "bin"
+    commands.mkdir(exist_ok=True)
+    security = commands / "security"
+    security.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+    security.chmod(0o700)
     env = {"PATH": os.defpath, "HOME": tmp, "HERMES_HOME": tmp,
            "CLAUDE_CONFIG_DIR": str(Path(tmp) / "config"), "XDG_CONFIG_HOME": tmp,
            "ANTHROPIC_API_KEY": "sk-ant-public-offline-fixture",
@@ -142,12 +159,26 @@ def isolated_env(tmp, port, warm):
            "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1",
            "DISABLE_ERROR_REPORTING": "1", "NO_PROXY": "127.0.0.1,localhost",
            "no_proxy": "127.0.0.1,localhost", "CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM": str(int(warm))}
+    env.update(PATH=str(commands) + os.pathsep + os.defpath, TMPDIR=tempfile.gettempdir())
+    if subscription:
+        env.pop("ANTHROPIC_API_KEY")
+        # Tn() reads this cached account only when hl() selects OAuth. The
+        # injected token defaults to inference-only scopes, so native needs no
+        # profile fetch, refresh token or credential-store fixture.
+        env.update(CLAUDE_CODE_OAUTH_TOKEN="sk-ant-oat01-public-offline-fixture",
+                   CLAUDE_CODE_SUBSCRIPTION_TYPE="max")
+        config = Path(env["CLAUDE_CONFIG_DIR"])
+        config.mkdir(exist_ok=True)
+        (config / ".claude.json").write_text(json.dumps({
+            "hasCompletedOnboarding": True,
+            "oauthAccount": {"accountUuid": PUBLIC_UUID, "emailAddress": PUBLIC_EMAIL,
+                             "organizationUuid": PUBLIC_UUID}}), encoding="utf-8")
     env.update({key: "http://127.0.0.1:1" for key in
                 ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")})
     return env
 
 
-def scenario(native, binary, model, name, log):
+def scenario(native, binary, model, name, log, subscription=False):
     warm = name != "S1"
     report = {"pass": True, "name": SCENARIOS[name], "boundaries": [], "requests": 0,
               "main_requests": 0, "mismatches": 0, "system_messages": [], "kills": [], "receipts": []}
@@ -159,10 +190,10 @@ def scenario(native, binary, model, name, log):
         native.WARM_POOL_SIZE = 1 if name == "S4" else size
     log_start = len(log.events)
     with tempfile.TemporaryDirectory(prefix=f"cache-continuity-{name}-") as tmp, ThreadingHTTPServer(("127.0.0.1", 0), Peer) as peer:
-        peer.wires, peer.tool_count = [], 0
+        peer.wires, peer.tool_count, peer.paths = [], 0, []
         worker = threading.Thread(target=peer.serve_forever, daemon=True)
         worker.start()
-        env = isolated_env(tmp, peer.server_port, warm)
+        env = isolated_env(tmp, peer.server_port, warm, subscription)
 
         def new_client():
             return native.Client(command=str(binary), env=env, timeout=45)
@@ -191,6 +222,8 @@ def scenario(native, binary, model, name, log):
                            "message_marker_count": len(markers), "thinking_expected": sum(expected.values()),
                            "thinking_replay": replay, "continuity_checked": main,
                            "history_unchanged": messages == original,
+                           "account_email_reminder": any(EMAIL_REMINDER in n.get("text", "")
+                                                         for n in nodes(wire)),
                            "upstream_requests": len(wires)}
                 # S7's first sonnet request starts a new model cache; returning to
                 # opus must still extend the last prefix opus actually wrote.
@@ -290,6 +323,12 @@ def scenario(native, binary, model, name, log):
             peer.shutdown()
             worker.join(timeout=5)
             report["requests"] = len(peer.wires)
+            report["account_email_reminder_requests"] = sum(
+                any(EMAIL_REMINDER in n.get("text", "") for n in nodes(wire)) for wire in peer.wires)
+            if subscription:
+                report["subscription_emulated"] = report["account_email_reminder_requests"] > 0
+                report["pass"] &= report["subscription_emulated"]
+            report["peer_paths"] = peer.paths
             report["main_requests"] = sum(r["main"] for r in report["receipts"])
             report["kills"] = [e for e in log.events[log_start:] if e.startswith("warm kill:")]
             report["fallbacks"] = [e for e in log.events[log_start:] if e.startswith("warm fallback:")]
@@ -298,6 +337,7 @@ def scenario(native, binary, model, name, log):
 
 def run_isolated(args):
     root, binary = args.root.resolve(), args.binary.resolve()
+    subscription = getattr(args, "subscription", False)
     sys.path.insert(0, str(root))
     spec = importlib.util.spec_from_file_location("cache_continuity_directsdk", root / "directsdk.py")
     native = importlib.util.module_from_spec(spec)
@@ -312,14 +352,15 @@ def run_isolated(args):
         version = subprocess.check_output([str(binary), "--version"], env=isolated_env(tmp, 1, False),
                                           stdin=subprocess.DEVNULL, text=True, timeout=15).strip()
     output = {"native_version": version, "native_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
-              "root": str(root), "model": args.model, "eval_version": "B0",
+              "root": str(root), "model": args.model, "eval_version": "B0b" if subscription else "B0",
+              "subscription": subscription,
               "synthetic_usage_not_cache_measurement": True, "scenarios": {}}
     for name in args.only:
         if name != "S1" and not hasattr(native, "_warm_checkout"):
             output["scenarios"][name] = {"pass": None, "skipped": "root has no warm mode"}
             continue
         try:
-            output["scenarios"][name] = scenario(native, binary, args.model, name, log)
+            output["scenarios"][name] = scenario(native, binary, args.model, name, log, subscription)
         except OSError as error:
             output["scenarios"][name] = {"pass": False, "stopped": True,
                 "error": {"type": type(error).__name__, "message": str(error)}}
@@ -350,6 +391,8 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--binary", type=Path, default=Path("/Users/m1/.local/share/claude/versions/2.1.299"))
     parser.add_argument("--model", default="claude-opus-5-5")
+    parser.add_argument("--subscription", action="store_true",
+                        help="emulate a subscription login offline using public account fixtures")
     parser.add_argument("--only", default=",".join(SCENARIOS), help="comma-separated scenario ids, e.g. S3,S5")
     args = parser.parse_args()
     args.only = args.only.split(",")
