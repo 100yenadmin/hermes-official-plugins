@@ -829,7 +829,7 @@ def test_cold_replay_reads_the_warm_first_turn_frame_prefix(warm):
     mark = message_marks(before)[-1]
     assert mark == (0, 0) and prefix(after, mark) == prefix(before, mark)
     (fresh,) = directsdk._warm_pool
-    assert fresh.admission is not session.admission and fresh.admission.first_turn == {}
+    assert fresh.admission is not session.admission and fresh.admission.first_turn == {'context': None}
 
 
 def test_a_cold_launch_on_a_tool_result_frame_restores_hermes_results(warm):

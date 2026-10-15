@@ -89,8 +89,11 @@ def _frame_first(messages, queried, memory=None):
     dropped or edited, and the frame becomes a prefix the next request replays byte-identically.
     A live warm process replays the first turn as native first built it, so a warm session re-applies request 1's reorder on later requests.
 
-    Only the conversation's first turn is touched (no assistant message yet), only when the
-    queried frame occurs exactly once, and only when everything before it is plain text.
+    A restarted warm process instead prepends context to its newest user frame (#84).
+    Remember that context on its first request and relocate it to the end of the first user
+    message on every request, so the previous process's completed turns remain a prefix.
+    Per-call mode keeps the first-turn-only behavior. The queried frame must occur exactly
+    once, and everything before it must be plain text.
     Returns whether the order changed."""
     if any(m.get('role') == 'assistant' for m in messages):
         if isinstance(memory, dict) and 'permutation' in memory:
@@ -104,6 +107,38 @@ def _frame_first(messages, queried, memory=None):
             k, n = memory['permutation']
             first['content'] = content[k:k + n] + content[:k] + content[k + n:]
             return True
+        if isinstance(memory, dict):
+            if 'context' not in memory:
+                memory['context'] = None  # Discover once, before later tool frames can match.
+                index = next((i for i in reversed(range(len(messages)))
+                              if messages[i].get('role') == 'user'), None)
+                content = messages[index].get('content') if index is not None else None
+                if isinstance(content, list) and queried and len(content) > len(queried):
+                    want = [_plain(b) for b in queried]
+                    starts = [k for k in range(len(content) - len(queried) + 1)
+                              if [_plain(b) for b in content[k:k + len(queried)]] == want]
+                    if len(starts) == 1 and starts[0] > 0:
+                        leading = content[:starts[0]]
+                        if all(isinstance(b, dict) and b.get('type') == 'text'
+                               and set(b) <= {'type', 'text'} for b in leading):
+                            memory['context'] = {'index': index, 'blocks': copy.deepcopy(leading)}
+            context = memory['context']
+            if isinstance(context, dict):
+                index, leading = context['index'], context['blocks']
+                if index >= len(messages):
+                    return False
+                message = messages[index]
+                content = message.get('content')
+                first = next((m for m in messages if m.get('role') == 'user'), {})
+                opening = first.get('content')
+                if (first is message or message.get('role') != 'user' or not isinstance(content, list)
+                        or not isinstance(opening, list)
+                        or [_plain(b) for b in content[:len(leading)]] != leading
+                        or [_plain(b) for b in opening[-len(leading):]] == leading):
+                    return False
+                message['content'] = content[len(leading):]
+                first['content'] = opening + copy.deepcopy(leading)
+                return True
         return False
     first = next((m for m in messages if m.get('role') == 'user'), {})
     content = first.get('content')
