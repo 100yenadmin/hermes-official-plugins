@@ -898,10 +898,10 @@ class Client:
                 n = len(session.consumed)
                 session.attach(request)
                 if session.expect == 'user':
-                    session.admission.rearm(timeout, frames[-1]['message']['content'])
                     frame = copy.deepcopy(frames[-1])
                     if reminder:
                         frame['message']['content'].append(reminder)
+                    session.admission.rearm(timeout, frame['message']['content'])
                     session.send(frame)
                 else:
                     results = {m['tool_call_id']: (m['content'], bool(m.get('is_error'))) for m in messages[n:]}
@@ -1055,8 +1055,10 @@ class Client:
         session.root, session.manifest = root, manifest
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.
         env.update(MCP_TOOL_TIMEOUT='86400000', MAX_MCP_OUTPUT_TOKENS='100000000')
-        # The queried frame lets the relay keep the cache breakpoint off native's per-request context.
-        session.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=frames[-1]['message']['content'], first_turn={})
+        # Include the retained reminder: native's account context must follow the whole sent frame,
+        # matching its relocation to the end of the opening user message after a warm restart.
+        queried = frames[-1]['message']['content'] + ([reminder] if reminder else [])
+        session.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=queried, first_turn={})
         env['ANTHROPIC_BASE_URL'] = session.admission.url
         (root / 'settings.json').write_text(json.dumps({'env': {'CLAUDE_CODE_EXTRA_BODY': body}}), encoding='utf-8')
         (root / 'system.md').write_text(system, encoding='utf-8')

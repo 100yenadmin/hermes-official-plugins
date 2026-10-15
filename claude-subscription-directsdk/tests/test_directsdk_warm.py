@@ -69,8 +69,10 @@ def wire():
     # Real native merges consecutive user messages; NATIVE_CONTEXT adds its per-request context the way 2.1.287+
     # does: the live process keeps its first-turn reminder in history; later context stays ephemeral.
     reminder = '\n<system-reminder>userEmail: user@example.com</system-reminder>'
-    if first_query and os.environ.get('NATIVE_CONTEXT') and len(history) == 1:
-        history[0]['content'].insert(0, {'type':'text','text':reminder})
+    prepend_context = first_query and os.environ.get('NATIVE_CONTEXT') and (
+        len(history) == 1 or os.environ.get('NATIVE_RESTART_CONTEXT'))
+    if prepend_context:
+        history[-1]['content'].insert(0, {'type':'text','text':reminder})
     first_query = False
     messages = []
     for message in json.loads(json.dumps(history)):
@@ -85,12 +87,12 @@ def wire():
     if not os.environ.get('NATIVE_CONTEXT'):
         return messages
     newest = messages[-1]['content']
-    if len(messages) > 1 and newest[-1]['type'] == 'tool_result':
+    if not prepend_context and len(messages) > 1 and newest[-1]['type'] == 'tool_result':
         if isinstance(newest[-1]['content'], str):
             newest[-1]['content'] += reminder
         else:
             newest[-1]['content'].append({'type':'text','text':reminder})
-    elif len(messages) > 1:
+    elif not prepend_context and len(messages) > 1:
         newest.append({'type':'text','text':reminder})
     if len(messages) > 1:
         messages[-2]['content'][-1]['cache_control'] = {'type':'ephemeral'}
@@ -337,8 +339,9 @@ def test_warm_skills_reminder_survives_reuse_tool_round_and_restart(warm):
     assert history == original
     sent = warm.upstream.bodies[0]['messages'][0]['content']
     assert sent[-1]['text'] == directsdk.SKILLS_REMINDER
-    assert 'cache_control' in sent[0] and 'cache_control' not in sent[-1]
-    assert directsdk._warm_pool[0].admission.queried == [{'type': 'text', 'text': original[0]['content']}]
+    assert 'cache_control' not in sent[0] and 'cache_control' in sent[-1]
+    assert directsdk._warm_pool[0].admission.queried == [
+        {'type': 'text', 'text': original[0]['content']}, {'type': 'text', 'text': directsdk.SKILLS_REMINDER}]
     history += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'result'}
                                     for c in first.choices[0].message.tool_calls]
     second = client.create(model='sonnet', messages=history, tools=tools)
@@ -350,7 +353,8 @@ def test_warm_skills_reminder_survives_reuse_tool_round_and_restart(warm):
     assert third.usage.native_admission.warm == 'reused'
     live = json.loads(json.dumps(warm.upstream.bodies[-1]['messages']))
     assert live[-1]['content'][-1]['text'] == directsdk.SKILLS_REMINDER
-    assert directsdk._warm_pool[0].admission.queried == [{'type': 'text', 'text': 'next turn'}]
+    assert directsdk._warm_pool[0].admission.queried == [
+        {'type': 'text', 'text': 'next turn'}, {'type': 'text', 'text': directsdk.SKILLS_REMINDER}]
     directsdk._warm_shutdown()
     # Replaying the same request must recreate every reminder the kept-alive native held.
     restarted = client.create(model='sonnet', messages=history, tools=tools)
@@ -901,6 +905,60 @@ def prefix(body, at):
         return [plain(v) for v in value] if isinstance(value, list) else value
     i, j = at
     return json.dumps(plain(body['messages'][:i] + [dict(body['messages'][i], content=body['messages'][i]['content'][:j + 1])]))
+
+
+@pytest.mark.parametrize('multiblock', [False, True])
+def test_warm_skills_reminder_account_context_order_is_restart_stable(warm, multiblock):
+    tools = TOOLS + [{'type': 'function', 'function': {'name': 'skill_view'}}]
+    host = [{'type': 'text', 'text': 'call probe in parallel'}]
+    if multiblock:
+        host.append({'type': 'text', 'text': 'Public source pack'})
+    history = [{'role': 'user', 'content': host if multiblock else host[0]['text']}]
+    client = context_client(warm)
+    client.env['NATIVE_RESTART_CONTEXT'] = '1'
+    expected = host + [{'type': 'text', 'text': directsdk.SKILLS_REMINDER},
+                       {'type': 'text', 'text': REMINDER}]
+
+    def create():
+        before = json.loads(json.dumps(history))
+        result = client.create(model='sonnet', messages=history, tools=tools)
+        assert history == before
+        return result
+
+    def opening(body):
+        return [{k: v for k, v in b.items() if k != 'cache_control'}
+                for b in body['messages'][0]['content']]
+
+    first = create()
+    assert opening(warm.upstream.bodies[0]) == expected
+    session, = directsdk._warm_pool
+    assert session.admission.queried == expected[:-1]
+    assert session.admission.first_turn['permutation'] == (1, len(host) + 1)
+    assert message_marks(warm.upstream.bodies[0]) == [(0, len(host))]
+    calls = first.choices[0].message.tool_calls
+    history += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': text}
+                                     for c, text in zip(calls, ('APPLE', 'BANANA'))]
+    second = create()
+    assert second.usage.native_admission.warm == 'reused'
+    tool_round = warm.upstream.bodies[-1]
+    assert tool_round['messages'][2]['content'] == [
+        {'type': 'tool_result', 'tool_use_id': calls[0].id, 'content': [{'type': 'text', 'text': 'APPLE'}]},
+        {'type': 'tool_result', 'tool_use_id': calls[1].id, 'content': [{'type': 'text', 'text': 'BANANA'}], 'cache_control': MARK}]
+    history += [as_history(second), {'role': 'user', 'content': 'next turn'}]
+    live = create()
+    assert live.usage.native_admission.warm == 'reused'
+    assert session.admission.queried == [{'type': 'text', 'text': 'next turn'}, expected[-2]]
+    directsdk._warm_shutdown()
+    restarted = create()
+    assert restarted.usage.native_admission.warm == 'cold'
+    # The fake native's system layout is simplified; compare the entire opening user
+    # message here, and exercise full prefix continuity in the real-CLI rehearsal.
+    assert opening(warm.upstream.bodies[-1]) == expected
+    history += [as_history(restarted), {'role': 'user', 'content': 'after restart'}]
+    assert create().usage.native_admission.warm == 'reused'
+    assert all(opening(body) == expected for body in warm.upstream.bodies)
+    # Per-call replay omits the historical skills reminder and still uses the host frame.
+    assert directsdk.prepare_history(history)[1][0]['message']['content'] == host
 
 
 def test_warm_live_first_turn_and_cached_prefix_replay_unchanged(warm):
