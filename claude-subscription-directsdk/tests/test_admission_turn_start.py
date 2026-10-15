@@ -293,6 +293,8 @@ def test_relay_forwards_the_turn_mark_with_the_steer_frame_restored():
         thread.join()
         peer.server_close()
     sent = received[0]
-    assert plain(sent['messages'][-2]['content']) == messages[end - 1]['content']
-    assert message_marks(sent) == [(0, 0), (len(sent['messages']) - 2, 1)]
+    # The relay returns native's trailing date message to its env message, so the steer frame is last.
+    assert sent['messages'][-1]['role'] == 'user' and sent['messages'][1]['content'].endswith("Today's date is 2026-10-10.")
+    assert plain(sent['messages'][-1]['content']) == messages[end - 1]['content']
+    assert message_marks(sent) == [(0, 0), (len(sent['messages']) - 1, 1)]
     assert mark_count(sent) == 4
