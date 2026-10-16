@@ -1004,6 +1004,7 @@ class Client:
                 session.first = session.first or session.consumed[len(messages)]
                 session.owner = weakref.ref(self)
                 session.expect = frozenset(c['id'] for c in calls) if calls else 'user'
+                session.calls = [b for b in assistant['content'] if b.get('type') == 'tool_use']
                 # False when cancel() landed during this handoff: the session was killed, never published.
                 done = _session_release(session, request)
             yield chunk
@@ -1257,7 +1258,7 @@ class NativeSession:
         self.manifest = []
         self.events = queue.Queue()
         self.lock = threading.Lock()  # stdin writes and the parked/results tables
-        self.parked, self.results = {}, {}
+        self.parked, self.results, self.claimed, self.calls = {}, {}, set(), []
         self.busy, self.last_used, self.killed = True, time.monotonic(), False
         self.owner = lambda: None
 
@@ -1301,7 +1302,8 @@ class NativeSession:
         method = message.get('method')
         with self.lock:
             if method == 'tools/call':
-                tool_id = ((message.get('params') or {}).get('_meta') or {}).get('claudecode/toolUseId')
+                tool_id = self._tool_use_id(message.get('params') or {})
+                self.claimed.add(tool_id)
                 self.parked[tool_id] = (request_id, message.get('id'))
                 self._answer(tool_id)
                 return
@@ -1311,6 +1313,18 @@ class NativeSession:
             elif method == 'tools/list':
                 result = {'tools': [dict(tool, _meta={'anthropic/maxResultSizeChars': SESSION_RESULT_CHARS}) for tool in self.manifest]}
             self._reply(request_id, {'jsonrpc': '2.0', 'id': message['id'], 'result': result} if 'id' in message else {'jsonrpc': '2.0', 'result': {}})
+
+    def _tool_use_id(self, params):
+        """The step's tool_use a tools/call answers. Claude Code names it in _meta["claudecode/toolUseId"], its own key
+        and absent from Anthropic's Agent SDK; without it, the first unclaimed call of the step with this tool name and
+        exactly these arguments, so identical calls pair up in call order. The first call can arrive before the step
+        settles (read it from the relay's capture), later ones after the next step re-armed the relay."""
+        tool_id = (params.get('_meta') or {}).get('claudecode/toolUseId')
+        if tool_id:
+            return tool_id
+        blocks = (((self.admission.capture.message if self.admission is not None else None) or {}).get('content') or []) + self.calls
+        return next((b.get('id') for b in blocks if isinstance(b, dict) and b.get('type') == 'tool_use' and b.get('id') not in self.claimed
+                     and b.get('name') == PREFIX + str(params.get('name')) and (b.get('input') or {}) == (params.get('arguments') or {})), None)
 
     def _reply(self, request_id, mcp_response):
         self._write({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': request_id, 'response': {'mcp_response': mcp_response}}})

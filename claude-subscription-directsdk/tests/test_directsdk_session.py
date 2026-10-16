@@ -63,7 +63,10 @@ def round_budget():
 def call_next():
     block = queue[0]
     rpc[0] += 1
-    out({'type':'control_request','request_id':'c%d' % rpc[0],'request':{'subtype':'mcp_message','server_name':'hermes','message':{'jsonrpc':'2.0','id':rpc[0],'method':'tools/call','params':{'name':block['name'][len('mcp__hermes__'):],'arguments':block['input'],'_meta':{'claudecode/toolUseId':block['id']}}}}})
+    params = {'name':block['name'][len('mcp__hermes__'):],'arguments':block['input']}
+    if not os.environ.get('FAKE_NO_TOOL_USE_ID'):  # Anthropic's Agent SDK sends no claudecode/toolUseId
+        params['_meta'] = {'claudecode/toolUseId':block['id']}
+    out({'type':'control_request','request_id':'c%d' % rpc[0],'request':{'subtype':'mcp_message','server_name':'hermes','message':{'jsonrpc':'2.0','id':rpc[0],'method':'tools/call','params':params}}})
 def wire():
     global first_query
     # Real native merges consecutive user messages; NATIVE_CONTEXT adds its per-request context the way 2.1.287+
@@ -109,6 +112,8 @@ def query():
                 message = event['message']
             elif event['type'] == 'content_block_start':
                 message['content'].append(event['content_block'])
+            elif event['type'] == 'content_block_delta' and event['delta']['type'] == 'input_json_delta':
+                message['content'][event['index']]['input'] = json.loads(event['delta']['partial_json'] or '{}')
             elif event['type'] == 'message_delta':
                 message.update(event['delta'])
     for block in message['content']:
@@ -1166,7 +1171,7 @@ def test_the_profile_setting_alone_turns_session_mode_on(profile, rig):
     assert spawned['argv'][spawned['argv'].index('--allowedTools') + 1] == 'mcp__hermes'
 
 
-# ---- session mode review: RAM-sized pool, launch-failure latch ----
+# ---- session mode review: RAM-sized pool, launch-failure latch, toolUseId fallback ----
 
 GIB = 1024 ** 3
 
@@ -1218,3 +1223,39 @@ def test_two_failed_session_launches_in_a_row_turn_session_mode_off(rig, tmp_pat
     assert caplog.text.count('session fallback') == 3
     warnings = [r for r in caplog.records if r.levelname == 'WARNING' and 'session mode off for this process' in r.getMessage()]
     assert len(warnings) == 1
+
+
+def answered(body):
+    """The tool results of the newest native request, as (tool_use_id, text)."""
+    return [(b['tool_use_id'], ''.join(x['text'] for x in b['content']) if isinstance(b['content'], list) else b['content'])
+            for m in body['messages'] if isinstance(m['content'], list) for b in m['content'] if b.get('type') == 'tool_result']
+
+
+def test_tool_calls_without_tool_use_id_match_by_name_and_arguments(rig):
+    client = rig.client()
+    client.env['FAKE_NO_TOOL_USE_ID'] = '1'
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(client, messages)
+    a, b = first.choices[0].message.tool_calls
+    messages += [as_history(first), {'role': 'tool', 'tool_call_id': b.id, 'content': 'BANANA'},
+                 {'role': 'tool', 'tool_call_id': a.id, 'content': 'APPLE'}]
+    second = step(client, messages)
+    assert second.usage.model_dump()['native_admission']['session'] == 'reused'
+    assert answered(rig.upstream.bodies[-1]) == [(a.id, 'APPLE'), (b.id, 'BANANA')]
+
+
+def test_identical_tool_calls_without_tool_use_id_match_in_call_order(rig):
+    client = rig.client()
+    client.env['FAKE_NO_TOOL_USE_ID'] = '1'
+    twins = [{'type': 'tool_use', 'id': f'toolu_twin{i}', 'name': 'mcp__hermes__probe', 'input': {'key': 'same'}} for i in (1, 2)]
+    rig.upstream.reply = lambda n, body: sse(f'm{n}', twins, 'tool_use')
+    messages = [{'role': 'user', 'content': 'call probe twice'}]
+    first = step(client, messages)
+    rig.upstream.reply = None
+    one, two = first.choices[0].message.tool_calls
+    assert (one.id, two.id) == ('toolu_twin1', 'toolu_twin2')
+    messages += [as_history(first), {'role': 'tool', 'tool_call_id': two.id, 'content': 'TWO'},
+                 {'role': 'tool', 'tool_call_id': one.id, 'content': 'ONE'}]
+    second = step(client, messages)
+    assert second.usage.model_dump()['native_admission']['session'] == 'reused'
+    assert answered(rig.upstream.bodies[-1]) == [('toolu_twin1', 'ONE'), ('toolu_twin2', 'TWO')]
