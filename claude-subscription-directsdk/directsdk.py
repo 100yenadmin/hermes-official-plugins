@@ -144,7 +144,13 @@ def prepare_history(messages, names=None):
                 expected = {**carrier['projection'], 'content': carrier['projection']['content'].strip()}
                 if projection(message) == expected:
                     for native in carrier['messages']:
-                        frames.append({'type': 'assistant', 'message': copy.deepcopy(native)})
+                        native = copy.deepcopy(native)
+                        # Native sizes its local "Prompt is too long" gate from the newest assistant
+                        # message's `usage`. A replayed frame keeps the usage of the request that made it,
+                        # so after Hermes compresses the history it still reports the old size and native
+                        # refuses locally without sending (#92). `usage` is local metadata, never on the wire.
+                        native.pop('usage', None)
+                        frames.append({'type': 'assistant', 'message': native})
                     continue
                 # Host compaction/hooks own visible history. Never restore stale
                 # pre-edit blocks or attach their signatures to rewritten content.
