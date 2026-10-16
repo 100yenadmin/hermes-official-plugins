@@ -307,6 +307,66 @@ def request_body(kwargs):
     return encoded, manifest, names
 
 
+def native_command(resolved, model, root, body, system, mcp, env, session=False):
+    """The native argv for one launch, per call or for a session; writes its private settings and system files."""
+    # Native settings apply env inside the process, avoiding execve's
+    # per-argument/environment-string limit for full Hermes schemas.
+    (root / 'settings.json').write_text(json.dumps({'env': {'CLAUDE_CODE_EXTRA_BODY': body}}), encoding='utf-8')
+    (root / 'system.md').write_text(system, encoding='utf-8')
+    parsed = json.loads(body)
+    if 'max_tokens' in parsed:
+        env['CLAUDE_CODE_MAX_OUTPUT_TOKENS'] = str(parsed['max_tokens'])
+    # Per call native answers one turn; a session runs on, allowed to call the hermes MCP tools only.
+    turns = ['--permission-mode', 'dontAsk', '--allowedTools', 'mcp__hermes'] if session else ['--max-turns', '1', '--permission-mode', 'dontAsk']
+    # The resolved path matters on Windows: CreateProcess finds claude.exe on PATH but not the npm claude.cmd shim.
+    command = resolved + ['-p', '--model', native_model(model), '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--tools', '', '--system-prompt-file', str(root / 'system.md'), '--settings', str(root / 'settings.json'), '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', *turns, '--no-session-persistence', '--mcp-config', json.dumps(mcp)]
+    # Native appends a per-turn effort message at its own level (the CLI default unless
+    # --effort is given), which overrides the top-level output_config.effort from the extra body.
+    effort = parsed.get('output_config', {}).get('effort')
+    if effort:
+        command += ['--effort', effort]
+    return command
+
+
+def replay_history(frames, send, receive):
+    """Send Hermes' history: earlier user frames with shouldQuery false, each acknowledged by a zero-turn result."""
+    for index, frame in enumerate(frames):
+        frame = copy.deepcopy(frame)
+        if frame['type'] == 'user' and index < len(frames) - 1:
+            frame['shouldQuery'] = False
+        send(frame)
+        if frame.get('shouldQuery') is False:
+            while True:
+                ack = receive()
+                if ack is None:
+                    raise RuntimeError('Native exited before replay acknowledgment')
+                if ack.get('type') == 'result':
+                    if ack.get('num_turns') != 0 or ack.get('is_error'):
+                        raise RuntimeError('Native history replay not supported: expected zero-turn acknowledgment')
+                    break
+
+
+def tool_calls(blocks, hermes_names):
+    """Hermes' tool calls for native's tool_use blocks, and whether every one named an offered tool as offered."""
+    calls, offered = [], True
+    for block in blocks:
+        if block.get('type') == 'tool_use':
+            # Native built-ins are off (--tools '', inert MCP, dontAsk), so any other name is
+            # the model's, e.g. a Tool Search-deferred tool called directly (#39). Hermes owns
+            # validation and answers an unknown name with a recoverable error.
+            if block['name'] in hermes_names:
+                # Native sometimes drops the prefix on a tool it was offered (#62); carry the
+                # offered name so replayed history does not teach the slip back to the model.
+                block['name'] = PREFIX + block['name']
+                offered = False
+            elif not block['name'].startswith(PREFIX) or block['name'][len(PREFIX):] not in hermes_names:
+                offered = False
+            name = block['name'].removeprefix(PREFIX)
+            name = hermes_names.get(name, name)
+            calls.append({'id': block['id'], 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(block['input'], separators=(',', ':'), allow_nan=False)}})
+    return calls, offered
+
+
 class Request:
     def __init__(self, client):
         self.client, self.process = client, None
@@ -684,20 +744,7 @@ class Client:
                 # The queried frame lets the relay keep the cache breakpoint off native's per-request context.
                 request.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=frames[-1]['message']['content'])
                 env['ANTHROPIC_BASE_URL'] = request.admission.url
-                # Native settings apply env inside the process, avoiding execve's
-                # per-argument/environment-string limit for full Hermes schemas.
-                (root / 'settings.json').write_text(json.dumps({'env': {'CLAUDE_CODE_EXTRA_BODY': body}}), encoding='utf-8')
-                (root / 'system.md').write_text(system, encoding='utf-8')
-                parsed = json.loads(body)
-                if 'max_tokens' in parsed:
-                    env['CLAUDE_CODE_MAX_OUTPUT_TOKENS'] = str(parsed['max_tokens'])
-                # The resolved path matters on Windows: CreateProcess finds claude.exe on PATH but not the npm claude.cmd shim.
-                command = resolved + ['-p', '--model', native_model(kwargs['model']), '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--tools', '', '--system-prompt-file', str(root / 'system.md'), '--settings', str(root / 'settings.json'), '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--max-turns', '1', '--permission-mode', 'dontAsk', '--no-session-persistence', '--mcp-config', json.dumps(mcp)]
-                # Native appends a per-turn effort message at its own level (the CLI default unless
-                # --effort is given), which overrides the top-level output_config.effort from the extra body.
-                effort = parsed.get('output_config', {}).get('effort')
-                if effort:
-                    command += ['--effort', effort]
+                command = native_command(resolved, kwargs['model'], root, body, system, mcp, env)
                 p = request.spawn(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', cwd=self._workdir(), env=env)
                 # Native's stderr is diagnosis, not noise: a gateway-only failure (issue #44)
                 # previously vanished into DEVNULL, and the reporter had to patch the plugin to
@@ -749,21 +796,10 @@ class Client:
                             raise RuntimeError('Invalid native stream-json output: ' + repr((getattr(event, 'doc', None) or str(event))[:300]) + _stderr_tail(native_stderr)) from event
                         deadline = time.monotonic() + timeout
                         return event
-                for index, frame in enumerate(frames):
-                    frame = copy.deepcopy(frame)
-                    if frame['type'] == 'user' and index < len(frames) - 1:
-                        frame['shouldQuery'] = False
-                    p.stdin.write(json.dumps(frame, allow_nan=False) + '\n')
+                def send(row):
+                    p.stdin.write(json.dumps(row, allow_nan=False) + '\n')
                     p.stdin.flush()
-                    if frame.get('shouldQuery') is False:
-                        while True:
-                            ack = receive()
-                            if ack is None:
-                                raise RuntimeError('Native exited before replay acknowledgment')
-                            if ack.get('type') == 'result':
-                                if ack.get('num_turns') != 0 or ack.get('is_error'):
-                                    raise RuntimeError('Native history replay not supported: expected zero-turn acknowledgment')
-                                break
+                replay_history(frames, send, receive)
                 p.stdin.close()
                 assistants, results, stopped, emitted = [], [], False, ''
                 native_error = native_error_code = None
@@ -817,60 +853,17 @@ class Client:
                 if len(results) != 1 or not assistants or not stopped:
                     raise RuntimeError('Incomplete native response: assistant, message_stop and one result required')
                 final = results[0]
-                blocks = [b for a in assistants for b in a['content']]
-                calls = []
-                for block in blocks:
-                    if block.get('type') == 'tool_use':
-                        # Native built-ins are off (--tools '', inert MCP, dontAsk), so any other name is
-                        # the model's, e.g. a Tool Search-deferred tool called directly (#39). Hermes owns
-                        # validation and answers an unknown name with a recoverable error.
-                        if block['name'] in hermes_names:
-                            # Native sometimes drops the prefix on a tool it was offered (#62); carry the
-                            # offered name so replayed history does not teach the slip back to the model.
-                            block['name'] = PREFIX + block['name']
-                        name = block['name'].removeprefix(PREFIX)
-                        name = hermes_names.get(name, name)
-                        calls.append({'id': block['id'], 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(block['input'], separators=(',', ':'), allow_nan=False)}})
+                calls, _ = tool_calls([b for a in assistants for b in a['content']], hermes_names)
                 boundary = bool(calls) and final.get('subtype') == 'error_max_turns' and p.returncode == 1
                 if not boundary and not native_failure_handled and (p.returncode != 0 or final.get('is_error') or final.get('subtype') != 'success'):
                     raise RuntimeError('Native request failed: ' + str(final.get('subtype')) + _stderr_tail(native_stderr))
                 usage = assistants[0]['usage'] if admission.used else final.get('usage')
                 if not isinstance(usage, dict) or not all(isinstance(usage.get(k), (int, float)) for k in ('input_tokens', 'output_tokens')):
                     raise RuntimeError('Native result missing complete token usage')
-                text = ''.join(b.get('text', '') for b in blocks if b.get('type') == 'text')
-                if emitted != text:
-                    if text.startswith(emitted):
-                        yield self._chunk(kwargs['model'], {'content': text[len(emitted):]})
-                    else:
-                        raise RuntimeError('Native final text differs from incremental stream')
-                message = {'role': 'assistant', 'content': text or None, 'tool_calls': calls or None,
-                           'reasoning_content': ''.join(b.get('thinking', '') for b in blocks if b.get('type') == 'thinking') or None}
-                carrier = {'type': CARRIER, 'version': 1, 'messages': assistants, 'projection': projection(message)}
-                message['reasoning_details'] = [carrier]
-                # An upstream refusal is Hermes' content_filter, as core's Anthropic transport maps it (even with a tool
-                # call cut off by the classifier, which must not run): terminal, one fallback try, never retried as an
-                # empty reply. Its reason rides stop_details, not a content block.
-                refused = any(a.get('stop_reason') == 'refusal' for a in assistants)
-                if refused:
-                    details = next((a['stop_details'] for a in assistants if isinstance(a.get('stop_details'), dict)), {})
-                    explanation, category = details.get('explanation'), details.get('category')
-                    message['refusal'] = (explanation.strip() if isinstance(explanation, str) and explanation.strip() else
-                                          f'provider refusal category: {category}' if isinstance(category, str) and category else None)
-                    # The cut-off call stays out of what Hermes acts on: Hermes promotes a refusal to the text it shows
-                    # only when nothing else is in the message, so with the call kept the user read "no explanation".
-                    # The carrier above still holds native's turn as sent, refused tool_use included.
-                    message['tool_calls'], calls = None, []
-                inp = usage['input_tokens'] + usage.get('cache_read_input_tokens', 0) + usage.get('cache_creation_input_tokens', 0)
-                normalized_usage = {'prompt_tokens': inp, 'completion_tokens': usage['output_tokens'], 'total_tokens': inp + usage['output_tokens'], 'prompt_tokens_details': {'cached_tokens': usage.get('cache_read_input_tokens', 0)}, 'cache_creation_input_tokens': usage.get('cache_creation_input_tokens', 0), 'native_usage': usage,
-                                    'completion_tokens_details': {'reasoning_tokens': usage.get('output_tokens_details', {}).get('thinking_tokens', 0)},
-                                    'native_cost': {'total_cost_usd': final.get('total_cost_usd'), 'modelUsage': final.get('modelUsage')}}
-                normalized_usage['native_admission'] = {'upstream_requests': int(admission.used), 'blocked_requests': admission.denied, 'request_id': admission.request_id}
-                if admission.unrestored:
-                    normalized_usage['native_admission']['unrestored'] = admission.unrestored
-                finish = 'content_filter' if refused else 'tool_calls' if calls else ('length' if any(a.get('stop_reason') in ('max_tokens', 'model_context_window_exceeded') for a in assistants) else 'stop')
-                response = obj({'id': assistants[-1].get('id', 'claude-native'), 'model': kwargs['model'], 'object': 'chat.completion', 'choices': [{'index': 0, 'finish_reason': finish, 'message': message}], 'usage': normalized_usage})
-                chunk = self._chunk(kwargs['model'], {'content': None, 'tool_calls': [dict(tc, index=i) for i, tc in enumerate(calls)] or None, 'reasoning_details': [carrier], **({'refusal': message['refusal']} if refused else {})}, finish, normalized_usage)
-                chunk._response = response
+                tail, _, chunk = self._response(kwargs['model'], assistants, calls, emitted, usage, admission,
+                                                {'total_cost_usd': final.get('total_cost_usd'), 'modelUsage': final.get('modelUsage')})
+                if tail is not None:
+                    yield tail
                 yield chunk
         finally:
             request.cancel()
@@ -987,50 +980,18 @@ class Client:
             # next step. Intact results in another order are unrestored too, and keep the session.
             lossy = bool(admission.unrestored) and any(not text.startswith(results[i][0]) for i, text in rewritten.items())
             poisoned = poisoned or lossy
-            blocks = assistant['content']
-            calls = []
-            for block in blocks:
-                if block.get('type') == 'tool_use':
-                    # As baseline (#39, #62): a name outside the inventory goes to Hermes, a bare offered name carries
-                    # the prefix. Native parks neither on the hermes MCP server, so the session cannot continue.
-                    if block['name'] in hermes_names:
-                        block['name'] = PREFIX + block['name']
-                        poisoned = True
-                    elif not block['name'].startswith(PREFIX) or block['name'][len(PREFIX):] not in hermes_names:
-                        poisoned = True
-                    name = block['name'].removeprefix(PREFIX)
-                    calls.append({'id': block['id'], 'type': 'function', 'function': {'name': hermes_names.get(name, name), 'arguments': json.dumps(block['input'], separators=(',', ':'), allow_nan=False)}})
+            # A name outside the inventory or a bare offered name (#39, #62) is not parked on the hermes MCP server,
+            # so the session cannot continue.
+            calls, offered = tool_calls(assistant['content'], hermes_names)
+            poisoned = poisoned or not offered
             usage = assistant['usage']
-            text = ''.join(b.get('text', '') for b in blocks if b.get('type') == 'text')
-            if emitted != text:
-                if text.startswith(emitted):
-                    yield self._chunk(kwargs['model'], {'content': text[len(emitted):]})
-                else:
-                    raise RuntimeError('Native final text differs from incremental stream')
-            message = {'role': 'assistant', 'content': text or None, 'tool_calls': calls or None,
-                       'reasoning_content': ''.join(b.get('thinking', '') for b in blocks if b.get('type') == 'thinking') or None}
-            carrier = {'type': CARRIER, 'version': 1, 'messages': [assistant], 'projection': projection(message)}
-            message['reasoning_details'] = [carrier]
-            # A refusal is Hermes' content_filter with its reason, and a cut-off call stays out of tool_calls (baseline).
-            if refused:
-                details = assistant['stop_details'] if isinstance(assistant.get('stop_details'), dict) else {}
-                explanation, category = details.get('explanation'), details.get('category')
-                message['refusal'] = (explanation.strip() if isinstance(explanation, str) and explanation.strip() else
-                                      f'provider refusal category: {category}' if isinstance(category, str) and category else None)
-                message['tool_calls'], calls = None, []
-            inp = usage['input_tokens'] + usage.get('cache_read_input_tokens', 0) + usage.get('cache_creation_input_tokens', 0)
+            # Native reports cost only per whole native turn; a step has no list-price figure of its own.
+            tail, message, chunk = self._response(kwargs['model'], [assistant], calls, emitted, usage, admission,
+                                                  {'total_cost_usd': None, 'modelUsage': None}, {'session': how})
+            if tail is not None:
+                yield tail
+            calls = message['tool_calls'] or []
             thinking = usage.get('output_tokens_details', {}).get('thinking_tokens', 0)
-            normalized_usage = {'prompt_tokens': inp, 'completion_tokens': usage['output_tokens'], 'total_tokens': inp + usage['output_tokens'], 'prompt_tokens_details': {'cached_tokens': usage.get('cache_read_input_tokens', 0)}, 'cache_creation_input_tokens': usage.get('cache_creation_input_tokens', 0), 'native_usage': usage,
-                                'completion_tokens_details': {'reasoning_tokens': thinking},
-                                # Native reports cost only per whole native turn; a step has no list-price figure of its own.
-                                'native_cost': {'total_cost_usd': None, 'modelUsage': None}}
-            normalized_usage['native_admission'] = {'upstream_requests': int(admission.used), 'blocked_requests': admission.denied, 'request_id': admission.request_id, 'session': how}
-            if admission.unrestored:
-                normalized_usage['native_admission']['unrestored'] = admission.unrestored
-            finish = 'content_filter' if refused else 'tool_calls' if calls else ('length' if assistant.get('stop_reason') in ('max_tokens', 'model_context_window_exceeded') else 'stop')
-            response = obj({'id': assistant.get('id', 'claude-native'), 'model': kwargs['model'], 'object': 'chat.completion', 'choices': [{'index': 0, 'finish_reason': finish, 'message': message}], 'usage': normalized_usage})
-            chunk = self._chunk(kwargs['model'], {'content': None, 'tool_calls': [dict(tc, index=i) for i, tc in enumerate(calls)] or None, 'reasoning_details': [carrier], **({'refusal': message['refusal']} if refused else {})}, finish, normalized_usage)
-            chunk._response = response
             _session_log.info('session step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s',
                            session.ident[:8] + ':' + str(session.pid), how, int(admission.used), admission.denied, bool(admission.unrestored), time.monotonic() - started,
                            usage['input_tokens'], usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0), usage['output_tokens'], thinking, len(calls), assistant.get('stop_reason'), assistant.get('id'))
@@ -1080,16 +1041,7 @@ class Client:
         # The queried frame lets the relay keep the cache breakpoint off native's per-request context.
         session.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=frames[-1]['message']['content'], first_turn={})
         env['ANTHROPIC_BASE_URL'] = session.admission.url
-        (root / 'settings.json').write_text(json.dumps({'env': {'CLAUDE_CODE_EXTRA_BODY': body}}), encoding='utf-8')
-        (root / 'system.md').write_text(system, encoding='utf-8')
-        parsed = json.loads(body)
-        if 'max_tokens' in parsed:
-            env['CLAUDE_CODE_MAX_OUTPUT_TOKENS'] = str(parsed['max_tokens'])
-        mcp = {'mcpServers': {'hermes': {'type': 'sdk', 'name': 'hermes'}}}
-        command = resolved + ['-p', '--model', native_model(kwargs['model']), '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose', '--include-partial-messages', '--tools', '', '--system-prompt-file', str(root / 'system.md'), '--settings', str(root / 'settings.json'), '--setting-sources', '', '--strict-mcp-config', '--disable-slash-commands', '--permission-mode', 'dontAsk', '--allowedTools', 'mcp__hermes', '--no-session-persistence', '--mcp-config', json.dumps(mcp)]
-        effort = parsed.get('output_config', {}).get('effort')
-        if effort:
-            command += ['--effort', effort]
+        command = native_command(resolved, kwargs['model'], root, body, system, {'mcpServers': {'hermes': {'type': 'sdk', 'name': 'hermes'}}}, env, session=True)
         with request.lock:
             if request.cancelled.is_set():
                 raise RuntimeError('Claude request cancelled')
@@ -1098,20 +1050,49 @@ class Client:
         session.pid = session.process.pid
         threading.Thread(target=session.read, daemon=True).start()
         session.send({'type': 'control_request', 'request_id': 'hermes-init', 'request': {'subtype': 'initialize', 'hooks': None}})
-        for index, frame in enumerate(frames):
-            frame = copy.deepcopy(frame)
-            if frame['type'] == 'user' and index < len(frames) - 1:
-                frame['shouldQuery'] = False
-            session.send(frame)
-            if frame.get('shouldQuery') is False:
-                while True:
-                    ack = session.receive(request, timeout)
-                    if ack is None:
-                        raise RuntimeError('Native exited before replay acknowledgment')
-                    if ack.get('type') == 'result':
-                        if ack.get('num_turns') != 0 or ack.get('is_error'):
-                            raise RuntimeError('Native history replay not supported: expected zero-turn acknowledgment')
-                        break
+        replay_history(frames, session.send, lambda: session.receive(request, timeout))
+
+    def _response(self, model, assistants, calls, emitted, usage, admission, cost, extra=None):
+        """Native's answer as Hermes' message and final chunk, for per-call and session mode alike.
+
+        Returns the end of the text the stream has not carried yet as a chunk (None when it carried it all), the
+        message and the final chunk, whose ``_response`` is the non-streaming response."""
+        blocks = [b for a in assistants for b in a['content']]
+        text = ''.join(b.get('text', '') for b in blocks if b.get('type') == 'text')
+        tail = None
+        if emitted != text:
+            if not text.startswith(emitted):
+                raise RuntimeError('Native final text differs from incremental stream')
+            tail = self._chunk(model, {'content': text[len(emitted):]})
+        message = {'role': 'assistant', 'content': text or None, 'tool_calls': calls or None,
+                   'reasoning_content': ''.join(b.get('thinking', '') for b in blocks if b.get('type') == 'thinking') or None}
+        carrier = {'type': CARRIER, 'version': 1, 'messages': assistants, 'projection': projection(message)}
+        message['reasoning_details'] = [carrier]
+        # An upstream refusal is Hermes' content_filter, as core's Anthropic transport maps it (even with a tool
+        # call cut off by the classifier, which must not run): terminal, one fallback try, never retried as an
+        # empty reply. Its reason rides stop_details, not a content block.
+        refused = any(a.get('stop_reason') == 'refusal' for a in assistants)
+        if refused:
+            details = next((a['stop_details'] for a in assistants if isinstance(a.get('stop_details'), dict)), {})
+            explanation, category = details.get('explanation'), details.get('category')
+            message['refusal'] = (explanation.strip() if isinstance(explanation, str) and explanation.strip() else
+                                  f'provider refusal category: {category}' if isinstance(category, str) and category else None)
+            # The cut-off call stays out of what Hermes acts on: Hermes promotes a refusal to the text it shows
+            # only when nothing else is in the message, so with the call kept the user read "no explanation".
+            # The carrier above still holds native's turn as sent, refused tool_use included.
+            message['tool_calls'], calls = None, []
+        inp = usage['input_tokens'] + usage.get('cache_read_input_tokens', 0) + usage.get('cache_creation_input_tokens', 0)
+        normalized_usage = {'prompt_tokens': inp, 'completion_tokens': usage['output_tokens'], 'total_tokens': inp + usage['output_tokens'], 'prompt_tokens_details': {'cached_tokens': usage.get('cache_read_input_tokens', 0)}, 'cache_creation_input_tokens': usage.get('cache_creation_input_tokens', 0), 'native_usage': usage,
+                            'completion_tokens_details': {'reasoning_tokens': usage.get('output_tokens_details', {}).get('thinking_tokens', 0)},
+                            'native_cost': cost}
+        normalized_usage['native_admission'] = {'upstream_requests': int(admission.used), 'blocked_requests': admission.denied, 'request_id': admission.request_id, **(extra or {})}
+        if admission.unrestored:
+            normalized_usage['native_admission']['unrestored'] = admission.unrestored
+        finish = 'content_filter' if refused else 'tool_calls' if calls else ('length' if any(a.get('stop_reason') in ('max_tokens', 'model_context_window_exceeded') for a in assistants) else 'stop')
+        response = obj({'id': assistants[-1].get('id', 'claude-native'), 'model': model, 'object': 'chat.completion', 'choices': [{'index': 0, 'finish_reason': finish, 'message': message}], 'usage': normalized_usage})
+        chunk = self._chunk(model, {'content': None, 'tool_calls': [dict(tc, index=i) for i, tc in enumerate(calls)] or None, 'reasoning_details': [carrier], **({'refusal': message['refusal']} if refused else {})}, finish, normalized_usage)
+        chunk._response = response
+        return tail, message, chunk
 
     @staticmethod
     def _chunk(model, delta, finish=None, usage=None):
