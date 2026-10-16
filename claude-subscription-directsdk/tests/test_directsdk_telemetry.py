@@ -27,7 +27,8 @@ def _set_telemetry(value):
 
 
 def _base_env(tmp_path, **extra):
-    env = {k: v for k, v in os.environ.items() if k not in QUIET and k != "DISABLE_AUTOUPDATER"}
+    # The fake CLI speaks the per-call protocol: a suite run under CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM=1 must not reach it.
+    env = {k: v for k, v in os.environ.items() if k not in QUIET and k not in ("DISABLE_AUTOUPDATER", "CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM")}
     return {**env, "PATH": os.defpath, "ENV_CAPTURE": str(tmp_path / "env.jsonl"), **extra}
 
 
@@ -139,7 +140,6 @@ def test_manifest_declares_the_setting_under_the_key_the_code_reads():
     import directsdk_setup
     root = Path(directsdk_setup.__file__).resolve().parent
     assert directsdk_setup.PLUGIN_ID == PLUGIN_NAME
-    (field,) = [field for field in plugin_settings_fields(PLUGIN_NAME, root)
-               if field["key"] == directsdk_setup.TELEMETRY_SETTING]
-    assert field["key"] == directsdk_setup.TELEMETRY_SETTING
-    assert field["type"] == "boolean" and field["default"] is True
+    fields = {field["key"]: field for field in plugin_settings_fields(PLUGIN_NAME, root)}
+    assert fields[directsdk_setup.TELEMETRY_SETTING]["type"] == "boolean"
+    assert fields[directsdk_setup.TELEMETRY_SETTING]["default"] is True

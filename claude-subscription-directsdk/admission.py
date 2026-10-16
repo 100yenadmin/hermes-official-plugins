@@ -2,6 +2,7 @@
 import base64
 import codecs
 import copy
+import hashlib
 import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import ipaddress
@@ -76,7 +77,7 @@ def _breakpoints(value):
     return count
 
 
-def _frame_first(messages, queried):
+def _frame_first(messages, queried, memory=None):
     """Put Hermes' first user turn ahead of the context native prepends to it (#77).
 
     On the opening request native puts its per-request context block (the account-email
@@ -86,11 +87,58 @@ def _frame_first(messages, queried):
     native already appends its context after the host content. Moving the prepended text
     blocks behind the frame uses that same order for the first turn: no block is added,
     dropped or edited, and the frame becomes a prefix the next request replays byte-identically.
+    A live warm process replays the first turn as native first built it, so a warm session re-applies request 1's reorder on later requests.
 
-    Only the conversation's first turn is touched (no assistant message yet), only when the
-    queried frame occurs exactly once, and only when everything before it is plain text.
+    A restarted warm process instead prepends context to its newest user frame (#84).
+    Remember that context on its first request and relocate it to the end of the first user
+    message on every request, so the previous process's completed turns remain a prefix.
+    Per-call mode keeps the first-turn-only behavior. The queried frame must occur exactly
+    once, and everything before it must be plain text.
     Returns whether the order changed."""
     if any(m.get('role') == 'assistant' for m in messages):
+        if isinstance(memory, dict) and 'permutation' in memory:
+            first = next((m for m in messages if m.get('role') == 'user'), {})
+            content = first.get('content')
+            if not isinstance(content, list):
+                return False
+            digest = hashlib.sha256(json.dumps([_plain(b) for b in content], sort_keys=True).encode()).hexdigest()
+            if digest != memory['sha256']:
+                return False
+            k, n = memory['permutation']
+            first['content'] = content[k:k + n] + content[:k] + content[k + n:]
+            return True
+        if isinstance(memory, dict):
+            if 'context' not in memory:
+                memory['context'] = None  # Discover once, before later tool frames can match.
+                index = next((i for i in reversed(range(len(messages)))
+                              if messages[i].get('role') == 'user'), None)
+                content = messages[index].get('content') if index is not None else None
+                if isinstance(content, list) and queried and len(content) > len(queried):
+                    want = [_plain(b) for b in queried]
+                    starts = [k for k in range(len(content) - len(queried) + 1)
+                              if [_plain(b) for b in content[k:k + len(queried)]] == want]
+                    if len(starts) == 1 and starts[0] > 0:
+                        leading = content[:starts[0]]
+                        if all(isinstance(b, dict) and b.get('type') == 'text'
+                               and set(b) <= {'type', 'text'} for b in leading):
+                            memory['context'] = {'index': index, 'blocks': copy.deepcopy(leading)}
+            context = memory['context']
+            if isinstance(context, dict):
+                index, leading = context['index'], context['blocks']
+                if index >= len(messages):
+                    return False
+                message = messages[index]
+                content = message.get('content')
+                first = next((m for m in messages if m.get('role') == 'user'), {})
+                opening = first.get('content')
+                if (first is message or message.get('role') != 'user' or not isinstance(content, list)
+                        or not isinstance(opening, list)
+                        or [_plain(b) for b in content[:len(leading)]] != leading
+                        or [_plain(b) for b in opening[-len(leading):]] == leading):
+                    return False
+                message['content'] = content[len(leading):]
+                first['content'] = opening + copy.deepcopy(leading)
+                return True
         return False
     first = next((m for m in messages if m.get('role') == 'user'), {})
     content = first.get('content')
@@ -104,6 +152,9 @@ def _frame_first(messages, queried):
     k = starts[0]
     if not all(isinstance(b, dict) and b.get('type') == 'text' for b in content[:k]):
         return False
+    if isinstance(memory, dict):
+        memory.update(permutation=(k, len(queried)),
+                      sha256=hashlib.sha256(json.dumps([_plain(b) for b in content], sort_keys=True).encode()).hexdigest())
     first['content'] = content[k:k + len(queried)] + content[:k] + content[k + len(queried):]
     return True
 
@@ -241,7 +292,7 @@ def _keep_turn_mark(body, messages, last, target):
     return True
 
 
-def pin_message_breakpoint(payload, queried):
+def pin_message_breakpoint(payload, queried, memory=None):
     """Keep the recurring message ``cache_control`` on content the next request replays unchanged.
 
     Native attaches per-request context (today's date, the account-email reminder, whatever a
@@ -271,7 +322,7 @@ def pin_message_breakpoint(payload, queried):
     try:
         body = json.loads(payload)
         messages = body['messages']
-        reordered = _frame_first(messages, queried)
+        reordered = _frame_first(messages, queried, memory)
         blocks = [(i, j, b) for i, m in enumerate(messages) if isinstance(m.get('content'), list)
                   for j, b in enumerate(m['content'])]
         marked = [(i, j, b) for i, j, b in blocks if isinstance(b, dict) and 'cache_control' in b]
@@ -543,9 +594,10 @@ class _Server(HTTPServer):
 
 
 class Admission:
-    def __init__(self, upstream, timeout, queried=None):
+    def __init__(self, upstream, timeout, queried=None, first_turn=None):
         self.upstream = urlsplit(upstream)
         self.queried = queried
+        self.first_turn = first_turn
         host = self.upstream.hostname
         try:
             local = ipaddress.ip_address(host).is_loopback
@@ -581,6 +633,14 @@ class Admission:
         except (ValueError, KeyError, TypeError):
             return text
         return message if isinstance(message, str) else text
+
+    def rearm(self, timeout, queried):
+        """Warm sessions: admit exactly one more upstream request (the next Hermes step), under that step's timeout,
+        anchored on that step's queried frame."""
+        with self.lock:
+            self.timeout, self.used, self.denied, self.queried = timeout, False, 0, queried
+            self.request_id = self.status = self.failure = self.unrestored = None
+            self.capture, self.error_body = Capture(), b''
 
     def abort(self):
         with self.lock:
@@ -640,8 +700,9 @@ class Handler(BaseHTTPRequestHandler):
                 # exactly as native built it (the pre-restoration behaviour), so a CLI that
                 # reshapes its tool results degrades to an uncached tail, never a failed turn.
                 gate.unrestored = str(exc)
-            payload = stable_request_context(payload, gate.queried)
-            payload = pin_message_breakpoint(payload, gate.queried)
+            if not isinstance(getattr(gate, 'first_turn', None), dict):
+                payload = stable_request_context(payload, gate.queried)
+            payload = pin_message_breakpoint(payload, gate.queried, gate.first_turn)
             target = gate.upstream
             if target.scheme == 'https':
                 if gate.proxy:

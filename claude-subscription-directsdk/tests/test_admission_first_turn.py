@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from admission import pin_message_breakpoint
+from admission import _frame_first, pin_message_breakpoint
 
 MARKER = {'type': 'ephemeral', 'ttl': '1h'}
 REMINDER = {'type': 'text', 'text': "<system-reminder>\nAs you answer the user's questions, you can use the "
@@ -112,3 +112,28 @@ def test_first_turn_is_only_reordered_when_the_frame_is_unambiguous(messages, qu
     for sent, got in zip(json.loads(raw)['messages'], out['messages']):
         strip = lambda c: [{k: v for k, v in b.items() if k != 'cache_control'} for b in c] if isinstance(c, list) else c
         assert strip(got['content']) == strip(sent['content'])
+
+
+def test_later_request_without_memory_keeps_reminder_first():
+    messages = call1()[:1] + call2()[2:]
+    payload = wire(messages)
+    out = json.loads(pin_message_breakpoint(payload, [{'type': 'tool_result', 'tool_use_id': 't1', 'content': 'alpha'}]))
+    assert out['messages'][0]['content'] == [REMINDER, FRAME]
+
+
+@pytest.mark.parametrize('changed', [False, True])
+def test_first_turn_memory_requires_identical_plain_content(changed):
+    memory = {}
+    pin_message_breakpoint(wire(call1()), [FRAME], memory)
+    assert set(memory) == {'permutation', 'sha256'}
+    assert memory['permutation'] == (1, 1) and len(memory['sha256']) == 64
+    messages = copy.deepcopy(call1()[:1] + call2()[2:])
+    # Markers and JSON key order do not change the original plain content's identity.
+    messages[0]['content'][0] = dict(reversed(list(messages[0]['content'][0].items())), cache_control=MARKER)
+    if changed:
+        messages[0]['content'][0]['text'] += ' changed'
+    before = copy.deepcopy(messages)
+    assert _frame_first(messages, [{'type': 'tool_result', 'tool_use_id': 't1', 'content': 'alpha'}], memory) is (not changed)
+    expected = before[0]['content'] if changed else list(reversed(before[0]['content']))
+    assert messages[0]['content'] == expected
+    assert messages[1:] == before[1:]
