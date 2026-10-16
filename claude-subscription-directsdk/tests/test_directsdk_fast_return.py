@@ -212,7 +212,7 @@ def test_max_turns_tools_return_without_reading_exit_code(native_case):
         assert state.real.wait(timeout=1) == 1
 
 
-@pytest.mark.skipif(not hasattr(os, 'waitpid'), reason='POSIX foreign-child reaper')
+@pytest.mark.skipif(not hasattr(os, 'killpg'), reason='POSIX foreign-child reaper (waitpid(-1, WNOHANG), process groups)')
 def test_foreign_reaper_is_harmless_during_drain(native_case, monkeypatch):
     reaped, stop = threading.Event(), threading.Event()
     with native_case(reaper_gate=reaped, forbid_returncode=True) as state:
