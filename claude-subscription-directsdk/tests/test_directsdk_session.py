@@ -1321,6 +1321,19 @@ def test_tool_call_arguments_match_as_exact_json(rig):
     assert sorted(answered(rig.upstream.bodies[-1])) == [('toolu_one', 'ONE'), ('toolu_true', 'TRUE')]
 
 
+def test_integers_native_rounds_together_count_as_identical_calls():
+    """Native parses JSON into doubles: 2**53 and 2**53 + 1 arrive as one number, so their calls are ambiguous."""
+    key = directsdk._json_key
+    assert key({'value': 9007199254740992}) == key({'value': 9007199254740993})
+    assert key({'value': 9007199254740992}) != key({'value': 9007199254740994})
+    assert key({'value': True}) != key({'value': 1}) and key({'value': 1}) == key({'value': 1.0})
+    assert key({'value': 10 ** 400}) == key({'value': 10 ** 401})  # both overflow to Infinity, as in native
+    session = directsdk.NativeSession('ident', None)
+    session.calls = [{'type': 'tool_use', 'id': 'a', 'name': 'mcp__hermes__probe', 'input': {'value': 9007199254740992}},
+                     {'type': 'tool_use', 'id': 'b', 'name': 'mcp__hermes__probe', 'input': {'value': 9007199254740993}}]
+    assert session.unpaired()
+
+
 def test_a_launch_admitted_between_failed_launches_resets_the_count(rig, tmp_path):
     """An admitted launch whose step failed upstream (here a 429) still proves the launch works."""
     broken = no_session_client(rig, tmp_path)
@@ -1341,6 +1354,19 @@ def test_an_admitted_stream_closed_early_resets_the_count(rig, tmp_path):
     assert directsdk._session_failures == 0
     step(broken, [{'role': 'user', 'content': 'two'}])
     assert directsdk._session_enabled(broken.env) is True
+
+
+def test_a_launch_counts_once_admitted_not_when_its_stream_ends(rig, tmp_path):
+    """Another chat's failed launch while an admitted stream is still open must not switch session mode off."""
+    broken = no_session_client(rig, tmp_path)
+    step(broken, [{'role': 'user', 'content': 'one'}])
+    stream = rig.client().create(model='sonnet', messages=[{'role': 'user', 'content': 'hello'}], tools=TOOLS, stream=True)
+    chunks = iter(stream)
+    next(chunks)
+    step(broken, [{'role': 'user', 'content': 'two'}])
+    assert directsdk._session_enabled(broken.env) is True
+    list(chunks)
+    assert directsdk._session_failures == 1
 
 
 def test_session_mode_drops_an_inherited_entrypoint(rig):

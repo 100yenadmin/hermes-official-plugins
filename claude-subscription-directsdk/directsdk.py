@@ -907,7 +907,7 @@ class Client:
             spawn = True
         else:
             spawn = False
-        done = yielded = lossy = False
+        done = yielded = lossy = launched = False
         results, rewritten = {}, {}
         try:
             if not spawn:
@@ -931,6 +931,11 @@ class Client:
                 event = session.receive(request, timeout)
                 if event is None:
                     raise RuntimeError('Native exited during a session step')
+                if spawn and not launched and session.admission.used:
+                    # The launch reached admission: count it now, before any streaming, so another chat's failed launch
+                    # meanwhile cannot switch session mode off on a stale streak.
+                    launched = True
+                    _session_launched()
                 kind = event.get('type')
                 if kind == 'assistant' and (event.get('error') or event.get('message', {}).get('error')):
                     native_error = '\n'.join(b.get('text', '') for b in event.get('message', {}).get('content', []) if b.get('type') == 'text')
@@ -996,7 +1001,8 @@ class Client:
             _session_log.info('session step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s',
                            session.ident[:8] + ':' + str(session.pid), how, int(admission.used), admission.denied, bool(admission.unrestored), time.monotonic() - started,
                            usage['input_tokens'], usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0), usage['output_tokens'], thinking, len(calls), assistant.get('stop_reason'), assistant.get('id'))
-            if spawn:
+            if spawn and not launched:
+                launched = True
                 _session_launched()
             # Settle before the final yield: a caller closing the stream after it must not kill a healthy session.
             session.detach(request)
@@ -1026,7 +1032,7 @@ class Client:
                 _session_launched(error)
             yield from self._run(request, kwargs, body, manifest, names, system, frames)
         finally:
-            if spawn and session.admission is not None and session.admission.used:
+            if spawn and not launched and session.admission is not None and session.admission.used:
                 # The launch reached admission: a step that then failed upstream, or a stream the caller closed early
                 # (GeneratorExit skips the except above), failed after the launch, not in it.
                 _session_launched()
@@ -1236,13 +1242,17 @@ def _session_expects(expect, suffix):
 
 
 def _json_key(value):
-    """Exact JSON identity, as native's JSON sees it: true is not 1 (Python's True == 1), while 1 and 1.0 are one number."""
+    """Exact JSON identity, as native's JSON sees it: true is not 1 (Python's True == 1), while 1 and 1.0 are one number.
+    Native's numbers are doubles, so integers past 2**53 that round to the same double are one number too."""
     if isinstance(value, dict):
         return 'object', tuple(sorted((k, _json_key(v)) for k, v in value.items()))
     if isinstance(value, list):
         return 'array', tuple(_json_key(v) for v in value)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return 'number', value
+        try:
+            return 'number', float(value)
+        except OverflowError:
+            return 'number', math.inf if value > 0 else -math.inf
     return type(value).__name__, value
 
 
