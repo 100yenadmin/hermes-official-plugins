@@ -1,4 +1,4 @@
-"""Warm native replacements preserve the completed tool-loop prefix (#84)."""
+"""Session native replacements preserve the completed tool-loop prefix (#84)."""
 import copy
 import json
 
@@ -36,7 +36,7 @@ def native(messages, launch, dual=False):
     """
     sent = copy.deepcopy(messages)
     sent[launch]['content'] = copy.deepcopy(CONTEXT) + sent[launch]['content']
-    sent.insert(1, {'role': 'system', 'content': 'Primary working directory: /tmp/synthetic-warm84'})
+    sent.insert(1, {'role': 'system', 'content': 'Primary working directory: /tmp/synthetic-session84'})
     if dual and len(sent) > 3:
         sent[-2]['content'][-1]['cache_control'] = copy.deepcopy(MARKER)
     sent.append({'role': 'system', 'content': [
@@ -88,14 +88,14 @@ def test_restart_boundaries_replay_completed_turn_prefix(rounds, dual):
         assert _breakpoints(body) <= 4
 
 
-def test_warm_date_normalization_preserves_remembered_context_relocation():
+def test_session_date_normalization_preserves_remembered_context_relocation():
     first, second = turn(1, 1), turn(2, 1)
     memory = {}
     for messages in (first + second[:1], first + second):
         body = native(messages, len(first), dual=True)
         date = body['messages'][-1]['content'][0]['text']
         env = body['messages'][1]['content']
-        normalized = stable_request_context(wire(body), messages[-1]['content'], warm=True)
+        normalized = stable_request_context(wire(body), messages[-1]['content'], session=True)
         out = json.loads(pin_message_breakpoint(normalized, messages[-1]['content'], memory))
         assert out['messages'][1]['content'] == env + '\n\n' + date
         assert [_plain(b) for b in out['messages'][0]['content']] == first[0]['content'] + CONTEXT

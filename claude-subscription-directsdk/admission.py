@@ -87,9 +87,9 @@ def _frame_first(messages, queried, memory=None):
     native already appends its context after the host content. Moving the prepended text
     blocks behind the frame uses that same order for the first turn: no block is added,
     dropped or edited, and the frame becomes a prefix the next request replays byte-identically.
-    A live warm process replays the first turn as native first built it, so a warm session re-applies request 1's reorder on later requests.
+    A live session process replays the first turn as native first built it, so a session re-applies request 1's reorder on later requests.
 
-    A restarted warm process instead prepends context to its newest user frame (#84).
+    A restarted session process instead prepends context to its newest user frame (#84).
     Remember that context on its first request and relocate it to the end of the first user
     message on every request, so the previous process's completed turns remain a prefix.
     Per-call mode keeps the first-turn-only behavior. The queried frame must occur exactly
@@ -165,7 +165,7 @@ def _frame_first(messages, queried, memory=None):
 _DATE_LINE = re.compile(r"Today's date is \d{4}-\d{2}-\d{2}\.")
 
 
-def stable_request_context(payload, queried, *, warm=False):
+def stable_request_context(payload, queried, *, session=False):
     """Keep native's per-request context in the prefix later requests replay.
 
     Native splits today's date out of the environment into a trailing system message
@@ -174,9 +174,9 @@ def stable_request_context(payload, queried, *, warm=False):
     Append that date line (no other trailing text) after two newlines to the first system
     message, keeping a string a string; drop only plain text before the whole queried frame,
     found exactly once, on later user turns, which native already omits from tool-result steps. Removed cache markers move with setdefault, never multiply.
-    Warm sessions relocate only the date, including its replayed system row inside
+    Session relays relocate only the date, including its replayed system row inside
     later history: their launch reminders belong to #84's remembered context
-    relocation, not per-call stripping. If the warm environment
+    relocation, not per-call stripping. If the session environment
     already contains a date (including yesterday's on rollover), leave native's date
     layout alone rather than append a second date and change its kept-alive prefix.
     Assistant text/thinking, tool-result-only turns, opening-turn reminders and
@@ -199,7 +199,7 @@ def stable_request_context(payload, queried, *, warm=False):
         changed = False
         env = next((m for m in messages[:-1] if m.get('role') == 'system'), None)
         dates = []
-        candidates = enumerate(messages) if warm else enumerate(messages[-1:], len(messages) - 1)
+        candidates = enumerate(messages) if session else enumerate(messages[-1:], len(messages) - 1)
         for index, message in candidates:
             content = message.get('content')
             tail = {'type': 'text', 'text': content} if isinstance(content, str) else (
@@ -212,7 +212,7 @@ def stable_request_context(payload, queried, *, warm=False):
             original, line = env['content'], '\n\n' + tail['text']
             target = {'type': 'text', 'text': original} if isinstance(original, str) else (original[-1] if original else {})
             if target.get('type') == 'text' and not target['text'].endswith(tail['text']) \
-                    and not (warm and _DATE_LINE.search(target['text'])):
+                    and not (session and _DATE_LINE.search(target['text'])):
                 if isinstance(original, str):
                     env['content'] = original + line
                 else:
@@ -225,7 +225,7 @@ def stable_request_context(payload, queried, *, warm=False):
                 changed = True
         newest = next((m for m in reversed(messages) if m.get('role') == 'user'), {})
         blocks = newest.get('content')
-        if not warm and queried and any(b.get('type') != 'tool_result' for b in queried) and isinstance(blocks, list) \
+        if not session and queried and any(b.get('type') != 'tool_result' for b in queried) and isinstance(blocks, list) \
                 and any(m.get('role') == 'assistant' for m in messages):
             frame = [_plain(b) for b in queried]
             hits = [i for i in range(len(blocks) - len(frame) + 1) if [_plain(b) for b in blocks[i:i + len(frame)]] == frame]
@@ -646,7 +646,7 @@ class Admission:
         return message if isinstance(message, str) else text
 
     def rearm(self, timeout, queried):
-        """Warm sessions: admit exactly one more upstream request (the next Hermes step), under that step's timeout,
+        """Session mode: admit exactly one more upstream request (the next Hermes step), under that step's timeout,
         anchored on that step's queried frame."""
         with self.lock:
             self.timeout, self.used, self.denied, self.queried = timeout, False, 0, queried
@@ -712,7 +712,7 @@ class Handler(BaseHTTPRequestHandler):
                 # reshapes its tool results degrades to an uncached tail, never a failed turn.
                 gate.unrestored = str(exc)
             payload = stable_request_context(payload, gate.queried,
-                                             warm=isinstance(getattr(gate, 'first_turn', None), dict))
+                                             session=isinstance(getattr(gate, 'first_turn', None), dict))
             payload = pin_message_breakpoint(payload, gate.queried, gate.first_turn)
             target = gate.upstream
             if target.scheme == 'https':

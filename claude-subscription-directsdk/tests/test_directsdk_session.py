@@ -1,4 +1,4 @@
-"""Warm mode: one live native session across Hermes steps; parked hermes tool calls; rebuild on divergence."""
+"""Session mode: one live native session across Hermes steps; parked hermes tool calls; rebuild on divergence."""
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -13,7 +13,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import directsdk
 
-# A native that speaks the warm protocol: SDK MCP over control requests, one tool call at a time,
+# A native that speaks the session protocol: SDK MCP over control requests, one tool call at a time,
 # a new upstream request after every answered batch, and an idle wait for the next user frame.
 NATIVE = r'''
 import json, os, re, sys, urllib.request
@@ -245,13 +245,13 @@ TOOLS = [{'type': 'function', 'function': {'name': 'probe', 'description': 'prob
 
 
 @pytest.fixture
-def warm(tmp_path):
+def rig(tmp_path):
     upstream = Upstream()
     native = tmp_path / 'native.py'
     native.write_text(NATIVE)
     spawns = tmp_path / 'spawns.jsonl'
     env = {'PATH': os.defpath, 'HOME': str(tmp_path), 'ANTHROPIC_BASE_URL': f'http://127.0.0.1:{upstream.server.server_port}',
-           'CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM': '1', 'SPAWNS': str(spawns)}
+           'CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE': '1', 'SPAWNS': str(spawns)}
     clients = []
     def client(drop=()):
         clients.append(directsdk.Client(command=[sys.executable, str(native)], env={k: v for k, v in env.items() if k not in drop}, timeout=20))
@@ -263,7 +263,7 @@ def warm(tmp_path):
     yield fixture
     for c in clients:
         c.close()
-    directsdk._warm_shutdown()
+    directsdk._session_shutdown()
     upstream.close()
 
 
@@ -296,17 +296,17 @@ def alive(pid):
         return False
 
 @pytest.mark.parametrize('bare', [False, True])
-def test_warm_long_tool_name_round_trips_and_retains_session(warm, bare):
+def test_session_long_tool_name_round_trips_and_retains_session(rig, bare):
     name = 'public_probe_' + 'x' * 48
     tools = [{'type': 'function', 'function': {'name': name}}]
     encoded, manifest, names = directsdk.request_body({'tools': tools})
     alias = names[name]
     native_name = alias if bare else directsdk.PREFIX + alias
-    warm.upstream.reply = lambda n, body: sse(f'm{n}', [
+    rig.upstream.reply = lambda n, body: sse(f'm{n}', [
         {'type': 'tool_use', 'id': f'toolu_{n}', 'name': native_name, 'input': {}}
     ], 'tool_use') if n == 1 else sse(f'm{n}', [{'type': 'text', 'text': 'done'}], 'end_turn')
     history = [{'role': 'user', 'content': 'long-tool'}]
-    client = warm.client()
+    client = rig.client()
     first = client.create(model='sonnet', messages=history, tools=tools)
     call = first.choices[0].message.tool_calls[0]
     assert call.function.name == name
@@ -314,34 +314,34 @@ def test_warm_long_tool_name_round_trips_and_retains_session(warm, bare):
     history += [as_history(first), {'role': 'tool', 'tool_call_id': call.id, 'content': 'public result'}]
     second = client.create(model='sonnet', messages=history, tools=tools)
     # A bare call is repaired for replay, but native did not park it on the MCP server.
-    assert second.usage.native_admission.warm == ('cold' if bare else 'reused')
+    assert second.usage.native_admission.session == ('cold' if bare else 'reused')
     assert second.choices[0].message.content == 'done'
-    assert len(warm.spawned()) == (2 if bare else 1)
-    advertised = warm.manifests()[0]
+    assert len(rig.spawned()) == (2 if bare else 1)
+    advertised = rig.manifests()[0]
     assert [{k: v for k, v in t.items() if k != '_meta'} for t in advertised] == manifest
     assert json.loads(encoded)['tools'][0]['name'] == directsdk.PREFIX + advertised[0]['name']
 
 
 
-def test_one_native_serves_tool_rounds_and_turns_with_hermes_results(warm):
+def test_one_native_serves_tool_rounds_and_turns_with_hermes_results(rig):
     messages = [{'role': 'system', 'content': 'sys'}, {'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(warm.client(), messages)
+    first = step(rig.client(), messages)
     calls = first.choices[0].message.tool_calls
     assert [json.loads(c.function.arguments)['key'] for c in calls] == ['a', 'b']
-    assert first.usage.model_dump()['native_admission']['warm'] == 'cold'
+    assert first.usage.model_dump()['native_admission']['session'] == 'cold'
     # Native already asked the hermes MCP server for the first call; it stays parked while Hermes runs tools.
     messages += [as_history(first), {'role': 'tool', 'tool_call_id': calls[1].id, 'content': 'BANANA'},
                  {'role': 'tool', 'tool_call_id': calls[0].id, 'content': 'APPLE'}]
     # Hermes builds request-local clients: a fresh client must still find the session by history.
-    second = step(warm.client(), messages, stream=True)
+    second = step(rig.client(), messages, stream=True)
     assert second.choices[0].message.content == 'got APPLE+BANANA'
-    assert second.usage.model_dump()['native_admission'] == {'upstream_requests': 1, 'blocked_requests': 0, 'request_id': None, 'warm': 'reused'}
+    assert second.usage.model_dump()['native_admission'] == {'upstream_requests': 1, 'blocked_requests': 0, 'request_id': None, 'session': 'reused'}
     messages += [as_history(second), {'role': 'user', 'content': 'next turn'}]
-    third = step(warm.client(), messages)
+    third = step(rig.client(), messages)
     assert third.choices[0].message.content == 'echo next turn'
-    assert third.usage.model_dump()['native_admission']['warm'] == 'reused'
-    spawned = warm.spawned()
-    assert len(spawned) == 1 and len(warm.upstream.bodies) == 3
+    assert third.usage.model_dump()['native_admission']['session'] == 'reused'
+    spawned = rig.spawned()
+    assert len(spawned) == 1 and len(rig.upstream.bodies) == 3
     argv = spawned[0]['argv']
     assert '--max-turns' not in argv and argv[argv.index('--allowedTools') + 1] == 'mcp__hermes'
     assert json.loads(argv[argv.index('--mcp-config') + 1]) == {'mcpServers': {'hermes': {'type': 'sdk', 'name': 'hermes'}}}
@@ -349,8 +349,8 @@ def test_one_native_serves_tool_rounds_and_turns_with_hermes_results(warm):
     assert second.choices[0].message.reasoning_details[0]['type'] == directsdk.CARRIER
 
 
-def test_restart_replays_string_tool_results_as_kept_alive_mcp_blocks(warm):
-    client = warm.client()
+def test_restart_replays_string_tool_results_as_kept_alive_mcp_blocks(rig):
+    client = rig.client()
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(client, messages)
     messages += [as_history(first)] + [
@@ -361,106 +361,106 @@ def test_restart_replays_string_tool_results_as_kept_alive_mcp_blocks(warm):
     def results(body):
         return [b['content'] for m in body['messages'] for b in m['content'] if b['type'] == 'tool_result']
 
-    kept_alive = results(warm.upstream.bodies[-1])
+    kept_alive = results(rig.upstream.bodies[-1])
     assert kept_alive == [[{'type': 'text', 'text': f'Result {i}'}] for i in range(2)]
     messages += [as_history(second), {'role': 'user', 'content': 'next turn'}]
     original = json.dumps(messages)
-    directsdk._warm_shutdown()
+    directsdk._session_shutdown()
     step(client, messages)
-    assert results(warm.upstream.bodies[-1]) == kept_alive
+    assert results(rig.upstream.bodies[-1]) == kept_alive
     assert json.dumps(messages) == original
 
 
-def test_divergence_kills_the_session_and_replays_full_history(warm):
+def test_divergence_kills_the_session_and_replays_full_history(rig):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(warm.client(), messages)
+    first = step(rig.client(), messages)
     calls = first.choices[0].message.tool_calls
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': f'R{i}' * 50} for i, c in enumerate(calls)]
-    old = warm.spawned()[0]['pid']
-    second = step(warm.client(), messages)
+    old = rig.spawned()[0]['pid']
+    second = step(rig.client(), messages)
     messages += [as_history(second)]
-    # Host compaction rewrites a tool result: the warm session no longer prefixes the request.
+    # Host compaction rewrites a tool result: the session no longer prefixes the request.
     messages[2] = dict(messages[2], content='[compacted] R0')
     messages.append({'role': 'user', 'content': 'after compaction'})
-    third = step(warm.client(), messages)
-    assert third.usage.model_dump()['native_admission']['warm'] == 'rebuild:prefix'
+    third = step(rig.client(), messages)
+    assert third.usage.model_dump()['native_admission']['session'] == 'rebuild:prefix'
     assert third.choices[0].message.content == 'echo after compaction'
-    spawned = warm.spawned()
+    spawned = rig.spawned()
     assert len(spawned) == 2 and not alive(old)
     # The rebuild replayed the full (edited) history: every tool result's text, not an excerpt.
-    replayed = warm.upstream.bodies[-1]['messages']
+    replayed = rig.upstream.bodies[-1]['messages']
     results = [b for m in replayed if isinstance(m['content'], list) for b in m['content'] if b.get('type') == 'tool_result']
     assert [r['content'] for r in results] == [
         [{'type': 'text', 'text': text}] for text in ('[compacted] R0', 'R1' * 50)]
-    # The rebuilt session is warm again for the next step.
+    # The rebuilt session is live again for the next step.
     messages += [as_history(third), {'role': 'user', 'content': 'again'}]
-    assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] == 'reused'
-    assert len(warm.spawned()) == 2
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    assert len(rig.spawned()) == 2
 
 
-def test_unexpected_suffix_rebuilds(warm):
+def test_unexpected_suffix_rebuilds(rig):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(warm.client(), messages)
+    first = step(rig.client(), messages)
     calls = first.choices[0].message.tool_calls
     # An interrupted step: Hermes answers one call only and appends a user row.
     messages += [as_history(first), {'role': 'tool', 'tool_call_id': calls[0].id, 'content': 'A'},
                  {'role': 'tool', 'tool_call_id': calls[1].id, 'content': 'B'}, {'role': 'user', 'content': 'steer'}]
-    result = step(warm.client(), messages)
-    assert result.usage.model_dump()['native_admission']['warm'] == 'rebuild:suffix'
-    assert len(warm.spawned()) == 2
+    result = step(rig.client(), messages)
+    assert result.usage.model_dump()['native_admission']['session'] == 'rebuild:suffix'
+    assert len(rig.spawned()) == 2
 
 
-def test_cancel_kills_the_warm_session(warm):
-    warm.upstream.hang.set()
-    client = warm.client()
+def test_cancel_kills_the_session_mode(rig):
+    rig.upstream.hang.set()
+    client = rig.client()
     with ThreadPoolExecutor(max_workers=1) as pool:
         future = pool.submit(step, client, [{'role': 'user', 'content': 'call probe in parallel'}])
         deadline = time.monotonic() + 10
-        while not warm.upstream.bodies and time.monotonic() < deadline:
+        while not rig.upstream.bodies and time.monotonic() < deadline:
             time.sleep(.05)
         client.cancel()
         with pytest.raises(RuntimeError, match='cancelled'):
             future.result(timeout=10)
-    pid = warm.spawned()[0]['pid']
+    pid = rig.spawned()[0]['pid']
     deadline = time.monotonic() + 10
     while alive(pid) and time.monotonic() < deadline:
         time.sleep(.05)
-    assert not alive(pid) and not directsdk._warm_pool
+    assert not alive(pid) and not directsdk._session_pool
 
 
-def test_tool_free_calls_and_unflagged_clients_stay_per_call(warm, tmp_path):
-    client = warm.client()
-    # Auxiliary one-shots carry no tools: they never start a warm session.
+def test_tool_free_calls_and_unflagged_clients_stay_per_call(rig, tmp_path):
+    client = rig.client()
+    # Auxiliary one-shots carry no tools: they never start a session.
     result = client.create(model='sonnet', messages=[{'role': 'user', 'content': 'title please'}])
     assert result.choices[0].message.content == 'echo title please'
     assert result.usage.model_dump()['native_admission'] == {'upstream_requests': 1, 'blocked_requests': 0, 'request_id': None}
-    assert '--max-turns' in warm.spawned()[0]['argv']
-    assert not directsdk._warm_pool
+    assert '--max-turns' in rig.spawned()[0]['argv']
+    assert not directsdk._session_pool
 
 
-def test_shutdown_leaves_no_native_behind(warm):
-    step(warm.client(), [{'role': 'user', 'content': 'call probe in parallel'}])
-    pid = warm.spawned()[0]['pid']
-    assert alive(pid) and len(directsdk._warm_pool) == 1
-    directsdk._warm_shutdown()
+def test_shutdown_leaves_no_native_behind(rig):
+    step(rig.client(), [{'role': 'user', 'content': 'call probe in parallel'}])
+    pid = rig.spawned()[0]['pid']
+    assert alive(pid) and len(directsdk._session_pool) == 1
+    directsdk._session_shutdown()
     deadline = time.monotonic() + 10
     while alive(pid) and time.monotonic() < deadline:
         time.sleep(.05)
-    assert not alive(pid) and not directsdk._warm_pool
+    assert not alive(pid) and not directsdk._session_pool
 
 
-def test_interleaved_conversations_keep_separate_natives(warm):
+def test_interleaved_conversations_keep_separate_natives(rig):
     left = [{'role': 'user', 'content': 'call probe in parallel'}]
     right = [{'role': 'user', 'content': 'call probe in parallel, please'}]
     for messages in (left, right):
-        first = step(warm.client(), messages)
+        first = step(rig.client(), messages)
         messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': c.id[-2:] + '-' + messages[0]['content'][-6:]}
                                            for c in first.choices[0].message.tool_calls]
-    answers = [step(warm.client(), messages) for messages in (right, left)]
-    assert [a.usage.model_dump()['native_admission']['warm'] for a in answers] == ['reused', 'reused']
+    answers = [step(rig.client(), messages) for messages in (right, left)]
+    assert [a.usage.model_dump()['native_admission']['session'] for a in answers] == ['reused', 'reused']
     assert answers[0].choices[0].message.content == 'got 2a-please+2b-please'
     assert answers[1].choices[0].message.content == 'got 1a-rallel+1b-rallel'
-    assert len(warm.spawned()) == 2 and len(directsdk._warm_pool) == 2
+    assert len(rig.spawned()) == 2 and len(directsdk._session_pool) == 2
 
 
 
@@ -470,10 +470,10 @@ LAUNCHER = 'import subprocess, sys\nsys.exit(subprocess.call([sys.executable] + 
 
 
 @pytest.mark.parametrize('launcher', [False, True])
-def test_r2_identical_visible_histories_never_share_a_native(warm, tmp_path, launcher):
+def test_r2_identical_visible_histories_never_share_a_native(rig, tmp_path, launcher):
     """R2: two conversations with the same visible text differ only in native message identity."""
     def client():
-        c = warm.client()
+        c = rig.client()
         if launcher:
             shim = tmp_path / 'launcher.py'
             shim.write_text(LAUNCHER)
@@ -484,7 +484,7 @@ def test_r2_identical_visible_histories_never_share_a_native(warm, tmp_path, lau
     sessions = []
     for messages in (a, b):
         messages.append(as_history(step(client(), messages)))
-        sessions += [s for s in directsdk._warm_pool if s not in sessions]
+        sessions += [s for s in directsdk._session_pool if s not in sessions]
     assert a[1]['content'] == b[1]['content'] == 'echo hi'
     # One identity throughout: the pool's own sessions and Popen pids. Behind a launcher (a Windows venv python)
     # the pid native reports is not the one Popen holds.
@@ -493,110 +493,110 @@ def test_r2_identical_visible_histories_never_share_a_native(warm, tmp_path, lau
     b.append({'role': 'user', 'content': 'b turn two'})
     assert step(client(), b).choices[0].message.content == 'echo b turn two'
     # B's own native continued; A's native was neither used nor killed; nothing replaced either.
-    assert len(directsdk._warm_pool) == 2 and set(directsdk._warm_pool) == {session_a, session_b}
-    assert (session_a.pid, session_b.pid) == pids and session_a.alive() and session_b.alive() and len(warm.spawned()) == 2
+    assert len(directsdk._session_pool) == 2 and set(directsdk._session_pool) == {session_a, session_b}
+    assert (session_a.pid, session_b.pid) == pids and session_a.alive() and session_b.alive() and len(rig.spawned()) == 2
     assert len(session_b.consumed) == 4 and len(session_a.consumed) == 2
 
 
-def test_r3_changed_native_carrier_forces_rebuild(warm):
+def test_r3_changed_native_carrier_forces_rebuild(rig):
     """R3: same visible text, different (here: removed) native carrier must not continue the old native state."""
     messages = [{'role': 'user', 'content': 'hi'}]
-    messages.append(as_history(step(warm.client(), messages)))
+    messages.append(as_history(step(rig.client(), messages)))
     messages[1] = {k: v for k, v in messages[1].items() if k != 'reasoning_details'}
     messages.append({'role': 'user', 'content': 'again'})
-    result = step(warm.client(), messages)
-    assert result.usage.model_dump()['native_admission']['warm'] != 'reused'
-    assert len(warm.spawned()) == 2
+    result = step(rig.client(), messages)
+    assert result.usage.model_dump()['native_admission']['session'] != 'reused'
+    assert len(rig.spawned()) == 2
 
 
-def test_r5_cancel_after_tool_calls_kills_the_parked_native(warm):
+def test_r5_cancel_after_tool_calls_kills_the_parked_native(rig):
     """R5: create() returned tool calls, Hermes is running tools, the user interrupts: client.cancel()."""
-    client = warm.client()
+    client = rig.client()
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(client, messages)
-    pid = warm.spawned()[0]['pid']
+    pid = rig.spawned()[0]['pid']
     client.cancel()
     deadline = time.monotonic() + 10
     while alive(pid) and time.monotonic() < deadline:
         time.sleep(.05)
-    assert not alive(pid) and not directsdk._warm_pool
+    assert not alive(pid) and not directsdk._session_pool
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'} for c in first.choices[0].message.tool_calls]
-    assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] == 'cold'
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'cold'
 
 
-def test_r9_pool_cap_holds_with_busy_sessions(warm, monkeypatch):
-    """R9: with every warm slot busy, an extra conversation takes the per-call path; nothing exceeds the cap."""
-    monkeypatch.setattr(directsdk, 'WARM_POOL_SIZE', 1)
+def test_r9_pool_cap_holds_with_busy_sessions(rig, monkeypatch):
+    """R9: with every session slot busy, an extra conversation takes the per-call path; nothing exceeds the cap."""
+    monkeypatch.setattr(directsdk, 'SESSION_POOL_SIZE', 1)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        slow = pool.submit(step, warm.client(), [{'role': 'user', 'content': 'slow hi'}])
+        slow = pool.submit(step, rig.client(), [{'role': 'user', 'content': 'slow hi'}])
         deadline = time.monotonic() + 10
-        while not warm.upstream.bodies and time.monotonic() < deadline:
+        while not rig.upstream.bodies and time.monotonic() < deadline:
             time.sleep(.02)
-        other = step(warm.client(), [{'role': 'user', 'content': 'hi'}])
+        other = step(rig.client(), [{'role': 'user', 'content': 'hi'}])
         assert slow.result(timeout=20).choices[0].message.content == 'echo slow hi'
     assert other.choices[0].message.content == 'echo hi'
-    assert 'warm' not in other.usage.model_dump()['native_admission']
-    assert '--max-turns' in warm.spawned()[1]['argv']
-    assert len(directsdk._warm_pool) <= 1
+    assert 'session' not in other.usage.model_dump()['native_admission']
+    assert '--max-turns' in rig.spawned()[1]['argv']
+    assert len(directsdk._session_pool) <= 1
 
 
-def test_rauth_launch_identity_is_part_of_reuse(warm, tmp_path):
+def test_rauth_launch_identity_is_part_of_reuse(rig, tmp_path):
     """R-auth: a different native config dir (or command) with identical history must not reuse the old child."""
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(warm.client(), messages)
+    first = step(rig.client(), messages)
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'} for c in first.choices[0].message.tool_calls]
-    other = warm.client()
+    other = rig.client()
     other.env['CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR'] = str(tmp_path / 'other-config')
-    assert step(other, messages).usage.model_dump()['native_admission']['warm'] != 'reused'
-    assert len(warm.spawned()) == 2
+    assert step(other, messages).usage.model_dump()['native_admission']['session'] != 'reused'
+    assert len(rig.spawned()) == 2
 
 
-def test_warm_native_uses_active_profiles_config_dir(warm, profile, tmp_path):
+def test_session_native_uses_active_profiles_config_dir(rig, profile, tmp_path):
     from test_directsdk_config_dir import _set_config_dir
     selected = str(tmp_path / 'profile-login')
     _set_config_dir(selected)
-    response = step(warm.client(), [{'role': 'user', 'content': 'hello'}])
-    assert response.usage.model_dump()['native_admission']['warm'] == 'cold'
-    assert [child['config_dir'] for child in warm.spawned()] == [selected]
+    response = step(rig.client(), [{'role': 'user', 'content': 'hello'}])
+    assert response.usage.model_dump()['native_admission']['session'] == 'cold'
+    assert [child['config_dir'] for child in rig.spawned()] == [selected]
 
 
-def test_changed_profile_config_dir_rebuilds_warm_conversation(warm, profile, tmp_path):
+def test_changed_profile_config_dir_rebuilds_session_conversation(rig, profile, tmp_path):
     from test_directsdk_config_dir import _set_config_dir
     first_dir, changed_dir = (str(tmp_path / name) for name in ('first-login', 'changed-login'))
     _set_config_dir(first_dir)
-    client = warm.client()
+    client = rig.client()
     messages = [{'role': 'user', 'content': 'hello'}]
     messages += [as_history(step(client, messages)), {'role': 'user', 'content': 'again'}]
-    old = warm.spawned()[0]['pid']
+    old = rig.spawned()[0]['pid']
     _set_config_dir(changed_dir)
     response = step(client, messages)
-    assert response.usage.model_dump()['native_admission']['warm'] == 'rebuild:ident'
-    assert [child['config_dir'] for child in warm.spawned()] == [first_dir, changed_dir]
+    assert response.usage.model_dump()['native_admission']['session'] == 'rebuild:ident'
+    assert [child['config_dir'] for child in rig.spawned()] == [first_dir, changed_dir]
     assert not alive(old)
 
 
-def test_a_fork_on_another_model_leaves_the_chat_session_warm(warm):
+def test_a_fork_on_another_model_leaves_the_chat_session_alive(rig):
     """A review on another model shares the chat's history but must not retire the chat's native."""
-    client = warm.client()
+    client = rig.client()
     messages = [{'role': 'user', 'content': 'hello'}]
     messages += [as_history(step(client, messages)), {'role': 'user', 'content': 'again'}]
-    chat = warm.spawned()[0]['pid']
+    chat = rig.spawned()[0]['pid']
     fork = client.create(model='opus', messages=messages, tools=TOOLS)
-    assert fork.usage.model_dump()['native_admission']['warm'] == 'cold'
+    assert fork.usage.model_dump()['native_admission']['session'] == 'cold'
     assert alive(chat)
-    assert step(client, messages).usage.model_dump()['native_admission']['warm'] == 'reused'
-    assert warm.spawned()[0]['pid'] == chat and len(warm.spawned()) == 2
+    assert step(client, messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    assert rig.spawned()[0]['pid'] == chat and len(rig.spawned()) == 2
     client.close()
 
 
-def test_rauth_conflicting_override_is_refused_on_reuse(warm, monkeypatch):
-    """R-auth: the inherited-environment refusal runs on every warm step, not only at spawn."""
-    url = f'http://127.0.0.1:{warm.upstream.server.server_port}'
+def test_rauth_conflicting_override_is_refused_on_reuse(rig, monkeypatch):
+    """R-auth: the inherited-environment refusal runs on every session step, not only at spawn."""
+    url = f'http://127.0.0.1:{rig.upstream.server.server_port}'
     class Local(directsdk.Admission):
         def __init__(self, upstream, timeout, queried=None, first_turn=None):
             super().__init__(url, timeout, queried, first_turn=first_turn)
     monkeypatch.setattr(directsdk, 'Admission', Local)
-    fixture = warm.client()
+    fixture = rig.client()
     for key, value in fixture.env.items():
         if key != 'ANTHROPIC_BASE_URL':
             monkeypatch.setenv(key, value)
@@ -613,10 +613,10 @@ def test_rauth_conflicting_override_is_refused_on_reuse(warm, monkeypatch):
     client.close()
 
 
-def test_logged_out_warm_native_raises_the_login_hint(warm):
-    """NON_BLOCKING: warm keeps baseline's ClaudeCodeLoggedOut type and hint."""
+def test_logged_out_session_native_raises_the_login_hint(rig):
+    """NON_BLOCKING: session keeps baseline's ClaudeCodeLoggedOut type and hint."""
     from directsdk_setup import LOGGED_OUT_HINT
-    client = warm.client()
+    client = rig.client()
     client.env['AUTH_FAIL'] = '1'
     with pytest.raises(directsdk.ClaudeCodeLoggedOut, match='Not logged in'):
         step(client, [{'role': 'user', 'content': 'hi'}])
@@ -625,80 +625,80 @@ def test_logged_out_warm_native_raises_the_login_hint(warm):
 
 # ---- Codex re-review (v3) ----
 
-def test_r5_cancel_during_handoff_is_not_published(warm, monkeypatch):
+def test_r5_cancel_during_handoff_is_not_published(rig, monkeypatch):
     """R5 race: the step detached its process, then cancel() arrives before release publishes the session."""
-    client = warm.client()
-    release = directsdk._warm_release
+    client = rig.client()
+    release = directsdk._session_release
     def racing(*args):
         client.cancel()  # lands while the session is still busy and no process is attached
         return release(*args)
-    monkeypatch.setattr(directsdk, '_warm_release', racing)
+    monkeypatch.setattr(directsdk, '_session_release', racing)
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(client, messages)
-    monkeypatch.setattr(directsdk, '_warm_release', release)
-    pid = warm.spawned()[0]['pid']
+    monkeypatch.setattr(directsdk, '_session_release', release)
+    pid = rig.spawned()[0]['pid']
     deadline = time.monotonic() + 10
     while alive(pid) and time.monotonic() < deadline:
         time.sleep(.05)
-    assert not alive(pid) and not directsdk._warm_pool
+    assert not alive(pid) and not directsdk._session_pool
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'} for c in first.choices[0].message.tool_calls]
-    assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] == 'cold'
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'cold'
 
 
-def test_routine_close_after_a_step_keeps_the_session(warm):
-    client = warm.client()
+def test_routine_close_after_a_step_keeps_the_session(rig):
+    client = rig.client()
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(client, messages, stream=True)  # the stream is drained and closed by step()
     client.close()
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'} for c in first.choices[0].message.tool_calls]
-    assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] == 'reused'
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
 
 
-def test_reaper_start_failure_leaks_no_reservation(warm, monkeypatch):
+def test_reaper_start_failure_leaks_no_reservation(rig, monkeypatch):
     """A failing reaper Thread.start must not leave a busy reservation or a dead reaper object behind."""
     import threading
-    monkeypatch.setattr(directsdk, 'WARM_POOL_SIZE', 1)
-    monkeypatch.setattr(directsdk, '_warm_reaper', None)
+    monkeypatch.setattr(directsdk, 'SESSION_POOL_SIZE', 1)
+    monkeypatch.setattr(directsdk, '_session_reaper', None)
     real = threading.Thread
     class Failing(real):
         def start(self):
-            if getattr(self, '_target', None) is directsdk._warm_reap:
+            if getattr(self, '_target', None) is directsdk._session_reap:
                 raise RuntimeError('injected: cannot start thread')
             return super().start()
     monkeypatch.setattr(threading, 'Thread', Failing)
-    result = step(warm.client(), [{'role': 'user', 'content': 'hi'}])
+    result = step(rig.client(), [{'role': 'user', 'content': 'hi'}])
     assert result.choices[0].message.content == 'echo hi'
-    assert not directsdk._warm_pool and directsdk._warm_reaper is None
+    assert not directsdk._session_pool and directsdk._session_reaper is None
     monkeypatch.setattr(threading, 'Thread', real)
-    again = step(warm.client(), [{'role': 'user', 'content': 'hi again'}])
-    assert again.usage.model_dump()['native_admission']['warm'] == 'cold'
-    assert len(directsdk._warm_pool) == 1 and directsdk._warm_reaper.is_alive()
+    again = step(rig.client(), [{'role': 'user', 'content': 'hi again'}])
+    assert again.usage.model_dump()['native_admission']['session'] == 'cold'
+    assert len(directsdk._session_pool) == 1 and directsdk._session_reaper.is_alive()
 
 
-def test_reuse_key_ignores_volatile_env_but_not_config_dir(warm, tmp_path):
+def test_reuse_key_ignores_volatile_env_but_not_config_dir(rig, tmp_path):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = warm.client()
+    first = rig.client()
     first.env['CLAUDE_PID'] = '111'
     one = step(first, messages)
     messages += [as_history(one)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'} for c in one.choices[0].message.tool_calls]
-    second = warm.client()
+    second = rig.client()
     second.env['CLAUDE_PID'] = '222'
     two = step(second, messages)
-    assert two.usage.model_dump()['native_admission']['warm'] == 'reused'
+    assert two.usage.model_dump()['native_admission']['session'] == 'reused'
     messages += [as_history(two), {'role': 'user', 'content': 'next'}]
-    third = warm.client()
+    third = rig.client()
     third.env.update(CLAUDE_PID='333', CLAUDE_CONFIG_DIR=str(tmp_path / 'elsewhere'))
-    assert step(third, messages).usage.model_dump()['native_admission']['warm'] != 'reused'
-    assert len(warm.spawned()) == 2
+    assert step(third, messages).usage.model_dump()['native_admission']['session'] != 'reused'
+    assert len(rig.spawned()) == 2
 
 
 # ---- v7: interplay with upstream main since ef73726 ----
 
 @pytest.mark.parametrize('stream', [False, True])
-def test_refusal_after_a_tool_call_is_content_filter_and_never_reused(warm, stream):
-    """4c4cfbb/065edc7/31b591f: the warm step answers a refusal as baseline does, and the session is not kept."""
+def test_refusal_after_a_tool_call_is_content_filter_and_never_reused(rig, stream):
+    """4c4cfbb/065edc7/31b591f: the session step answers a refusal as baseline does, and the session is not kept."""
     messages = [{'role': 'user', 'content': 'please refuse'}]
-    client = warm.client()
+    client = rig.client()
     if stream:
         chunks = list(client.create(model='sonnet', messages=messages, tools=TOOLS, stream=True))
         last = chunks[-1].choices[0]
@@ -712,87 +712,87 @@ def test_refusal_after_a_tool_call_is_content_filter_and_never_reused(warm, stre
     assert not message.tool_calls
     # The carrier keeps native's turn as sent, cut-off call included.
     assert [b['type'] for b in message.reasoning_details[0]['messages'][0]['content']] == ['tool_use']
-    assert not directsdk._warm_pool
+    assert not directsdk._session_pool
     messages += [as_history(response), {'role': 'user', 'content': 'try again'}]
-    assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] == 'cold'
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'cold'
 
 
-def test_failures_carry_the_status_hermes_routes_on(warm):
+def test_failures_carry_the_status_hermes_routes_on(rig):
     """144bd1d (#58): a relayed upstream status and a native-answered limit both reach Hermes as status_code."""
     with pytest.raises(directsdk.ClaudeAPIError, match='Incomplete upstream response') as upstream:
-        step(warm.client(), [{'role': 'user', 'content': 'hit the limit'}])
+        step(rig.client(), [{'role': 'user', 'content': 'hit the limit'}])
     assert upstream.value.status_code == 429
-    client = warm.client()
+    client = rig.client()
     client.env['NATIVE_ERROR'] = 'rate_limit'
     with pytest.raises(directsdk.ClaudeAPIError, match='limit reached') as native:
         step(client, [{'role': 'user', 'content': 'hi'}])
     assert native.value.status_code == 429
-    assert not directsdk._warm_pool
+    assert not directsdk._session_pool
 
 
 @pytest.mark.parametrize('trigger, offered', [('ghost', 'mcp__hermes__ghost'), ('bare', 'mcp__hermes__probe')])
-def test_unparked_tool_names_go_to_hermes_and_rebuild(warm, trigger, offered):
+def test_unparked_tool_names_go_to_hermes_and_rebuild(rig, trigger, offered):
     """4336364 (#39) / 218d5e4 (#62): Hermes gets the call; native never parked it, so the next step replays."""
     messages = [{'role': 'user', 'content': 'call ' + trigger}]
-    first = step(warm.client(), messages)
+    first = step(rig.client(), messages)
     (call,) = first.choices[0].message.tool_calls
     assert first.choices[0].finish_reason == 'tool_calls' and call.function.name == offered[len(directsdk.PREFIX):]
     assert first.choices[0].message.reasoning_details[0]['messages'][0]['content'][0]['name'] == offered
-    assert not directsdk._warm_pool
+    assert not directsdk._session_pool
     messages += [as_history(first), {'role': 'tool', 'tool_call_id': call.id, 'content': 'unknown tool'}]
-    second = step(warm.client(), messages)
-    assert second.usage.model_dump()['native_admission']['warm'] == 'cold'
+    second = step(rig.client(), messages)
+    assert second.usage.model_dump()['native_admission']['session'] == 'cold'
     assert second.choices[0].message.content == 'got unknown tool'
 
 
-def test_traffic_policy_and_proxy_are_part_of_launch_identity(warm, monkeypatch):
+def test_traffic_policy_and_proxy_are_part_of_launch_identity(rig, monkeypatch):
     """72249fa / 7d2ae80: a session launched under one telemetry setting or proxy route is not reused under another."""
     import directsdk_setup
     monkeypatch.setattr(directsdk_setup, 'telemetry_enabled', lambda: True)
     messages = [{'role': 'user', 'content': 'hi'}]
-    messages.append(as_history(step(warm.client(), messages)))
+    messages.append(as_history(step(rig.client(), messages)))
     messages.append({'role': 'user', 'content': 'same policy'})
-    messages.append(as_history(step(warm.client(), messages)))
-    assert len(warm.spawned()) == 1
+    messages.append(as_history(step(rig.client(), messages)))
+    assert len(rig.spawned()) == 1
     monkeypatch.setattr(directsdk_setup, 'telemetry_enabled', lambda: False)
     messages.append({'role': 'user', 'content': 'telemetry off'})
-    response = step(warm.client(), messages)
-    assert response.usage.model_dump()['native_admission']['warm'] != 'reused' and len(warm.spawned()) == 2
+    response = step(rig.client(), messages)
+    assert response.usage.model_dump()['native_admission']['session'] != 'reused' and len(rig.spawned()) == 2
     messages += [as_history(response), {'role': 'user', 'content': 'via proxy'}]
-    proxied = warm.client()
+    proxied = rig.client()
     proxied.env['HTTPS_PROXY'] = 'http://127.0.0.1:9'  # the loopback http upstream is never proxied
     response = step(proxied, messages)
-    assert response.usage.model_dump()['native_admission']['warm'] != 'reused'
-    assert len(warm.spawned()) == 3
+    assert response.usage.model_dump()['native_admission']['session'] != 'reused'
+    assert len(rig.spawned()) == 3
     # A user-exported DO_NOT_TRACK reaches the child unchanged (apply_traffic_policy never removes it): a change starts a new native.
     messages += [as_history(response), {'role': 'user', 'content': 'do not track'}]
-    untracked = warm.client()
+    untracked = rig.client()
     untracked.env.update(HTTPS_PROXY='http://127.0.0.1:9', DO_NOT_TRACK='1')
-    assert step(untracked, messages).usage.model_dump()['native_admission']['warm'] != 'reused'
-    assert len(warm.spawned()) == 4
+    assert step(untracked, messages).usage.model_dump()['native_admission']['session'] != 'reused'
+    assert len(rig.spawned()) == 4
 
 
-def test_each_step_runs_under_its_own_timeout_and_trace_header(warm):
+def test_each_step_runs_under_its_own_timeout_and_trace_header(rig):
     """67a6b05 / 522b25e (#85): rearm takes the step's timeout; a per-step traceparent never forces a rebuild."""
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = warm.client().create(model='sonnet', messages=messages, tools=TOOLS, timeout=20,
+    first = rig.client().create(model='sonnet', messages=messages, tools=TOOLS, timeout=20,
                                  extra_headers={'traceparent': '00-' + '1' * 32 + '-' + '1' * 16 + '-01'})
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'} for c in first.choices[0].message.tool_calls]
-    second = warm.client().create(model='sonnet', messages=messages, tools=TOOLS, timeout=17,
+    second = rig.client().create(model='sonnet', messages=messages, tools=TOOLS, timeout=17,
                                   extra_headers={'traceparent': '00-' + '2' * 32 + '-' + '2' * 16 + '-01'})
-    assert second.usage.model_dump()['native_admission']['warm'] == 'reused'
-    (session,) = directsdk._warm_pool
+    assert second.usage.model_dump()['native_admission']['session'] == 'reused'
+    (session,) = directsdk._session_pool
     assert session.admission.timeout == 17
 
 
-def test_killing_a_warm_session_leaves_the_shared_cwd(warm):
-    """f57ddbb/8a8338b: the cwd is shared across clients; a warm kill removes only its own per-session root."""
-    client = warm.client()
+def test_killing_a_session_mode_leaves_the_shared_cwd(rig):
+    """f57ddbb/8a8338b: the cwd is shared across clients; a session kill removes only its own per-session root."""
+    client = rig.client()
     step(client, [{'role': 'user', 'content': 'call probe in parallel'}])
-    (session,) = directsdk._warm_pool
+    (session,) = directsdk._session_pool
     root, cwd = session.root, Path(client._workdir())
-    assert root.name.startswith('claude-directsdk-warm-') and root != cwd
-    directsdk._warm_shutdown()
+    assert root.name.startswith('claude-directsdk-session-') and root != cwd
+    directsdk._session_shutdown()
     assert not root.exists() and cwd.is_dir()
 
 
@@ -800,8 +800,8 @@ REMINDER = '\n<system-reminder>userEmail: user@example.com</system-reminder>'
 MARK = {'type': 'ephemeral'}
 
 
-def context_client(warm):
-    client = warm.client()
+def context_client(rig):
+    client = rig.client()
     client.env['NATIVE_CONTEXT'] = '1'
     return client
 
@@ -820,18 +820,18 @@ def prefix(body, at):
     return json.dumps(plain(body['messages'][:i] + [dict(body['messages'][i], content=body['messages'][i]['content'][:j + 1])]))
 
 
-def test_warm_live_first_turn_and_cached_prefix_replay_unchanged(warm):
+def test_session_live_first_turn_and_cached_prefix_replay_unchanged(rig):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(context_client(warm), messages)
+    first = step(context_client(rig), messages)
     calls = first.choices[0].message.tool_calls
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': k}
                                       for c, k in zip(calls, ('APPLE', 'BANANA'))]
-    second = step(context_client(warm), messages)
+    second = step(context_client(rig), messages)
     messages += [as_history(second), {'role': 'user', 'content': 'next turn'}]
-    third = step(context_client(warm), messages)
-    assert [r.usage.model_dump()['native_admission']['warm'] for r in (first, second, third)] == ['cold', 'reused', 'reused']
-    assert len(warm.spawned()) == 1 and len(warm.upstream.bodies) == 3
-    bodies = warm.upstream.bodies
+    third = step(context_client(rig), messages)
+    assert [r.usage.model_dump()['native_admission']['session'] for r in (first, second, third)] == ['cold', 'reused', 'reused']
+    assert len(rig.spawned()) == 1 and len(rig.upstream.bodies) == 3
+    bodies = rig.upstream.bodies
     first_turn = (0, len(bodies[0]['messages'][0]['content']) - 1)
     assert all(prefix(body, first_turn) == prefix(bodies[0], first_turn) for body in bodies[1:])
     assert all([b['text'] for b in body['messages'][0]['content']] == ['call probe in parallel', REMINDER]
@@ -841,113 +841,113 @@ def test_warm_live_first_turn_and_cached_prefix_replay_unchanged(warm):
         assert prefix(after, mark) == prefix(before, mark)
 
 
-def test_warm_steps_get_mains_restoration_and_breakpoint_pinning(warm):
-    """456fdb0/fda48c3/f8630df: every warm request passes through main's admission rewrites, anchored on the frame
+def test_session_steps_get_mains_restoration_and_breakpoint_pinning(rig):
+    """456fdb0/fda48c3/f8630df: every session request passes through main's admission rewrites, anchored on the frame
     native replays next (Hermes' frame on a launch or user turn, native's own MCP result shape on a tool round)."""
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(context_client(warm), messages)
+    first = step(context_client(rig), messages)
     calls = first.choices[0].message.tool_calls
-    # #77: put the frame first; sticky memory preserves that order on later warm requests too.
-    assert [b['text'] for b in warm.upstream.bodies[0]['messages'][0]['content']] == ['call probe in parallel', REMINDER]
+    # #77: put the frame first; sticky memory preserves that order on later session requests too.
+    assert [b['text'] for b in rig.upstream.bodies[0]['messages'][0]['content']] == ['call probe in parallel', REMINDER]
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': k} for c, k in zip(calls, ('APPLE', 'BANANA'))]
-    second = step(context_client(warm), messages)
-    assert second.usage.model_dump()['native_admission']['warm'] == 'reused'
-    tool_round = warm.upstream.bodies[1]
+    second = step(context_client(rig), messages)
+    assert second.usage.model_dump()['native_admission']['session'] == 'reused'
+    tool_round = rig.upstream.bodies[1]
     # Native's reminder is not forwarded as tool output; the trailing context mark moves onto the last result (#33).
     assert tool_round['messages'][2]['content'] == [
         {'type': 'tool_result', 'tool_use_id': calls[0].id, 'content': [{'type': 'text', 'text': 'APPLE'}]},
         {'type': 'tool_result', 'tool_use_id': calls[1].id, 'content': [{'type': 'text', 'text': 'BANANA'}], 'cache_control': MARK}]
     assert message_marks(tool_round) == [(1, 1), (2, 1)]
     messages += [as_history(second), {'role': 'user', 'content': 'next turn'}]
-    third = step(context_client(warm), messages)
-    assert third.usage.model_dump()['native_admission']['warm'] == 'reused' and len(warm.spawned()) == 1
-    turn = warm.upstream.bodies[2]
+    third = step(context_client(rig), messages)
+    assert third.usage.model_dump()['native_admission']['session'] == 'reused' and len(rig.spawned()) == 1
+    turn = rig.upstream.bodies[2]
     assert message_marks(turn) == [(3, 0), (4, 0)]
     # Each request replays the previous one's prefix through its last breakpoint, so that entry is read.
-    for before, after in ((warm.upstream.bodies[0], tool_round), (tool_round, turn)):
+    for before, after in ((rig.upstream.bodies[0], tool_round), (tool_round, turn)):
         mark = message_marks(before)[-1] if message_marks(before) else (0, 0)
         assert prefix(after, mark) == prefix(before, mark)
 
 
-def test_cold_replay_reads_the_warm_first_turn_frame_prefix(warm):
+def test_cold_replay_reads_the_session_first_turn_frame_prefix(rig):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(context_client(warm), messages)
-    before = warm.upstream.bodies[0]
+    first = step(context_client(rig), messages)
+    before = rig.upstream.bodies[0]
     assert [b['text'] for b in before['messages'][0]['content']] == ['call probe in parallel', REMINDER]
-    (session,) = directsdk._warm_pool
+    (session,) = directsdk._session_pool
     assert session.admission.first_turn['permutation'] == (1, 1)
-    directsdk._warm_shutdown()
+    directsdk._session_shutdown()
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'}
                                      for c in first.choices[0].message.tool_calls]
-    second = step(context_client(warm), messages)
-    assert second.usage.model_dump()['native_admission']['warm'] == 'cold' and len(warm.spawned()) == 2
-    after = warm.upstream.bodies[1]
+    second = step(context_client(rig), messages)
+    assert second.usage.model_dump()['native_admission']['session'] == 'cold' and len(rig.spawned()) == 2
+    after = rig.upstream.bodies[1]
     assert [b['text'] for b in after['messages'][0]['content']] == ['call probe in parallel']
     mark = message_marks(before)[-1]
     assert mark == (0, 0) and prefix(after, mark) == prefix(before, mark)
-    (fresh,) = directsdk._warm_pool
+    (fresh,) = directsdk._session_pool
     assert fresh.admission is not session.admission and fresh.admission.first_turn == {'context': None}
 
 
-def test_a_cold_launch_on_a_tool_result_frame_restores_hermes_results(warm):
-    """456fdb0/85dacbf: a warm launch replaying Hermes' tool results forwards them without native's reminder."""
+def test_a_cold_launch_on_a_tool_result_frame_restores_hermes_results(rig):
+    """456fdb0/85dacbf: a session launch replaying Hermes' tool results forwards them without native's reminder."""
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(context_client(warm), messages)
+    first = step(context_client(rig), messages)
     calls = first.choices[0].message.tool_calls
-    directsdk._warm_shutdown()  # reaped meanwhile: the next step launches on the full history
+    directsdk._session_shutdown()  # reaped meanwhile: the next step launches on the full history
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': k} for c, k in zip(calls, ('APPLE', 'BANANA'))]
-    second = step(context_client(warm), messages)
-    assert second.usage.model_dump()['native_admission']['warm'] == 'cold' and len(warm.spawned()) == 2
-    assert warm.upstream.bodies[-1]['messages'][2]['content'] == [
+    second = step(context_client(rig), messages)
+    assert second.usage.model_dump()['native_admission']['session'] == 'cold' and len(rig.spawned()) == 2
+    assert rig.upstream.bodies[-1]['messages'][2]['content'] == [
         {'type': 'tool_result', 'tool_use_id': calls[0].id, 'content': [{'type': 'text', 'text': 'APPLE'}]},
         {'type': 'tool_result', 'tool_use_id': calls[1].id, 'content': [{'type': 'text', 'text': 'BANANA'}], 'cache_control': MARK}]
 
 
 # ---- v8: review of PR #99 ----
 
-# A native that refuses the warm launch before any upstream request; its per-call launch is the usual fake.
-NO_WARM = "import sys\nif '--allowedTools' in sys.argv: print('fixture: warm protocol unavailable', flush=True); sys.exit(0)\n" + NATIVE
+# A native that refuses the session launch before any upstream request; its per-call launch is the usual fake.
+NO_SESSION = "import sys\nif '--allowedTools' in sys.argv: print('fixture: session protocol unavailable', flush=True); sys.exit(0)\n" + NATIVE
 
 
-def no_warm_client(warm, tmp_path):
-    native = tmp_path / 'no_warm.py'
-    native.write_text(NO_WARM)
-    client = warm.client()
+def no_session_client(rig, tmp_path):
+    native = tmp_path / 'no_session.py'
+    native.write_text(NO_SESSION)
+    client = rig.client()
     client.command = [sys.executable, str(native)]
     return client
 
 
 @pytest.mark.parametrize('stream', [False, True])
-def test_warm_protocol_failure_before_admission_falls_back_per_call(warm, tmp_path, stream):
-    """A warm launch that dies before admission serves this step per-call: one upstream request, no kept session."""
-    response = step(no_warm_client(warm, tmp_path), [{'role': 'user', 'content': 'hello'}], stream=stream)
+def test_session_protocol_failure_before_admission_falls_back_per_call(rig, tmp_path, stream):
+    """A session launch that dies before admission serves this step per-call: one upstream request, no kept session."""
+    response = step(no_session_client(rig, tmp_path), [{'role': 'user', 'content': 'hello'}], stream=stream)
     assert response.choices[0].message.content == 'echo hello'
     assert response.usage.model_dump()['native_admission'] == {'upstream_requests': 1, 'blocked_requests': 0, 'request_id': None}
-    assert len(warm.upstream.bodies) == 1 and not directsdk._warm_pool
-    assert [('--max-turns' in s['argv']) for s in warm.spawned()] == [True]
-    # A healthy warm native beside it still reuses its process.
+    assert len(rig.upstream.bodies) == 1 and not directsdk._session_pool
+    assert [('--max-turns' in s['argv']) for s in rig.spawned()] == [True]
+    # A healthy session native beside it still reuses its process.
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(warm.client(), messages)
+    first = step(rig.client(), messages)
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'} for c in first.choices[0].message.tool_calls]
-    assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] == 'reused'
-    assert len(warm.spawned()) == 2 and len(directsdk._warm_pool) == 1
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    assert len(rig.spawned()) == 2 and len(directsdk._session_pool) == 1
 
 
-def test_cancelled_warm_failure_never_falls_back(warm, tmp_path, monkeypatch, caplog):
-    """A cancel that lands while the warm launch fails ends the step: no per-call replay, no upstream request."""
+def test_cancelled_session_failure_never_falls_back(rig, tmp_path, monkeypatch, caplog):
+    """A cancel that lands while the session launch fails ends the step: no per-call replay, no upstream request."""
     caplog.set_level('INFO', logger=directsdk.__name__)
-    client = no_warm_client(warm, tmp_path)
-    spawn = directsdk.Client._warm_spawn
+    client = no_session_client(rig, tmp_path)
+    spawn = directsdk.Client._session_spawn
     def cancelling(self, *args):
         try:
             spawn(self, *args)
         finally:
             self.cancel()
-    monkeypatch.setattr(directsdk.Client, '_warm_spawn', cancelling)
+    monkeypatch.setattr(directsdk.Client, '_session_spawn', cancelling)
     with pytest.raises(RuntimeError):
         step(client, [{'role': 'user', 'content': 'hello'}])
-    assert not warm.upstream.bodies and not warm.spawned() and not directsdk._warm_pool
-    assert 'warm fallback' not in caplog.text and 'warm kill' in caplog.text
+    assert not rig.upstream.bodies and not rig.spawned() and not directsdk._session_pool
+    assert 'session fallback' not in caplog.text and 'session kill' in caplog.text
 
 
 # ---- large tool results: native 2.1.285 persists an MCP result past the tool's limit and keeps a stub ----
@@ -956,15 +956,15 @@ def persisted(tmp_path):
     return sorted(str(p) for p in tmp_path.rglob('tool-results/*'))
 
 
-def tool_round(warm, big, is_error=False):
+def tool_round(rig, big, is_error=False):
     """A parallel round answered with one large result and one small one; returns the history and the step's response."""
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(warm.client(), messages)
+    first = step(rig.client(), messages)
     calls = first.choices[0].message.tool_calls
     messages += [as_history(first), {'role': 'tool', 'tool_call_id': calls[0].id, 'content': big, **({'is_error': True} if is_error else {})},
                  {'role': 'tool', 'tool_call_id': calls[1].id, 'content': 'small'}]
-    sent = len(warm.upstream.bodies)
-    response = step(warm.client(), messages)
+    sent = len(rig.upstream.bodies)
+    response = step(rig.client(), messages)
     return messages, response, sent
 
 
@@ -973,9 +973,9 @@ def upstream_results(body):
             for m in body['messages'] if isinstance(m['content'], list) for b in m['content'] if b.get('type') == 'tool_result']
 
 
-def test_a_tool_round_over_the_message_budget_is_replayed_not_answered_over_mcp(warm, tmp_path, caplog):
+def test_a_tool_round_over_the_message_budget_is_replayed_not_answered_over_mcp(rig, tmp_path, caplog):
     caplog.set_level('INFO', logger=directsdk.__name__)
-    client = warm.client()
+    client = rig.client()
     client.env['FAKE_ROUND_BUDGET'] = '200000'
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(client, messages)
@@ -983,181 +983,181 @@ def test_a_tool_round_over_the_message_budget_is_replayed_not_answered_over_mcp(
     texts = [letter * 99_999 + '\U0001F600' for letter in ('A', 'B')]
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': call.id, 'content': text}
                                      for call, text in zip(first.choices[0].message.tool_calls, texts)]
-    sent = len(warm.upstream.bodies)
-    old = warm.spawned()[0]['pid']
-    response = step(warm.client(), messages)
+    sent = len(rig.upstream.bodies)
+    old = rig.spawned()[0]['pid']
+    response = step(rig.client(), messages)
     admission = response.usage.model_dump()['native_admission']
-    results = upstream_results(warm.upstream.bodies[-1])
-    assert {'mode': admission['warm'], 'full_texts': results == texts,
+    results = upstream_results(rig.upstream.bodies[-1])
+    assert {'mode': admission['session'], 'full_texts': results == texts,
             'stub': any('<persisted-output>' in result for result in results)} == {
                 'mode': 'rebuild:oversize', 'full_texts': True, 'stub': False}
-    assert admission['upstream_requests'] == 1 and len(warm.upstream.bodies) == sent + 1
-    assert not alive(old) and len(warm.spawned()) == 2 and not persisted(tmp_path)
+    assert admission['upstream_requests'] == 1 and len(rig.upstream.bodies) == sent + 1
+    assert not alive(old) and len(rig.spawned()) == 2 and not persisted(tmp_path)
     assert 'reason=tool-result-over-mcp-limit' in caplog.text
     messages += [as_history(response), {'role': 'user', 'content': 'next'}]
-    assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] == 'reused'
-    assert len(warm.spawned()) == 2 and upstream_results(warm.upstream.bodies[-1]) == texts
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    assert len(rig.spawned()) == 2 and upstream_results(rig.upstream.bodies[-1]) == texts
 
 
 def test_idle_defaults_cover_the_prompt_cache_and_stay_below_clear_tool_uses():
     # A user-idle session must outlive native's 1-hour prompt cache, or a reply inside the hour respawns native and
     # re-writes history the cache still holds; both limits stay below native's 3,900 s clear_tool_uses idle trigger.
-    if 'CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_IDLE_SECONDS' not in os.environ:
-        assert 3600 <= directsdk.WARM_IDLE_SECONDS < 3900
-    if 'CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_PARKED_IDLE_SECONDS' not in os.environ:
-        assert directsdk.WARM_PARKED_IDLE_SECONDS < 3900
+    if 'CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_IDLE_SECONDS' not in os.environ:
+        assert 3600 <= directsdk.SESSION_IDLE_SECONDS < 3900
+    if 'CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_PARKED_IDLE_SECONDS' not in os.environ:
+        assert directsdk.SESSION_PARKED_IDLE_SECONDS < 3900
 
 
-def test_a_session_parked_on_a_long_tool_survives_the_idle_limit(warm, monkeypatch):
+def test_a_session_parked_on_a_long_tool_survives_the_idle_limit(rig, monkeypatch):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(warm.client(), messages)
-    old = warm.spawned()[0]['pid']
-    monkeypatch.setattr(directsdk, 'WARM_IDLE_SECONDS', 0.2)
-    monkeypatch.setattr(directsdk, 'WARM_PARKED_IDLE_SECONDS', 3600, raising=False)
+    first = step(rig.client(), messages)
+    old = rig.spawned()[0]['pid']
+    monkeypatch.setattr(directsdk, 'SESSION_IDLE_SECONDS', 0.2)
+    monkeypatch.setattr(directsdk, 'SESSION_PARKED_IDLE_SECONDS', 3600, raising=False)
     time.sleep(0.25)
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': call.id, 'content': 'result'}
                                      for call in first.choices[0].message.tool_calls]
-    response = step(warm.client(), messages)
-    assert response.usage.model_dump()['native_admission']['warm'] == 'reused'
-    assert alive(old) and len(warm.spawned()) == 1
+    response = step(rig.client(), messages)
+    assert response.usage.model_dump()['native_admission']['session'] == 'reused'
+    assert alive(old) and len(rig.spawned()) == 1
     # Settled user-idle sessions still expire at the shorter limit.
     time.sleep(0.25)
     messages += [as_history(response), {'role': 'user', 'content': 'next'}]
-    assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] != 'reused'
-    assert not alive(old) and len(warm.spawned()) == 2
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] != 'reused'
+    assert not alive(old) and len(rig.spawned()) == 2
 
 
-def test_lru_evicts_a_user_idle_session_before_a_tool_parked_one(warm, monkeypatch):
-    monkeypatch.setattr(directsdk, 'WARM_POOL_SIZE', 2)
+def test_lru_evicts_a_user_idle_session_before_a_tool_parked_one(rig, monkeypatch):
+    monkeypatch.setattr(directsdk, 'SESSION_POOL_SIZE', 2)
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(warm.client(), messages)
-    (parked,) = directsdk._warm_pool
-    step(warm.client(), [{'role': 'user', 'content': 'idle conversation'}])
-    idle = next(session for session in directsdk._warm_pool if session is not parked)
+    first = step(rig.client(), messages)
+    (parked,) = directsdk._session_pool
+    step(rig.client(), [{'role': 'user', 'content': 'idle conversation'}])
+    idle = next(session for session in directsdk._session_pool if session is not parked)
     # Explicit ordering avoids relying on clock resolution or launch timing.
     parked.last_used, idle.last_used = time.monotonic() - 1, time.monotonic()
-    step(warm.client(), [{'role': 'user', 'content': 'third conversation'}])
-    assert parked.alive() and not idle.alive() and len(directsdk._warm_pool) == 2
+    step(rig.client(), [{'role': 'user', 'content': 'third conversation'}])
+    assert parked.alive() and not idle.alive() and len(directsdk._session_pool) == 2
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': call.id, 'content': 'result'}
                                      for call in first.choices[0].message.tool_calls]
-    assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] == 'reused'
-    assert len(warm.spawned()) == 3
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    assert len(rig.spawned()) == 3
 
 
-@pytest.mark.parametrize('size', [49_999, 50_001, 100_000, directsdk.WARM_ROUND_SAFE - len('small')])
-def test_large_results_reach_upstream_intact_over_mcp(warm, tmp_path, size):
+@pytest.mark.parametrize('size', [49_999, 50_001, 100_000, directsdk.SESSION_ROUND_SAFE - len('small')])
+def test_large_results_reach_upstream_intact_over_mcp(rig, tmp_path, size):
     """tools/list advertises anthropic/maxResultSizeChars, so a result past native's 50,000 default is not persisted."""
     big = ''.join('line %06d of a large tool result\n' % i for i in range(size // 31 + 1))[:size]
-    messages, response, sent = tool_round(warm, big)
+    messages, response, sent = tool_round(rig, big)
     admission = response.usage.model_dump()['native_admission']
-    assert admission['warm'] == 'reused' and 'unrestored' not in admission
-    assert len(warm.upstream.bodies) == sent + 1 and upstream_results(warm.upstream.bodies[-1]) == [big, 'small']
+    assert admission['session'] == 'reused' and 'unrestored' not in admission
+    assert len(rig.upstream.bodies) == sent + 1 and upstream_results(rig.upstream.bodies[-1]) == [big, 'small']
     assert response.choices[0].message.content == 'got ' + big + '+small'
-    assert not persisted(tmp_path) and len(warm.spawned()) == 1
-    # The session stays warm with Hermes' text in its own history.
+    assert not persisted(tmp_path) and len(rig.spawned()) == 1
+    # The session stays live with Hermes' text in its own history.
     messages += [as_history(response), {'role': 'user', 'content': 'next'}]
-    assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] == 'reused'
-    assert upstream_results(warm.upstream.bodies[-1]) == [big, 'small']
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    assert upstream_results(rig.upstream.bodies[-1]) == [big, 'small']
 
 
-@pytest.mark.parametrize('big, is_error', [('x' * (directsdk.WARM_RESULT_CHARS + 1), False),
+@pytest.mark.parametrize('big, is_error', [('x' * (directsdk.SESSION_RESULT_CHARS + 1), False),
                                            # 250,001 code points are 500,002 UTF-16 units, which is what native counts.
-                                           ('\U0001F600' * (directsdk.WARM_RESULT_CHARS // 2 + 1), False),
+                                           ('\U0001F600' * (directsdk.SESSION_RESULT_CHARS // 2 + 1), False),
                                            ('E' * 20_000, True)], ids=['over-ceiling', 'over-ceiling-in-utf16', 'long-error'])
-def test_a_result_native_would_rewrite_is_replayed_on_a_new_native(warm, tmp_path, caplog, big, is_error):
+def test_a_result_native_would_rewrite_is_replayed_on_a_new_native(rig, tmp_path, caplog, big, is_error):
     """Never delivered over MCP: the parked session is killed and the step replays the history, one upstream request."""
     caplog.set_level('INFO', logger=directsdk.__name__)
-    messages, response, sent = tool_round(warm, big, is_error)
+    messages, response, sent = tool_round(rig, big, is_error)
     admission = response.usage.model_dump()['native_admission']
-    assert admission == {'upstream_requests': 1, 'blocked_requests': 0, 'request_id': None, 'warm': 'rebuild:oversize'}
-    assert len(warm.upstream.bodies) == sent + 1 and upstream_results(warm.upstream.bodies[-1]) == [big, 'small']
-    old, new = [s['pid'] for s in warm.spawned()]
+    assert admission == {'upstream_requests': 1, 'blocked_requests': 0, 'request_id': None, 'session': 'rebuild:oversize'}
+    assert len(rig.upstream.bodies) == sent + 1 and upstream_results(rig.upstream.bodies[-1]) == [big, 'small']
+    old, new = [s['pid'] for s in rig.spawned()]
     assert not alive(old) and not persisted(tmp_path)
     assert 'reason=tool-result-over-mcp-limit' in caplog.text
-    # The rebuilt native holds the full text and serves the next step warm.
+    # The rebuilt native holds the full text and serves the next step rig.
     messages += [as_history(response), {'role': 'user', 'content': 'next'}]
-    again = step(warm.client(), messages)
-    assert again.usage.model_dump()['native_admission']['warm'] == 'reused' and len(warm.spawned()) == 2
-    assert upstream_results(warm.upstream.bodies[-1]) == [big, 'small']
+    again = step(rig.client(), messages)
+    assert again.usage.model_dump()['native_admission']['session'] == 'reused' and len(rig.spawned()) == 2
+    assert upstream_results(rig.upstream.bodies[-1]) == [big, 'small']
 
 
-def test_a_delivered_result_native_rewrote_is_answered_then_replayed(warm, tmp_path, caplog):
+def test_a_delivered_result_native_rewrote_is_answered_then_replayed(rig, tmp_path, caplog):
     """Defense in depth: a CLI that persists below the advertised limit costs this step's text, never later steps."""
     caplog.set_level('INFO', logger=directsdk.__name__)
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    client = warm.client()
+    client = rig.client()
     client.env['FAKE_PERSIST_LIMIT'] = '1000'
     first = step(client, messages)
     calls = first.choices[0].message.tool_calls
     big = 'B' * 2_000
     messages += [as_history(first), {'role': 'tool', 'tool_call_id': calls[0].id, 'content': big}, {'role': 'tool', 'tool_call_id': calls[1].id, 'content': 'small'}]
-    response = step(warm.client(), messages)
+    response = step(rig.client(), messages)
     admission = response.usage.model_dump()['native_admission']
-    assert admission['warm'] == 'reused' and admission['unrestored']
+    assert admission['session'] == 'reused' and admission['unrestored']
     assert response.choices[0].message.content.startswith('got <persisted-output>') and len(persisted(tmp_path)) == 1
-    assert not directsdk._warm_pool and 'unrestored=1' in caplog.text and 'reason=native-rewrote-tool-result' in caplog.text
+    assert not directsdk._session_pool and 'unrestored=1' in caplog.text and 'reason=native-rewrote-tool-result' in caplog.text
     messages += [as_history(response), {'role': 'user', 'content': 'next'}]
-    again = step(warm.client(), messages)
-    assert again.usage.model_dump()['native_admission']['warm'] == 'cold'
-    assert upstream_results(warm.upstream.bodies[-1]) == [big, 'small']
+    again = step(rig.client(), messages)
+    assert again.usage.model_dump()['native_admission']['session'] == 'cold'
+    assert upstream_results(rig.upstream.bodies[-1]) == [big, 'small']
 
 
-def test_intact_results_forwarded_in_another_order_stay_warm(warm):
+def test_intact_results_forwarded_in_another_order_keep_the_session(rig):
     """Unrestored alone is no rewrite: the same texts in another order keep the session."""
-    client = warm.client()
+    client = rig.client()
     client.env['FAKE_REVERSE'] = '1'
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(client, messages)
     calls = first.choices[0].message.tool_calls
     messages += [as_history(first), {'role': 'tool', 'tool_call_id': calls[0].id, 'content': 'APPLE'}, {'role': 'tool', 'tool_call_id': calls[1].id, 'content': 'BANANA'}]
-    response = step(warm.client(), messages)
+    response = step(rig.client(), messages)
     admission = response.usage.model_dump()['native_admission']
-    assert admission['warm'] == 'reused' and admission['unrestored'] and response.choices[0].message.content == 'got BANANA+APPLE'
+    assert admission['session'] == 'reused' and admission['unrestored'] and response.choices[0].message.content == 'got BANANA+APPLE'
     messages += [as_history(response), {'role': 'user', 'content': 'next'}]
-    assert step(warm.client(), messages).usage.model_dump()['native_admission']['warm'] == 'reused'
-    assert len(warm.spawned()) == 1
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    assert len(rig.spawned()) == 1
 
 
-def _set_warm(value):
-    """Write the setting where `hermes config set plugins.entries.<id>.settings.warm_session` puts it."""
+def _set_session_mode(value):
+    """Write the setting where `hermes config set plugins.entries.<id>.settings.session_mode` puts it."""
     import directsdk_setup
     from hermes_cli.config import get_config_path
-    get_config_path().write_text("plugins:\n  enabled: []\n  entries:\n    %s:\n      settings:\n        warm_session: %s\n"
+    get_config_path().write_text("plugins:\n  enabled: []\n  entries:\n    %s:\n      settings:\n        session_mode: %s\n"
                                  % (directsdk_setup.PLUGIN_ID, value), encoding='utf-8')
 
 
 @pytest.mark.parametrize('setting, env, expected', [
     (None, {}, False), ('true', {}, True), ('false', {}, False), ('"on"', {}, True), ("''", {}, False), ('null', {}, False),
-    ('true', {'CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM': '0'}, False), ('false', {'CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM': '1'}, True),
-    ('true', {'CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM': ''}, True)])
-def test_warm_follows_the_profile_setting_unless_the_env_flag_is_set(profile, setting, env, expected):
+    ('true', {'CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE': '0'}, False), ('false', {'CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE': '1'}, True),
+    ('true', {'CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE': ''}, True)])
+def test_session_follows_the_profile_setting_unless_the_env_flag_is_set(profile, setting, env, expected):
     if setting is not None:
-        _set_warm(setting)
-    assert directsdk._warm_enabled(env) is expected
+        _set_session_mode(setting)
+    assert directsdk._session_enabled(env) is expected
 
 
-def test_each_profile_of_a_multi_profile_process_reads_its_own_warm_setting(profile, tmp_path):
+def test_each_profile_of_a_multi_profile_process_reads_its_own_session_setting(profile, tmp_path):
     """A desktop backend or gateway serving several profiles loads only its launch home's .env: the setting is per profile."""
     from hermes_constants import reset_hermes_home_override, set_hermes_home_override
-    warm_home = tmp_path / 'warm-profile'
-    warm_home.mkdir()
-    token = set_hermes_home_override(warm_home)
+    session_home = tmp_path / 'session-profile'
+    session_home.mkdir()
+    token = set_hermes_home_override(session_home)
     try:
-        _set_warm('true')
-        assert directsdk._warm_enabled({}) is True
+        _set_session_mode('true')
+        assert directsdk._session_enabled({}) is True
     finally:
         reset_hermes_home_override(token)
-    assert directsdk._warm_enabled({}) is False
+    assert directsdk._session_enabled({}) is False
 
 
-def test_the_profile_setting_alone_turns_warm_sessions_on(profile, warm):
-    _set_warm('true')
+def test_the_profile_setting_alone_turns_session_modes_on(profile, rig):
+    _set_session_mode('true')
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
-    first = step(warm.client(drop=('CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM',)), messages)
-    assert first.usage.model_dump()['native_admission']['warm'] == 'cold'
+    first = step(rig.client(drop=('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE',)), messages)
+    assert first.usage.model_dump()['native_admission']['session'] == 'cold'
     calls = first.choices[0].message.tool_calls
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': c.id[-4:]} for c in calls]
-    second = step(warm.client(drop=('CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM',)), messages)
-    assert second.usage.model_dump()['native_admission']['warm'] == 'reused'
-    (spawned,) = warm.spawned()
+    second = step(rig.client(drop=('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE',)), messages)
+    assert second.usage.model_dump()['native_admission']['session'] == 'reused'
+    (spawned,) = rig.spawned()
     assert spawned['argv'][spawned['argv'].index('--allowedTools') + 1] == 'mcp__hermes'

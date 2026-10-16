@@ -28,11 +28,11 @@ from types import SimpleNamespace
 try:
     from .admission import Admission
     from .model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
-    from .directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, warm_session_enabled
+    from .directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled
 except ImportError:
     from admission import Admission
     from model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
-    from directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, warm_session_enabled
+    from directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled
 
 
 # Hermes picks retry vs fallback from an error's status_code (main loop and auxiliary ladder alike).
@@ -574,7 +574,7 @@ class Client:
         for request in requests:
             request.cancel()
         # A conversation parked on tool calls this client returned is cancelled too, never reused.
-        _warm_cancel_owned(self)
+        _session_cancel_owned(self)
 
     def close(self):
         with self._lock:
@@ -625,9 +625,9 @@ class Client:
             if self._closed:
                 raise RuntimeError('Claude client is closed')
             self._requests.add(request)
-        # Warm mode serves tool-bearing agent steps only; auxiliary one-shots (titles, summaries) stay per-call.
-        warm = kwargs.get('tools') and _warm_enabled(self.env if self.env is not None else os.environ)
-        run = self._run_warm if warm else self._run
+        # Session mode serves tool-bearing agent steps only; auxiliary one-shots (titles, summaries) stay per-call.
+        session = kwargs.get('tools') and _session_enabled(self.env if self.env is not None else os.environ)
+        run = self._run_session if session else self._run
         stream = Stream(run(request, kwargs, body, manifest, names, system, frames), request)
         if kwargs.get('stream'):
             return stream
@@ -653,7 +653,7 @@ class Client:
         apply_config_dir(env)
         # An inherited effort level would override the --effort Hermes passes below. An inherited entrypoint (Hermes
         # started from a Claude Code or desktop session) makes native act as that host: the desktop one sends a summary
-        # request after each final answer, which the relay denies, and a denial ends a warm session.
+        # request after each final answer, which the relay denies, and a denial ends a session.
         for key in ('CLAUDE_CODE_EXTRA_BODY', 'CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_ENTRYPOINT'):
             env.pop(key, None)
         env.update(ENABLE_TOOL_SEARCH='false', CLAUDE_CODE_MAX_RETRIES='0', DISABLE_AUTO_COMPACT='1', DISABLE_COMPACT='1')
@@ -886,7 +886,7 @@ class Client:
             with self._lock:
                 self._requests.discard(request)
 
-    def _run_warm(self, request, kwargs, body, manifest, names, system, frames):
+    def _run_session(self, request, kwargs, body, manifest, names, system, frames):
         """One Hermes step on a live native session; any mismatch rebuilds it from the full history."""
         hermes_names = {native: hermes for hermes, native in names.items()}
         started = time.monotonic()
@@ -899,15 +899,15 @@ class Client:
         # Every step re-runs baseline's launch guards; the launch configuration is part of reuse identity.
         env, resolved = self._native_env()
         # Only what decides native auth/config; per-process values (CLAUDE_PID, session ids) must not force rebuilds.
-        launch = [resolved, sorted((k, v) for k, v in env.items() if k in _WARM_LAUNCH_KEYS or k.startswith(_WARM_LAUNCH_PREFIXES))]
+        launch = [resolved, sorted((k, v) for k, v in env.items() if k in _SESSION_LAUNCH_KEYS or k.startswith(_SESSION_LAUNCH_PREFIXES))]
         ident = hashlib.sha256(json.dumps([kwargs['model'], body, system, launch]).encode('utf-8')).hexdigest()
         login = hashlib.sha256(json.dumps(launch).encode('utf-8')).hexdigest()
         first = next((k for k, m in zip(keys, messages) if m.get('role') == 'assistant'), None)
-        session, how = _warm_checkout(ident, keys, messages, first, login)
+        session, how = _session_checkout(ident, keys, messages, first, login)
         if session is None:
-            session = WarmSession(ident, first, login)
-            if not _warm_admit(session):
-                # Every warm slot is busy: this step takes the per-call path instead of exceeding the cap.
+            session = NativeSession(ident, first, login)
+            if not _session_admit(session):
+                # Every session slot is busy: this step takes the per-call path instead of exceeding the cap.
                 yield from self._run(request, kwargs, body, manifest, names, system, frames)
                 return
             spawn = True
@@ -931,12 +931,12 @@ class Client:
                                                       for tool_id in order])
                     session.deliver(results)
             else:
-                self._warm_spawn(session, request, kwargs, body, manifest, system, frames, timeout, env, resolved)
+                self._session_spawn(session, request, kwargs, body, manifest, system, frames, timeout, env, resolved)
             emitted, native_error, native_error_code, final = '', None, None, None
             while True:
                 event = session.receive(request, timeout)
                 if event is None:
-                    raise RuntimeError('Native exited during a warm step')
+                    raise RuntimeError('Native exited during a session step')
                 kind = event.get('type')
                 if kind == 'assistant' and (event.get('error') or event.get('message', {}).get('error')):
                     native_error = '\n'.join(b.get('text', '') for b in event.get('message', {}).get('content', []) if b.get('type') == 'text')
@@ -984,7 +984,7 @@ class Client:
             if poisoned and not refused and not admission.denied:
                 raise ClaudeAPIError('Native API error: ' + (native_error or str(final.get('subtype'))), NATIVE_ERROR_STATUS.get(str(native_error_code)))
             # Native persisted or truncated a result it got over MCP: its history keeps that rewrite, so answer, then replay
-            # next step. Intact results in another order are unrestored too, and stay warm.
+            # next step. Intact results in another order are unrestored too, and keep the session.
             lossy = bool(admission.unrestored) and any(not text.startswith(results[i][0]) for i, text in rewritten.items())
             poisoned = poisoned or lossy
             blocks = assistant['content']
@@ -1024,14 +1024,14 @@ class Client:
                                 'completion_tokens_details': {'reasoning_tokens': thinking},
                                 # Native reports cost only per whole native turn; a step has no list-price figure of its own.
                                 'native_cost': {'total_cost_usd': None, 'modelUsage': None}}
-            normalized_usage['native_admission'] = {'upstream_requests': int(admission.used), 'blocked_requests': admission.denied, 'request_id': admission.request_id, 'warm': how}
+            normalized_usage['native_admission'] = {'upstream_requests': int(admission.used), 'blocked_requests': admission.denied, 'request_id': admission.request_id, 'session': how}
             if admission.unrestored:
                 normalized_usage['native_admission']['unrestored'] = admission.unrestored
             finish = 'content_filter' if refused else 'tool_calls' if calls else ('length' if assistant.get('stop_reason') in ('max_tokens', 'model_context_window_exceeded') else 'stop')
             response = obj({'id': assistant.get('id', 'claude-native'), 'model': kwargs['model'], 'object': 'chat.completion', 'choices': [{'index': 0, 'finish_reason': finish, 'message': message}], 'usage': normalized_usage})
             chunk = self._chunk(kwargs['model'], {'content': None, 'tool_calls': [dict(tc, index=i) for i, tc in enumerate(calls)] or None, 'reasoning_details': [carrier], **({'refusal': message['refusal']} if refused else {})}, finish, normalized_usage)
             chunk._response = response
-            _warm_log.info('warm step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s',
+            _session_log.info('session step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s',
                            session.ident[:8] + ':' + str(session.pid), how, int(admission.used), admission.denied, bool(admission.unrestored), time.monotonic() - started,
                            usage['input_tokens'], usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0), usage['output_tokens'], thinking, len(calls), assistant.get('stop_reason'), assistant.get('id'))
             # Settle before the final yield: a caller closing the stream after it must not kill a healthy session.
@@ -1042,13 +1042,13 @@ class Client:
                 session.owner = weakref.ref(self)
                 session.expect = frozenset(c['id'] for c in calls) if calls else 'user'
                 # False when cancel() landed during this handoff: the session was killed, never published.
-                done = _warm_release(session, request)
+                done = _session_release(session, request)
             yield chunk
         except Exception as error:
-            # A warm launch or session that fails before admission (a CLI without the warm protocol, a native that
+            # A session launch or session that fails before admission (a CLI without the session protocol, a native that
             # died while parked) serves this step per-call. Admitted, streamed, cancelled or refused steps stay errors.
             session.detach(request)
-            _warm_discard(session)
+            _session_discard(session)
             done = True
             admission = session.admission
             if admission is not None:
@@ -1056,16 +1056,16 @@ class Client:
             refused = isinstance(error, (ValueError, ClaudeCodeMissing, ClaudeCodeLoggedOut)) or (isinstance(error, ClaudeAPIError) and error.status_code is not None)
             if yielded or refused or request.cancelled.is_set() or (admission is not None and admission.used):
                 raise
-            _warm_log.info('warm fallback: session=%s per-call after %s', session.ident[:8] + ':' + str(session.pid), type(error).__name__)
+            _session_log.info('session fallback: session=%s per-call after %s', session.ident[:8] + ':' + str(session.pid), type(error).__name__)
             yield from self._run(request, kwargs, body, manifest, names, system, frames)
         finally:
             if session is not None and not done:
                 session.detach(request)
-                _warm_discard(session, 'native-rewrote-tool-result' if lossy else 'step-failed-or-poisoned')
+                _session_discard(session, 'native-rewrote-tool-result' if lossy else 'step-failed-or-poisoned')
             with self._lock:
                 self._requests.discard(request)
 
-    def _warm_spawn(self, session, request, kwargs, body, manifest, system, frames, timeout, env, resolved):
+    def _session_spawn(self, session, request, kwargs, body, manifest, system, frames, timeout, env, resolved):
         # MCP replies enter a kept-alive native as text-block lists. Replaying
         # Hermes' scalar tool results must use that same cache-prefix shape.
         frames = copy.deepcopy(frames)
@@ -1073,7 +1073,7 @@ class Client:
             for block in frame['message']['content']:
                 if block.get('type') == 'tool_result' and isinstance(block.get('content'), str):
                     block['content'] = [{'type': 'text', 'text': block['content']}]
-        root = Path(tempfile.mkdtemp(prefix='claude-directsdk-warm-'))
+        root = Path(tempfile.mkdtemp(prefix='claude-directsdk-session-'))
         session.root, session.manifest = root, manifest
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.
         env.update(MCP_TOOL_TIMEOUT='86400000', MAX_MCP_OUTPUT_TOKENS='100000000')
@@ -1119,7 +1119,7 @@ class Client:
 
 
 # ---------------------------------------------------------------------------------------------
-# Warm mode (opt-in, CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM=1): one live native session per Hermes
+# Session mode (opt-in, CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE=1): one live native session per Hermes
 # conversation. Hermes still receives every tool call and runs it; native's call to the hermes
 # SDK MCP server parks until the next step brings Hermes' result. Sessions are found by history,
 # never by client identity (Hermes builds request-local clients and closes them freely).
@@ -1127,35 +1127,35 @@ class Client:
 # A user-idle session is kept about as long as native's prompt cache (1 h TTL from the last request): while it stays in
 # the pool and its cache is live, a reply reuses it and reads the history from cache, whereas a respawn replays the
 # history and writes part of it again. Both defaults stay below native's 3,900 s clear_tool_uses idle trigger.
-WARM_IDLE_SECONDS = float(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_IDLE_SECONDS') or 3600)
-WARM_PARKED_IDLE_SECONDS = float(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_PARKED_IDLE_SECONDS') or 3600)
-WARM_POOL_SIZE = int(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM_POOL') or 8)
+SESSION_IDLE_SECONDS = float(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_IDLE_SECONDS') or 3600)
+SESSION_PARKED_IDLE_SECONDS = float(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_PARKED_IDLE_SECONDS') or 3600)
+SESSION_POOL_SIZE = int(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_POOL') or 8)
 # Native persists an MCP result longer than the tool's maxResultSizeChars (UTF-16 units; 50,000 for an MCP tool
 # without _meta) under <config>/projects/.../tool-results and keeps a ~2 KB <persisted-output> stub in its history.
 # _meta raises the limit up to native's hard ceiling (500,000 in 2.1.285). Longer results, and is_error results native
 # middle-truncates past 11,024 chars, go through a full replay instead; the margin covers a CLI that wraps the text.
-WARM_RESULT_CHARS = 500_000
-WARM_RESULT_SAFE, WARM_ERROR_SAFE = WARM_RESULT_CHARS - 5_000, 10_000
+SESSION_RESULT_CHARS = 500_000
+SESSION_RESULT_SAFE, SESSION_ERROR_SAFE = SESSION_RESULT_CHARS - 5_000, 10_000
 # Native's optional per-message tool-result budget (tengu_hawthorn_steeple) counts UTF-16 units.
-WARM_ROUND_CHARS = 200_000
-WARM_ROUND_SAFE = WARM_ROUND_CHARS - 5_000
-_warm_log = logging.getLogger(__name__)
-_warm_lock = threading.Lock()
-_warm_pool = []
-_warm_reaper = None
+SESSION_ROUND_CHARS = 200_000
+SESSION_ROUND_SAFE = SESSION_ROUND_CHARS - 5_000
+_session_log = logging.getLogger(__name__)
+_session_lock = threading.Lock()
+_session_pool = []
+_session_reaper = None
 # The telemetry setting (applied per spawn) and the proxy route are fixed for a session's life: a change starts a new one.
-_WARM_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
+_SESSION_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
                      'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy')
-_WARM_LAUNCH_PREFIXES = ('ANTHROPIC_', 'CLAUDE_SUBSCRIPTION_DIRECTSDK_', 'CLAUDE_CODE_USE_')
+_SESSION_LAUNCH_PREFIXES = ('ANTHROPIC_', 'CLAUDE_SUBSCRIPTION_DIRECTSDK_', 'CLAUDE_CODE_USE_')
 
 
-def _warm_enabled(env):
-    """CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM when set, on or off; otherwise the active profile's warm_session setting.
+def _session_enabled(env):
+    """CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE when set, on or off; otherwise the active profile's session_mode setting.
 
     A multi-profile desktop backend or gateway loads only its launch home's .env into the process environment,
-    so the setting is how a routed profile turns warm mode on."""
-    value = (env.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_WARM') or '').strip().lower()
-    return value in ('1', 'true', 'yes', 'on') if value else warm_session_enabled()
+    so the setting is how a routed profile turns session mode on."""
+    value = (env.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE') or '').strip().lower()
+    return value in ('1', 'true', 'yes', 'on') if value else session_mode_enabled()
 
 
 def _message_key(message):
@@ -1170,7 +1170,7 @@ def _message_key(message):
     return json.dumps([role, message.get('content')], sort_keys=True)
 
 
-def _warm_expects(expect, suffix):
+def _session_expects(expect, suffix):
     if not suffix:
         return False
     if expect == 'user':
@@ -1183,14 +1183,14 @@ def _utf16_len(text):
     return len(text) if text.isascii() else len(text.encode('utf-16-le', 'surrogatepass')) // 2
 
 
-def _warm_oversize(message):
+def _session_oversize(message):
     """A Hermes tool result native would not keep verbatim if it arrived as an MCP reply (it measures UTF-16 units)."""
-    content, limit = message['content'], WARM_ERROR_SAFE if message.get('is_error') else WARM_RESULT_SAFE
+    content, limit = message['content'], SESSION_ERROR_SAFE if message.get('is_error') else SESSION_RESULT_SAFE
     return len(content) > limit or (2 * len(content) > limit and _utf16_len(content) > limit)
 
 
-def _warm_idle_limit(session):
-    return WARM_IDLE_SECONDS if session.expect == 'user' else max(WARM_IDLE_SECONDS, WARM_PARKED_IDLE_SECONDS)
+def _session_idle_limit(session):
+    return SESSION_IDLE_SECONDS if session.expect == 'user' else max(SESSION_IDLE_SECONDS, SESSION_PARKED_IDLE_SECONDS)
 
 
 def _native_text(content):
@@ -1199,7 +1199,7 @@ def _native_text(content):
     return ''.join(b.get('text', '') for b in content or [] if isinstance(b, dict) and b.get('type') == 'text')
 
 
-class WarmSession:
+class NativeSession:
     def __init__(self, ident, first, login=None):
         self.ident, self.first, self.login = ident, first, login
         self.consumed, self.expect = [], None
@@ -1259,7 +1259,7 @@ class WarmSession:
             if method == 'initialize':
                 result = {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'hermes', 'version': '1'}}
             elif method == 'tools/list':
-                result = {'tools': [dict(tool, _meta={'anthropic/maxResultSizeChars': WARM_RESULT_CHARS}) for tool in self.manifest]}
+                result = {'tools': [dict(tool, _meta={'anthropic/maxResultSizeChars': SESSION_RESULT_CHARS}) for tool in self.manifest]}
             self._reply(request_id, {'jsonrpc': '2.0', 'id': message['id'], 'result': result} if 'id' in message else {'jsonrpc': '2.0', 'result': {}})
 
     def _reply(self, request_id, mcp_response):
@@ -1301,7 +1301,7 @@ class WarmSession:
             if self.killed:
                 return
             self.killed = True
-        _warm_log.info('warm kill: session=%s reason=%s', self.ident[:8] + ':' + str(self.pid), reason)
+        _session_log.info('session kill: session=%s reason=%s', self.ident[:8] + ':' + str(self.pid), reason)
         if self.process is not None:
             kill_process_tree(self.process)
             try:
@@ -1314,7 +1314,7 @@ class WarmSession:
             shutil.rmtree(self.root, ignore_errors=True)
 
 
-def _warm_checkout(ident, keys, messages, first, login=None):
+def _session_checkout(ident, keys, messages, first, login=None):
     """The idle session whose consumed history prefixes this request and expects its suffix, marked busy.
 
     A session of the same conversation (same first answer) is retired when that conversation diverged
@@ -1322,14 +1322,14 @@ def _warm_checkout(ident, keys, messages, first, login=None):
     system prompt, tools or generation fields is a fork, such as a review on another model: both stay,
     and the idle limit and pool LRU reclaim whichever goes unused."""
     now, stale, matches, how, oversize = time.monotonic(), [], [], 'cold', None
-    with _warm_lock:
-        for session in list(_warm_pool):
+    with _session_lock:
+        for session in list(_session_pool):
             if session.busy:
                 continue
             n = len(session.consumed)
-            if not session.alive() or now - session.last_used > _warm_idle_limit(session):
+            if not session.alive() or now - session.last_used > _session_idle_limit(session):
                 stale.append(session)
-            elif session.ident == ident and keys[:n] == session.consumed and _warm_expects(session.expect, messages[n:]):
+            elif session.ident == ident and keys[:n] == session.consumed and _session_expects(session.expect, messages[n:]):
                 matches.append(session)
             elif first is not None and session.first == first and (session.ident == ident or session.login != login):
                 # This conversation diverged (compaction, edit, interrupt, changed prompt/tools/model).
@@ -1338,8 +1338,8 @@ def _warm_checkout(ident, keys, messages, first, login=None):
                 how = 'rebuild:' + why
         found = matches[0] if len(matches) == 1 else None
         suffix = messages[len(found.consumed):] if found is not None else []
-        if found is not None and found.expect != 'user' and (any(_warm_oversize(m) for m in suffix)
-                                                           or sum(_utf16_len(m['content']) for m in suffix) > WARM_ROUND_SAFE):
+        if found is not None and found.expect != 'user' and (any(_session_oversize(m) for m in suffix)
+                                                           or sum(_utf16_len(m['content']) for m in suffix) > SESSION_ROUND_SAFE):
             # Answered over MCP, native would rewrite this result (a stub, or a cut error): replay the history on a new native.
             stale.append(found)
             found, how, oversize = None, 'rebuild:oversize', found
@@ -1348,94 +1348,94 @@ def _warm_checkout(ident, keys, messages, first, login=None):
         elif matches:
             how = 'rebuild:ambiguous'  # never pick by pool order; replay instead
         for session in stale:
-            _warm_pool.remove(session)
+            _session_pool.remove(session)
     for session in stale:
         session.kill('tool-result-over-mcp-limit' if session is oversize else 'stale-or-diverged')
     return found, how
 
 
-def _warm_trim(room):
+def _session_trim(room):
     """Evict least-recently-used idle sessions until ``room`` more fit under the cap (caller holds the lock)."""
-    idle = sorted((s for s in _warm_pool if not s.busy), key=lambda s: (s.expect != 'user', s.last_used))
-    evict = idle[:max(0, len(_warm_pool) + room - WARM_POOL_SIZE)]
+    idle = sorted((s for s in _session_pool if not s.busy), key=lambda s: (s.expect != 'user', s.last_used))
+    evict = idle[:max(0, len(_session_pool) + room - SESSION_POOL_SIZE)]
     for s in evict:
-        _warm_pool.remove(s)
+        _session_pool.remove(s)
     return evict
 
 
-def _warm_admit(session):
+def _session_admit(session):
     """Reserve a pool slot for a new busy session; False when every slot is busy."""
-    global _warm_reaper
-    with _warm_lock:
+    global _session_reaper
+    with _session_lock:
         # Start the reaper before reserving anything: a failed start leaves no reservation and allows a retry.
-        if _warm_reaper is None:
-            reaper = threading.Thread(target=_warm_reap, daemon=True)
+        if _session_reaper is None:
+            reaper = threading.Thread(target=_session_reap, daemon=True)
             try:
                 reaper.start()
             except Exception as error:
-                _warm_log.warning('warm reaper did not start (%s); this step runs per-call', error)
+                _session_log.warning('session reaper did not start (%s); this step runs per-call', error)
                 return False
-            _warm_reaper = reaper
-        evict = _warm_trim(1)
-        admitted = len(_warm_pool) < WARM_POOL_SIZE
+            _session_reaper = reaper
+        evict = _session_trim(1)
+        admitted = len(_session_pool) < SESSION_POOL_SIZE
         if admitted:
-            _warm_pool.append(session)
+            _session_pool.append(session)
     for s in evict:
         s.kill('lru')
     return admitted
 
 
-def _warm_release(session, request):
+def _session_release(session, request):
     """Publish the settled session for reuse, unless its step was cancelled (then kill it). True when published.
 
     The owner is set before this runs, so a cancel() whose request flag lands after the check below still finds
-    the session idle and owned in _warm_cancel_owned (cancel flags requests first, then sweeps owned sessions)."""
-    with _warm_lock:
+    the session idle and owned in _session_cancel_owned (cancel flags requests first, then sweeps owned sessions)."""
+    with _session_lock:
         cancelled = request.cancelled.is_set()
         if cancelled:
-            if session in _warm_pool:
-                _warm_pool.remove(session)
+            if session in _session_pool:
+                _session_pool.remove(session)
             evict = [session]
         else:
             session.busy, session.last_used = False, time.monotonic()
-            evict = _warm_trim(0)
+            evict = _session_trim(0)
     for s in evict:
         s.kill('cancelled-during-handoff' if cancelled else 'lru')
     return not cancelled
 
 
-def _warm_cancel_owned(client):
-    with _warm_lock:
-        owned = [s for s in _warm_pool if not s.busy and s.owner() is client]
+def _session_cancel_owned(client):
+    with _session_lock:
+        owned = [s for s in _session_pool if not s.busy and s.owner() is client]
         for s in owned:
-            _warm_pool.remove(s)
+            _session_pool.remove(s)
     for s in owned:
         s.kill('cancelled-while-parked')
 
 
-def _warm_discard(session, reason='step-failed-or-poisoned'):
-    with _warm_lock:
-        if session in _warm_pool:
-            _warm_pool.remove(session)
+def _session_discard(session, reason='step-failed-or-poisoned'):
+    with _session_lock:
+        if session in _session_pool:
+            _session_pool.remove(session)
     session.kill(reason)
 
 
-def _warm_reap():
+def _session_reap():
     while True:
-        time.sleep(min(30, WARM_IDLE_SECONDS / 2))
+        time.sleep(min(30, SESSION_IDLE_SECONDS / 2))
         now = time.monotonic()
-        with _warm_lock:
-            stale = [s for s in _warm_pool if not s.busy and (not s.alive() or now - s.last_used > _warm_idle_limit(s))]
+        with _session_lock:
+            stale = [s for s in _session_pool if not s.busy and (not s.alive() or now - s.last_used > _session_idle_limit(s))]
             for s in stale:
-                _warm_pool.remove(s)
+                _session_pool.remove(s)
         for s in stale:
             s.kill('idle-reaper')
 
 
 @atexit.register
-def _warm_shutdown():
-    with _warm_lock:
-        sessions = list(_warm_pool)
-        _warm_pool.clear()
+def _session_shutdown():
+    with _session_lock:
+        sessions = list(_session_pool)
+        _session_pool.clear()
     for session in sessions:
         session.kill('exit')

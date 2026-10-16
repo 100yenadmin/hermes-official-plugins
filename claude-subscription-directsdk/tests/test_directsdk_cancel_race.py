@@ -1,4 +1,4 @@
-"""Deterministically interleave warm detach between cancel's check and abort."""
+"""Deterministically interleave session detach between cancel's check and abort."""
 import inspect
 import sys
 from types import SimpleNamespace
@@ -20,7 +20,7 @@ def test_cancel_captures_admission_before_detach_and_still_sweeps_parked(monkeyp
     request.admission = SimpleNamespace(abort=abort)
     request.process = object()
     client._requests.add(request)
-    monkeypatch.setattr(directsdk, '_warm_cancel_owned', lambda owner: swept.append(owner))
+    monkeypatch.setattr(directsdk, '_session_cancel_owned', lambda owner: swept.append(owner))
     # A line trace pauses immediately before the abort expression. In the old
     # code the preceding None check succeeded, but detach clears the attribute
     # before its second lookup. The fixed code uses the reference it captured.
@@ -29,7 +29,7 @@ def test_cancel_captures_admission_before_detach_and_still_sweeps_parked(monkeyp
 
     def trace(frame, event, arg):
         if frame.f_code is directsdk.Request.cancel.__code__ and event == 'line' and frame.f_lineno == abort_line:
-            directsdk.WarmSession.detach(request)
+            directsdk.NativeSession.detach(request)
             detached.append(True)
         return trace
 
