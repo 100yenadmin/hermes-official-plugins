@@ -729,7 +729,7 @@ def test_refusal_after_a_tool_call_is_content_filter_and_never_reused(rig, strea
 
 
 def test_failures_carry_the_status_hermes_routes_on(rig):
-    """144bd1d (#58): a relayed upstream status and a native-answered limit both reach Hermes as status_code."""
+    """A relayed upstream status and a native-answered limit both reach Hermes as status_code."""
     with pytest.raises(directsdk.ClaudeAPIError, match='Incomplete upstream response') as upstream:
         step(rig.client(), [{'role': 'user', 'content': 'hit the limit'}])
     assert upstream.value.status_code == 429
@@ -743,7 +743,7 @@ def test_failures_carry_the_status_hermes_routes_on(rig):
 
 @pytest.mark.parametrize('trigger, offered', [('ghost', 'mcp__hermes__ghost'), ('bare', 'mcp__hermes__probe')])
 def test_unparked_tool_names_go_to_hermes_and_rebuild(rig, trigger, offered):
-    """4336364 (#39) / 218d5e4 (#62): Hermes gets the call; native never parked it, so the next step replays."""
+    """A call outside the inventory or a bare offered name (#39, #62): Hermes gets the call; native never parked it, so the next step replays."""
     messages = [{'role': 'user', 'content': 'call ' + trigger}]
     first = step(rig.client(), messages)
     (call,) = first.choices[0].message.tool_calls

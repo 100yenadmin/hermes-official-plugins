@@ -37,7 +37,7 @@ config_schema:
     label: Session mode (experimental)
     description: >-
       Keep one Claude Code process alive per conversation instead of starting one for every model
-      call, so Claude keeps its thinking between tool rounds and steps start faster. The
+      call, so steps start faster and every request of a conversation comes from the same process. The
       CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE environment variable overrides this setting when set.
   session_pool:
     type: int

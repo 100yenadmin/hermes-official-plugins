@@ -111,7 +111,7 @@ It is read for the active profile on every spawn, so it applies to the next requ
 | | Per-call | Session mode |
 |---|---|---|
 | RAM | One short-lived process per call | One process (about 400 MB) per live conversation, up to the pool cap |
-| Speed | Spawns Claude Code and replays the history on every call | No spawn or replay while the session lives; Claude keeps its thinking between tool rounds (#97, #83) |
+| Speed | Spawns Claude Code, replays the history and waits for it to exit on every call | No spawn, replay or exit while the session lives |
 | Robustness | Nothing outlives a call | Anything unexpected retires the session and replays the history on a new process; the fallbacks below end at per-call |
 
 Turn it on per profile with the `session_mode` setting (`hermes config set plugins.entries.claude-subscription-directsdk-experimental.settings.session_mode true`, or Desktop → Capabilities → Plugins), or with `CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE=1`; `0` forces it off, and the variable wins over the setting. A multi-profile desktop backend or gateway loads only its launch home's `.env`, so a routed profile uses the setting. Calls without tools (titles, summaries) always run per-call.

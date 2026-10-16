@@ -5,6 +5,7 @@
 ### Added
 
 - Per-profile `claude_config_dir` setting selects the Claude login for every native spawn in a multiplexed gateway (#34).
+- Opt-in session mode (`session_mode`, off by default): one Claude Code process per conversation, pool sized from physical RAM (`session_pool`), every failure path ending at per-call; replaces #79.
 
 ### Fixed
 

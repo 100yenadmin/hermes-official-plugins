@@ -967,7 +967,7 @@ class Client:
             admission = session.admission
             if native_error_code == 'authentication_failed' and not admission.used:
                 raise ClaudeCodeLoggedOut(f'{LOGGED_OUT_HINT} (native: {native_error})')
-            # Failures carry the status Hermes routes retry/fallback on, as in baseline (#58).
+            # Failures carry the status Hermes routes retry/fallback on, as per-call does.
             if native_error and not admission.used:
                 raise ClaudeAPIError('Native API error: ' + native_error, NATIVE_ERROR_STATUS.get(str(native_error_code)))
             if not admission.used or admission.status != 200 or not admission.capture.complete:
