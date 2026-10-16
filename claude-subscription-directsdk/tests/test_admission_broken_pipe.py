@@ -89,7 +89,9 @@ def test_a_real_handler_bug_still_prints(monkeypatch):
             s = socket.create_connection((host, port), timeout=3)
             s.send(f'GET {gate.prefix}/api/hello HTTP/1.1\r\nHost: {host}\r\n\r\n'.encode())
             import time
-            time.sleep(.3)
+            deadline = time.monotonic() + 5  # the server thread prints the traceback; a slow runner needs longer than .3 s
+            while 'RuntimeError' not in captured.getvalue() and time.monotonic() < deadline:
+                time.sleep(.05)
             s.close()
         assert 'RuntimeError' in captured.getvalue()
     finally:
