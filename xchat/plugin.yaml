@@ -1,4 +1,4 @@
-name: xchat-platform
+name: xchat
 label: X Chat (encrypted DMs)
 kind: platform
 version: 0.1.0
@@ -15,6 +15,8 @@ description: >
   E2EE keypairs, and persists the private-key blob under
   ``~/.hermes/xchat/`` (mode 600).
 author: NousResearch
+homepage: https://github.com/NousResearch/hermes-official-plugins/tree/main/xchat
+requires_hermes: ">=0.21.5"
 requires_env:
   - name: XCHAT_ACCESS_TOKEN
     description: "OAuth2 user access token with dm.read, dm.write, users.read, tweet.read scopes (set by `hermes xchat setup`)"

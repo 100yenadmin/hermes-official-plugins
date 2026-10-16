@@ -14,14 +14,14 @@ import pytest
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import MessageEvent, MessageType
-from plugins.platforms.xchat import adapter as xchat_adapter
-from plugins.platforms.xchat.adapter import (
+from xchat_plugin import adapter as xchat_adapter
+from xchat_plugin.adapter import (
     XChatAdapter,
     _compile_mention_patterns,
     _env_enablement,
     check_requirements,
 )
-from plugins.platforms.xchat.crypto import XChatCrypto, message_text
+from xchat_plugin.crypto import XChatCrypto, message_text
 
 
 # ---------------------------------------------------------------------------
@@ -649,7 +649,7 @@ def test_platform_registry_entry_parity():
 
     class Ctx:
         class manifest:
-            name = "xchat-platform"
+            name = "xchat"
 
         def register_platform(self, **kwargs):
             captured.update(kwargs)

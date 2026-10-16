@@ -129,8 +129,8 @@ def _read_key_blob() -> str:
 def check_requirements() -> bool:
     """True when the adapter is minimally configured (token + key material).
 
-    Deliberately does NOT import chatxdk — the native SDK lazy-installs at
-    connect time; a pre-flight check must stay cheap.
+    Deliberately does NOT import chatxdk (a native module): a pre-flight
+    check must stay cheap. A missing SDK surfaces at connect time.
     """
     if not HTTPX_AVAILABLE:
         return False
@@ -329,7 +329,7 @@ class XChatAdapter(BasePlatformAdapter):
             await self._teardown()
             return False
 
-        # Unlock the E2EE session. chatxdk lazy-installs here on first use.
+        # Unlock the E2EE session (first chatxdk import).
         try:
             crypto = XChatCrypto()
             crypto.load_keys(key_blob, self._signing_key_version)

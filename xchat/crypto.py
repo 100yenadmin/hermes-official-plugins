@@ -3,8 +3,7 @@
 A thin, network-free wrapper around the ``chat_xdk`` binding. Everything
 that touches the Chat XDK lives here so it can be unit-tested with a fake
 ``Chat`` object and so the adapter/API layers stay import-light. The SDK is
-lazy-installed at first use via ``tools.lazy_deps`` (feature key
-``platform.xchat``).
+declared in this plugin's ``pyproject.toml``; the plugin install prepares it.
 
 Responsibilities:
 
@@ -50,22 +49,19 @@ def _as_dict(obj: Any) -> dict[str, Any]:
 
 
 def _load_chat_xdk():
-    """Import (lazy-installing if needed) and return the ``chat_xdk`` module."""
+    """Return the ``chat_xdk`` module (``chatxdk``, declared in this plugin's pyproject)."""
     try:
         import chat_xdk  # type: ignore[import-not-found]
-        return chat_xdk
-    except ImportError:
-        pass
-    # Lazy-install path — same pattern as the telegram/matrix platform plugins.
-    from tools.lazy_deps import ensure as _lazy_ensure
-
-    _lazy_ensure("platform.xchat", prompt=False)
-    import chat_xdk  # type: ignore[import-not-found]
+    except ImportError as exc:
+        raise ImportError(
+            "X Chat needs the chatxdk package. Reinstall the plugin with its dependencies "
+            "(hermes plugins install xchat), or run: hermes pm repair"
+        ) from exc
     return chat_xdk
 
 
 def _load_chat_class():
-    """Import (lazy-installing if needed) and return ``chat_xdk.Chat``."""
+    """Return ``chat_xdk.Chat``."""
     return _load_chat_xdk().Chat
 
 

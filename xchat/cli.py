@@ -22,7 +22,21 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-from hermes_cli.colors import Colors, color
+
+
+class Colors:
+    RED = "\033[31m"
+    GREEN = "\033[32m"
+    BOLD = "\033[1m"
+
+
+def color(text: str, code: str) -> str:
+    """ANSI-wrap *text* on a colour-capable terminal (honours NO_COLOR)."""
+    import sys
+
+    if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+        return text
+    return f"{code}{text}\033[0m"
 
 
 def _state_dir() -> Path:

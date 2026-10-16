@@ -12,7 +12,7 @@ from typing import Any, Dict, List
 import httpx
 import pytest
 
-from plugins.platforms.xchat.api import (
+from xchat_plugin.api import (
     _EVENT_FIELDS,
     XChatApi,
     XChatApiError,

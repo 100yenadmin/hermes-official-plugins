@@ -1,14 +1,34 @@
-# X Chat (encrypted X DMs)
+<p align="center"><img src="../assets/xchat.jpg" alt="X Chat: official Hermes Agent plugin" width="100%"></p>
+
+# X Chat (encrypted X DMs) for Hermes Agent
+
+> Part of the [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent.
 
 [X Chat](https://docs.x.com/xchat/introduction) is X's end-to-end encrypted direct-message system. The Hermes adapter connects your agent to a bot X account's DMs: message bodies are encrypted and decrypted **locally** with the official Chat XDK — X only ever routes ciphertext, and every message is signed so recipients can verify the sender.
 
-> Run `hermes xchat setup` for a guided walk-through, or pick **X Chat** in `hermes gateway setup`.
+## Install
+
+From the Hermes plugin catalog:
+
+```bash
+hermes plugins install xchat
+```
+
+Or straight from this repo (tracks `main`):
+
+```bash
+hermes plugins install NousResearch/hermes-official-plugins#xchat
+```
+
+The install asks once before preparing the plugin's Python dependencies: `chatxdk` (X's official
+Chat XDK, a native E2EE binding, pinned to `0.4.1`) and `httpx`. Needs Hermes Agent `0.21.5` or newer.
+
+Then run `hermes xchat setup` for a guided walk-through, or pick **X Chat** in `hermes gateway setup`.
 
 ## Prerequisites
 
 - An **X developer account** with an app configured for **OAuth 2.0 user context** ([Developer Console](https://developer.x.com/en/portal/dashboard)). X Chat endpoints require API access on your developer plan.
 - A **user access token** for the bot account with scopes: `dm.read`, `dm.write`, `users.read`, `tweet.read` (add `offline.access` to receive a refresh token so Hermes can auto-renew the ~2-hour access token, and `media.write` to send encrypted file/image attachments).
-- Python 3.10+ (the `chatxdk` E2EE binding is lazy-installed at first use).
 
 ## Setup
 

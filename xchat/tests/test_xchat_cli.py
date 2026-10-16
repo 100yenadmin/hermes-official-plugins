@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from plugins.platforms.xchat import cli as xchat_cli
+from xchat_plugin import cli as xchat_cli
 
 
 def test_write_private_blob_mode_0600(tmp_path):
@@ -82,8 +82,8 @@ def test_register_force_backs_up_existing_blob(monkeypatch, tmp_path, capsys):
         async def aclose(self):
             pass
 
-    import plugins.platforms.xchat.api as api_mod
-    import plugins.platforms.xchat.crypto as crypto_mod
+    import xchat_plugin.api as api_mod
+    import xchat_plugin.crypto as crypto_mod
 
     monkeypatch.setattr(api_mod, "XChatApi", FakeApi)
     monkeypatch.setattr(crypto_mod, "XChatCrypto", FakeCrypto)
