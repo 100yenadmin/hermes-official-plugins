@@ -214,7 +214,8 @@ def normalize_input_schema(schema):
 
 def request_body(kwargs):
     allowed = {'model', 'messages', 'tools', 'stream', 'stream_options', 'max_tokens', 'max_completion_tokens',
-               'temperature', 'top_p', 'stop', 'extra_body', 'extra_headers', 'timeout', 'tool_choice', 'parallel_tool_calls', 'n', 'response_format'}
+               'temperature', 'top_p', 'stop', 'extra_body', 'extra_headers', 'timeout', 'tool_choice', 'parallel_tool_calls', 'n', 'response_format',
+               'hermes_auxiliary'}
     unknown = set(kwargs) - allowed
     if unknown:
         raise ValueError('Unsupported request parameters: ' + ', '.join(sorted(unknown)))
@@ -764,6 +765,9 @@ class Client:
                 env['CLAUDE_CODE_TOTAL_TOKENS_REMINDER'] = 'off'
                 # The queried frame lets the relay keep the cache breakpoint off native's per-request context.
                 request.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=frames[-1]['message']['content'])
+                # A Hermes auxiliary one-shot (summary, title: marked by the profile hook, one turn, no tools) is
+                # never replayed, so the relay drops its message cache marks instead of moving them.
+                request.admission.one_shot = kwargs.get('hermes_auxiliary') is True and not manifest and len(frames) == 1
                 env['ANTHROPIC_BASE_URL'] = request.admission.url
                 # Native settings apply env inside the process, avoiding execve's
                 # per-argument/environment-string limit for full Hermes schemas.
