@@ -1263,6 +1263,8 @@ class NativeSession:
         self.owner = lambda: None
 
     def alive(self):
+        # A native someone else collected (Hermes' Kanban dispatcher calls waitpid(-1, WNOHANG) every tick) reads as
+        # exited here: Popen.poll() takes ECHILD as exit 0, so the checkout retires the session and the turn replays.
         return not self.killed and self.process is not None and self.process.poll() is None
 
     def attach(self, request):

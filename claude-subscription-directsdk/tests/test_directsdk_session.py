@@ -4,6 +4,7 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import signal
 import sys
 import threading
 import time
@@ -1171,7 +1172,7 @@ def test_the_profile_setting_alone_turns_session_mode_on(profile, rig):
     assert spawned['argv'][spawned['argv'].index('--allowedTools') + 1] == 'mcp__hermes'
 
 
-# ---- session mode review: RAM-sized pool, launch-failure latch, toolUseId fallback ----
+# ---- session mode review: RAM-sized pool, launch-failure latch, toolUseId fallback, reaped natives ----
 
 GIB = 1024 ** 3
 
@@ -1259,3 +1260,23 @@ def test_identical_tool_calls_without_tool_use_id_match_in_call_order(rig):
     second = step(client, messages)
     assert second.usage.model_dump()['native_admission']['session'] == 'reused'
     assert answered(rig.upstream.bodies[-1]) == [('toolu_twin1', 'ONE'), ('toolu_twin2', 'TWO')]
+
+
+@pytest.mark.skipif(os.name == 'nt', reason='POSIX reaping')
+def test_a_session_native_reaped_elsewhere_is_replayed_not_failed(rig):
+    """Hermes' Kanban dispatcher calls os.waitpid(-1, WNOHANG) every tick and can collect an exited session native
+    before its owner does (teknium's review of #89). That native counts as exited: the next turn replays on a new one."""
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(rig.client(), messages)
+    (session,) = directsdk._session_pool
+    process = session.process
+    # Hold the owner's wait lock so this test, like the dispatcher, collects the exit before the session's reader.
+    with process._waitpid_lock:
+        os.kill(process.pid, signal.SIGKILL)
+        assert os.waitpid(process.pid, 0)[0] == process.pid
+    messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'} for c in first.choices[0].message.tool_calls]
+    second = step(rig.client(), messages)
+    assert second.choices[0].message.content == 'got X+X'
+    assert second.usage.model_dump()['native_admission']['session'] in ('cold', 'rebuild:prefix', 'rebuild:suffix')
+    assert len(rig.spawned()) == 2 and len(directsdk._session_pool) == 1 and directsdk._session_pool[0] is not session
+
