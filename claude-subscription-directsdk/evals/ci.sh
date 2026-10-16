@@ -8,8 +8,12 @@ prefix="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/claude-code.XXXXXX")"
 npm install --prefix "$prefix" --no-audit --no-fund --loglevel=error "@anthropic-ai/claude-code@$version"
 claude="$prefix/node_modules/.bin/claude"
 "$claude" --version
-for eval in evals/directsdk_admission.py evals/directsdk_cache_wire.py; do
+for eval in evals/directsdk_admission.py evals/directsdk_cache_wire.py evals/directsdk_cache_continuity.py; do
   echo "::group::$eval"
   python "$eval" "$claude"
   echo "::endgroup::"
 done
+# Prefix continuity again with native's account context, as a subscription login sends it (emulated, no account).
+echo "::group::evals/directsdk_cache_continuity.py --subscription"
+python evals/directsdk_cache_continuity.py "$claude" --subscription
+echo "::endgroup::"
