@@ -149,6 +149,15 @@ Catalog entries come in two tiers:
 <p>MCP server + skill · about 170 tools, loaded on demand</p>
 </td>
 <td width="50%" valign="top">
+<a href="xchat/"><img src="assets/xchat.jpg" alt="X Chat plugin"></a>
+<h3><a href="xchat/">X Chat</a></h3>
+<code>hermes plugins install xchat</code>
+<p>Run Hermes as a bot in X's end-to-end encrypted DMs. Messages are decrypted and encrypted locally with X's official Chat XDK, so X only routes ciphertext. Supports encrypted media, threaded replies, group chats with mention gating, and cron delivery. <code>hermes xchat setup</code> stores the OAuth token and registers the bot's keys. Needs an X developer app with chat API access.</p>
+<p>Gateway platform <code>xchat</code> · end-to-end encrypted</p>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 <h3>More on the way</h3>
 <p>Official plugins move in here as they leave Hermes core or join from their own repos. Browse everything else, from Nous, vendors and the community, in the <a href="https://hermes-agent.nousresearch.com/docs/plugins">plugin catalog</a>.</p>
 </td>
@@ -158,7 +167,7 @@ Catalog entries come in two tiers:
 
 ### Already used one of these?
 
-Every plugin here used to live somewhere else: Home Assistant and Spotify were built into Hermes core and then briefly had their own repos, Langfuse shipped bundled with core as `observability/langfuse`, and the rest each had a standalone `NousResearch/hermes-*` repo. **You don't need to do anything.**
+Most plugins here used to live somewhere else: Home Assistant and Spotify were built into Hermes core and then briefly had their own repos, Langfuse shipped bundled with core as `observability/langfuse`, and the rest each had a standalone `NousResearch/hermes-*` repo. **You don't need to do anything.**
 
 - **You used the built-in Home Assistant, Spotify or Langfuse:** `hermes update`, or the first start after updating, installs the plugin from the catalog with your existing config, env vars and login.
 - **You installed it from the catalog:** the catalog now points here, so `hermes plugins update <name>` moves your install to this repo and keeps your files.
