@@ -304,6 +304,31 @@ def pin_message_breakpoint(payload, queried):
         return payload
 
 
+def drop_message_breakpoints(payload):
+    """Remove native's message ``cache_control`` marks from a tool-less one-shot.
+
+    Hermes' auxiliary calls (compression summaries, titles) send one user turn and no tools, and
+    nothing replays that turn: each summary carries a different transcript and, for LCM-style
+    summarizers, a per-call nonce. Native still marks the turn for its 1-hour cache, so every such
+    call paid a cache write (2x input) that no later request read. Message marks go; system and
+    tools marks stay, so a stable system prompt is still cached across calls. Content never
+    changes, and a payload that does not parse forwards as is."""
+    try:
+        body = json.loads(payload)
+        dropped = False
+        for message in body['messages']:
+            content = message.get('content')
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.pop('cache_control', None) is not None:
+                        dropped = True
+        if not dropped:
+            return payload
+        return json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return payload
+
+
 def restore_queried_turn(payload, queried):
     """Restore a uniquely anchored tool-result frame without dropping protected content.
 
@@ -654,6 +679,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             self.connection.settimeout(gate.timeout)
             payload = self.rfile.read(int(self.headers['Content-Length']))
+            if getattr(gate, 'one_shot', False):
+                payload = drop_message_breakpoints(payload)
             try:
                 payload = restore_queried_turn(payload, gate.queried)
             except QueriedTurnMismatch as exc:

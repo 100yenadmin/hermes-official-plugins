@@ -189,11 +189,30 @@ def run(binary, model):
                 else:
                     followups.append(f"Public followup {round_number}")
                     history.append({"role": "user", "content": followups[-1]})
+            # A Hermes auxiliary one-shot (a summary: system plus one user turn, no tools) keeps native's system
+            # marks but carries no message mark: nothing replays its turn, so a mark would buy a never-read write.
+            peer.tools = False
+            single_turn = [{"role": "system", "content": "PUBLIC SUMMARY POLICY\n" * 50},
+                           {"role": "user", "content": "Public transcript to summarize.\n" * 200}]
+            # The same single tool-less turn from a chat (no auxiliary mark) keeps its message mark: turn 2 reads it.
+            client.create(model=model, messages=single_turn)
+            assert [block for msg in peer.wires[-1]["messages"] if isinstance(msg["content"], list)
+                    for block in msg["content"] if "cache_control" in block], "tool-free chat turn lost its message mark"
+            start = len(peer.wires)
+            client.create(model=model, messages=single_turn, hermes_auxiliary=True)
+            assert len(peer.wires) == start + 1, "unexpected extra inference request"
+            one_shot = peer.wires[-1]
+            one_shot_marks = [block for msg in one_shot["messages"] if isinstance(msg["content"], list)
+                              for block in msg["content"] if "cache_control" in block]
+            system_marks = [block["cache_control"] for block in one_shot["system"] if "cache_control" in block]
+            assert not one_shot_marks, f"one-shot message cache mark on {len(one_shot_marks)} block(s)"
+            assert system_marks, "native system cache marks lost on a one-shot"
             assert all("<total_tokens>" not in json.dumps(wire) for wire in peer.wires), "native budget reminder present"
             assert sum(len(msg["content"]) for msg in peer.wires[0]["messages"]) > 20
             return {"native_version": version, "native_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
                     "requests": len(peer.wires), "synthetic_usage_not_cache_measurement": True,
-                    "cache_controls": markers, "prefix_receipts": receipts}
+                    "cache_controls": markers, "prefix_receipts": receipts,
+                    "one_shot": {"message_marks": len(one_shot_marks), "system_marks": system_marks}}
         finally:
             client.close()
             peer.shutdown()

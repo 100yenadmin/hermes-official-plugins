@@ -136,8 +136,13 @@ class ClaudeOAuthDirectSDKProfile(ProviderProfile):
             from directsdk_setup import discover_models
         return discover_models(**kwargs)
 
-    def build_api_kwargs_extras(self, *, reasoning_config=None, **_):
-        return ({'reasoning': dict(reasoning_config)} if reasoning_config else {}), {}
+    def build_api_kwargs_extras(self, *, reasoning_config=None, **context):
+        extra = {'reasoning': dict(reasoning_config)} if reasoning_config else {}
+        # Hermes' auxiliary calls (call_llm: compression summaries, titles) reach this hook without the
+        # conversation context its chat path always passes (session_id). Mark them so the client can skip
+        # a message cache write that no later request would read.
+        auxiliary = context.get('task') is not None or 'session_id' not in context
+        return extra, ({'hermes_auxiliary': True} if auxiliary else {})
 
     def fetch_account_usage(self, *, base_url=None, api_key=None):
         """`/usage` plan limits, asked of Claude Code itself; every failure is an `Unavailable:` line, never a raise."""
