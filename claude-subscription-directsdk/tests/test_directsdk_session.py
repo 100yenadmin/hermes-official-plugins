@@ -19,7 +19,7 @@ import directsdk
 NATIVE = r'''
 import json, os, re, sys, urllib.request
 with open(os.environ['SPAWNS'], 'a') as f:
-    f.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv[1:], 'config_dir': os.environ.get('CLAUDE_CONFIG_DIR')}) + '\n')
+    f.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv[1:], 'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'), 'entrypoint': os.environ.get('CLAUDE_CODE_ENTRYPOINT')}) + '\n')
 history, queue, rpc, answered, limits = [], [], [0], {}, {}
 first_query = True
 def out(row):
@@ -125,7 +125,7 @@ def query():
     history.append({'role':'assistant','content':message['content']})
     tools = [b for b in message['content'] if b['type'] == 'tool_use'] if message.get('stop_reason') == 'tool_use' else []
     if tools:
-        queue.extend(tools)
+        queue.extend(tools[::-1] if os.environ.get('FAKE_REVERSE_CALLS') else tools)  # parallel calls can dispatch in any order
         call_next()
     else:
         out({'type':'result','subtype':'success','is_error':False,'num_turns':1,'usage':message['usage']})
@@ -1245,7 +1245,7 @@ def test_tool_calls_without_tool_use_id_match_by_name_and_arguments(rig):
     assert answered(rig.upstream.bodies[-1]) == [(a.id, 'APPLE'), (b.id, 'BANANA')]
 
 
-def test_identical_tool_calls_without_tool_use_id_match_in_call_order(rig):
+def test_identical_tool_calls_without_tool_use_id_are_replayed(rig):
     client = rig.client()
     client.env['FAKE_NO_TOOL_USE_ID'] = '1'
     twins = [{'type': 'tool_use', 'id': f'toolu_twin{i}', 'name': 'mcp__hermes__probe', 'input': {'key': 'same'}} for i in (1, 2)]
@@ -1258,8 +1258,65 @@ def test_identical_tool_calls_without_tool_use_id_match_in_call_order(rig):
     messages += [as_history(first), {'role': 'tool', 'tool_call_id': two.id, 'content': 'TWO'},
                  {'role': 'tool', 'tool_call_id': one.id, 'content': 'ONE'}]
     second = step(client, messages)
+    # Native may dispatch identical calls in either order: which RPC was which is unknown, so the results are replayed.
+    assert second.usage.model_dump()['native_admission']['session'] == 'rebuild:unpaired'
+    assert sorted(answered(rig.upstream.bodies[-1])) == [('toolu_twin1', 'ONE'), ('toolu_twin2', 'TWO')]
+
+
+@pytest.mark.parametrize('tool_use_id', [False, True])
+def test_identical_tool_calls_dispatched_out_of_order_keep_their_results(rig, tool_use_id):
+    client = rig.client()
+    client.env['FAKE_REVERSE_CALLS'] = '1'
+    if not tool_use_id:
+        client.env['FAKE_NO_TOOL_USE_ID'] = '1'
+    twins = [{'type': 'tool_use', 'id': f'toolu_twin{i}', 'name': 'mcp__hermes__probe', 'input': {'key': 'same'}} for i in (1, 2)]
+    rig.upstream.reply = lambda n, body: sse(f'm{n}', twins, 'tool_use')
+    messages = [{'role': 'user', 'content': 'call probe twice'}]
+    first = step(client, messages)
+    rig.upstream.reply = None
+    messages += [as_history(first), {'role': 'tool', 'tool_call_id': 'toolu_twin1', 'content': 'ONE'},
+                 {'role': 'tool', 'tool_call_id': 'toolu_twin2', 'content': 'TWO'}]
+    second = step(client, messages)
+    # Named calls keep the session; unnamed ones are replayed before any upstream request sees a guessed pairing.
+    assert second.usage.model_dump()['native_admission']['session'] == ('reused' if tool_use_id else 'rebuild:unpaired')
+    assert sorted(answered(rig.upstream.bodies[-1])) == [('toolu_twin1', 'ONE'), ('toolu_twin2', 'TWO')]
+    assert len(rig.spawned()) == (1 if tool_use_id else 2)
+
+
+def test_tool_call_arguments_match_as_exact_json(rig):
+    """true is not 1: Python equality would pair the second call's RPC with the first call."""
+    client = rig.client()
+    client.env.update(FAKE_NO_TOOL_USE_ID='1', FAKE_REVERSE_CALLS='1')
+    calls = [{'type': 'tool_use', 'id': 'toolu_true', 'name': 'mcp__hermes__probe', 'input': {'value': True}},
+             {'type': 'tool_use', 'id': 'toolu_one', 'name': 'mcp__hermes__probe', 'input': {'value': 1}}]
+    rig.upstream.reply = lambda n, body: sse(f'm{n}', calls, 'tool_use')
+    messages = [{'role': 'user', 'content': 'call probe twice'}]
+    first = step(client, messages)
+    rig.upstream.reply = None
+    messages += [as_history(first), {'role': 'tool', 'tool_call_id': 'toolu_true', 'content': 'TRUE'},
+                 {'role': 'tool', 'tool_call_id': 'toolu_one', 'content': 'ONE'}]
+    second = step(client, messages)
     assert second.usage.model_dump()['native_admission']['session'] == 'reused'
-    assert answered(rig.upstream.bodies[-1]) == [('toolu_twin1', 'ONE'), ('toolu_twin2', 'TWO')]
+    assert sorted(answered(rig.upstream.bodies[-1])) == [('toolu_one', 'ONE'), ('toolu_true', 'TRUE')]
+
+
+def test_a_launch_admitted_between_failed_launches_resets_the_count(rig, tmp_path):
+    """An admitted launch whose step failed upstream (here a 429) still proves the launch works."""
+    broken = no_session_client(rig, tmp_path)
+    step(broken, [{'role': 'user', 'content': 'one'}])
+    with pytest.raises(directsdk.ClaudeAPIError):
+        step(rig.client(), [{'role': 'user', 'content': 'hit the limit'}])
+    step(broken, [{'role': 'user', 'content': 'two'}])
+    assert directsdk._session_enabled(broken.env) is True
+
+
+def test_session_mode_drops_an_inherited_entrypoint(rig):
+    """A desktop entrypoint makes native send a summary request the relay denies; per-call keeps it (replay test)."""
+    client = rig.client()
+    client.env['CLAUDE_CODE_ENTRYPOINT'] = 'claude-desktop'
+    step(client, [{'role': 'user', 'content': 'hello'}])
+    (spawned,) = rig.spawned()
+    assert spawned['entrypoint'] is None
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX reaping')

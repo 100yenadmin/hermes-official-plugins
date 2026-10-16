@@ -699,7 +699,7 @@ class Client:
         finally:
             stream.close()
 
-    def _native_env(self):
+    def _native_env(self, session=False):
         env = _with_login_identity(_with_windows_essentials(dict(self.env if self.env is not None else os.environ)))
         if self.env is None:
             conflicts = [key for key in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_FOUNDRY_API_KEY') if env.get(key)]
@@ -711,10 +711,11 @@ class Client:
         if resolved is None:
             raise ClaudeCodeMissing(INSTALL_HINT)
         apply_config_dir(env)
-        # An inherited effort level would override the --effort Hermes passes below. An inherited entrypoint (Hermes
-        # started from a Claude Code or desktop session) makes native act as that host: the desktop one sends a summary
-        # request after each final answer, which the relay denies, and a denial ends a session.
-        for key in ('CLAUDE_CODE_EXTRA_BODY', 'CLAUDE_CODE_EFFORT_LEVEL', 'CLAUDE_CODE_ENTRYPOINT'):
+        # An inherited effort level would override the --effort Hermes passes below. In session mode an inherited
+        # entrypoint (Hermes started from a Claude Code or desktop session) makes native act as that host: the desktop
+        # one sends a summary request after each final answer, which the relay denies, and a denial ends a session.
+        # Per-call keeps it: native puts it in the billing header it sends upstream.
+        for key in ('CLAUDE_CODE_EXTRA_BODY', 'CLAUDE_CODE_EFFORT_LEVEL') + (('CLAUDE_CODE_ENTRYPOINT',) if session else ()):
             env.pop(key, None)
         env.update(ENABLE_TOOL_SEARCH='false', CLAUDE_CODE_MAX_RETRIES='0', DISABLE_AUTO_COMPACT='1', DISABLE_COMPACT='1')
         # Telemetry and feature flags follow the user's claude_code_telemetry setting, read per spawn.
@@ -890,7 +891,7 @@ class Client:
         messages = [m for m in kwargs['messages'] if m.get('role') not in ('system', 'developer')]
         keys = [_message_key(m) for m in messages]
         # Every step re-runs baseline's launch guards; the launch configuration is part of reuse identity.
-        env, resolved = self._native_env()
+        env, resolved = self._native_env(session=True)
         # Only what decides native auth/config; per-process values (CLAUDE_PID, session ids) must not force rebuilds.
         launch = [resolved, sorted((k, v) for k, v in env.items() if k in _SESSION_LAUNCH_KEYS or k.startswith(_SESSION_LAUNCH_PREFIXES))]
         ident = hashlib.sha256(json.dumps([kwargs['model'], body, system, launch]).encode('utf-8')).hexdigest()
@@ -1018,6 +1019,8 @@ class Client:
             if admission is not None:
                 admission.abort()  # nothing is admitted after this, so `used` is final
             refused = isinstance(error, (ValueError, ClaudeCodeMissing, ClaudeCodeLoggedOut)) or (isinstance(error, ClaudeAPIError) and error.status_code is not None)
+            if spawn and admission is not None and admission.used:
+                _session_launched()  # the launch reached admission; the step failed upstream, not the launch
             if yielded or refused or request.cancelled.is_set() or (admission is not None and admission.used):
                 raise
             _session_log.info('session fallback: session=%s per-call after %s', session.ident[:8] + ':' + str(session.pid), type(error).__name__)
@@ -1230,6 +1233,17 @@ def _session_expects(expect, suffix):
             and {m.get('tool_call_id') for m in suffix} == expect)
 
 
+def _json_key(value):
+    """Exact JSON identity, as native's JSON sees it: true is not 1 (Python's True == 1), while 1 and 1.0 are one number."""
+    if isinstance(value, dict):
+        return 'object', tuple(sorted((k, _json_key(v)) for k, v in value.items()))
+    if isinstance(value, list):
+        return 'array', tuple(_json_key(v) for v in value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return 'number', value
+    return type(value).__name__, value
+
+
 def _utf16_len(text):
     return len(text) if text.isascii() else len(text.encode('utf-16-le', 'surrogatepass')) // 2
 
@@ -1259,6 +1273,7 @@ class NativeSession:
         self.events = queue.Queue()
         self.lock = threading.Lock()  # stdin writes and the parked/results tables
         self.parked, self.results, self.claimed, self.calls = {}, {}, set(), []
+        self.named = False  # a tools/call named its tool_use in claudecode/toolUseId
         self.busy, self.last_used, self.killed = True, time.monotonic(), False
         self.owner = lambda: None
 
@@ -1319,14 +1334,25 @@ class NativeSession:
     def _tool_use_id(self, params):
         """The step's tool_use a tools/call answers. Claude Code names it in _meta["claudecode/toolUseId"], its own key
         and absent from Anthropic's Agent SDK; without it, the first unclaimed call of the step with this tool name and
-        exactly these arguments, so identical calls pair up in call order. The first call can arrive before the step
-        settles (read it from the relay's capture), later ones after the next step re-armed the relay."""
+        exactly these arguments (identical calls are replayed instead: see unpaired). The first call can arrive before the
+        step settles (read it from the relay's capture), later ones after the next step re-armed the relay."""
         tool_id = (params.get('_meta') or {}).get('claudecode/toolUseId')
         if tool_id:
+            self.named = True
             return tool_id
         blocks = (((self.admission.capture.message if self.admission is not None else None) or {}).get('content') or []) + self.calls
+        key = _json_key(params.get('arguments') or {})
         return next((b.get('id') for b in blocks if isinstance(b, dict) and b.get('type') == 'tool_use' and b.get('id') not in self.claimed
-                     and b.get('name') == PREFIX + str(params.get('name')) and (b.get('input') or {}) == (params.get('arguments') or {})), None)
+                     and b.get('name') == PREFIX + str(params.get('name')) and _json_key(b.get('input') or {}) == key), None)
+
+    def unpaired(self):
+        """True when the parked calls include identical ones (same name and arguments) and this native has not shown it
+        names calls in claudecode/toolUseId: it may dispatch them out of call order, so which result answers which is unknown."""
+        with self.lock:
+            if self.named:
+                return False
+            keys = [(block.get('name'), _json_key(block.get('input') or {})) for block in self.calls]
+            return len(set(keys)) < len(keys)
 
     def _reply(self, request_id, mcp_response):
         self._write({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': request_id, 'response': {'mcp_response': mcp_response}}})
@@ -1409,6 +1435,10 @@ def _session_checkout(ident, keys, messages, first, login=None):
             # Answered over MCP, native would rewrite this result (a stub, or a cut error): replay the history on a new native.
             stale.append(found)
             found, how, oversize = None, 'rebuild:oversize', found
+        elif found is not None and found.expect != 'user' and found.unpaired():
+            # Identical calls whose RPCs native may not send in call order: replay Hermes' results on a new native.
+            stale.append(found)
+            found, how = None, 'rebuild:unpaired'
         elif found is not None:
             found.busy, how = True, 'reused'
         elif matches:
