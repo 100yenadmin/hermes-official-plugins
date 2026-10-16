@@ -28,11 +28,11 @@ from types import SimpleNamespace
 try:
     from .admission import Admission
     from .model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
-    from .directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled
+    from .directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled, session_pool
 except ImportError:
     from admission import Admission
     from model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
-    from directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled
+    from directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled, session_pool
 
 
 # Hermes picks retry vs fallback from an error's status_code (main loop and auxiliary ladder alike).
@@ -1105,12 +1105,15 @@ class Client:
 # SDK MCP server parks until the next step brings Hermes' result. Sessions are found by history,
 # never by client identity (Hermes builds request-local clients and closes them freely).
 # ---------------------------------------------------------------------------------------------
-# A user-idle session is kept about as long as native's prompt cache (1 h TTL from the last request): while it stays in
-# the pool and its cache is live, a reply reuses it and reads the history from cache, whereas a respawn replays the
-# history and writes part of it again. Both defaults stay below native's 3,900 s clear_tool_uses idle trigger.
+# A user-idle session is kept as long as native's prompt cache (1 h TTL from the last request): while it lives, a reply
+# reads the history from cache in place, whereas a respawn replays it first. Both limits stay below native's 3,900 s
+# clear_tool_uses idle trigger. The environment override exists for tests only.
 SESSION_IDLE_SECONDS = float(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_IDLE_SECONDS') or 3600)
-SESSION_PARKED_IDLE_SECONDS = float(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_PARKED_IDLE_SECONDS') or 3600)
-SESSION_POOL_SIZE = int(os.environ.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_POOL') or 8)
+SESSION_PARKED_IDLE_SECONDS = 3600
+# The pool holds the session_pool setting's count of sessions (default 8), cut to what a quarter of physical RAM holds
+# at this size each: the measured RSS of a session native (355-400 MB). A cap below one turns session mode off.
+SESSION_POOL_DEFAULT = 8
+SESSION_NATIVE_BYTES = 400 * 1024 * 1024
 # Native persists an MCP result longer than the tool's maxResultSizeChars (UTF-16 units; 50,000 for an MCP tool
 # without _meta) under <config>/projects/.../tool-results and keeps a ~2 KB <persisted-output> stub in its history.
 # _meta raises the limit up to native's hard ceiling (500,000 in 2.1.285). Longer results, and is_error results native
@@ -1124,6 +1127,7 @@ _session_log = logging.getLogger(__name__)
 _session_lock = threading.Lock()
 _session_pool = []
 _session_reaper = None
+_session_noted = set()
 # The telemetry setting (applied per spawn) and the proxy route are fixed for a session's life: a change starts a new one.
 _SESSION_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
                      'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy')
@@ -1136,7 +1140,52 @@ def _session_enabled(env):
     A multi-profile desktop backend or gateway loads only its launch home's .env into the process environment,
     so the setting is how a routed profile turns session mode on."""
     value = (env.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE') or '').strip().lower()
-    return value in ('1', 'true', 'yes', 'on') if value else session_mode_enabled()
+    if not (value in ('1', 'true', 'yes', 'on') if value else session_mode_enabled()):
+        return False
+    cap = _session_cap()
+    if cap < 1:
+        _session_note(logging.INFO, f'session mode off: the pool cap is {cap} (session_pool {_session_configured()}, '
+                      f'{_physical_ram() or 0:,} bytes of RAM at {SESSION_NATIVE_BYTES:,} per native in a quarter of it); '
+                      'every call runs per-call')
+        return False
+    return True
+
+
+def _session_note(level, message):
+    """Log ``message`` once per process."""
+    with _session_lock:
+        if message in _session_noted:
+            return
+        _session_noted.add(message)
+    _session_log.log(level, message)
+
+
+def _physical_ram():
+    """Physical memory in bytes, None when the platform does not say (sysconf on POSIX, GlobalMemoryStatusEx on Windows)."""
+    try:
+        if os.name == 'nt':
+            import ctypes
+
+            class Status(ctypes.Structure):
+                _fields_ = [('dwLength', ctypes.c_ulong), ('dwMemoryLoad', ctypes.c_ulong)] + [(name, ctypes.c_ulonglong) for name in (
+                    'ullTotalPhys', 'ullAvailPhys', 'ullTotalPageFile', 'ullAvailPageFile', 'ullTotalVirtual', 'ullAvailVirtual', 'ullAvailExtendedVirtual')]
+            status = Status(dwLength=ctypes.sizeof(Status))
+            return status.ullTotalPhys if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)) else None
+        ram = os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
+        return ram if ram > 0 else None
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
+def _session_configured():
+    configured = session_pool()
+    return SESSION_POOL_DEFAULT if configured is None else configured
+
+
+def _session_cap():
+    """Sessions kept at once: min(session_pool, floor(RAM / 4 / SESSION_NATIVE_BYTES)); the setting alone when RAM is unknown."""
+    configured, ram = _session_configured(), _physical_ram()
+    return configured if ram is None else min(configured, ram // (4 * SESSION_NATIVE_BYTES))
 
 
 def _message_key(message):
@@ -1335,10 +1384,10 @@ def _session_checkout(ident, keys, messages, first, login=None):
     return found, how
 
 
-def _session_trim(room):
-    """Evict least-recently-used idle sessions until ``room`` more fit under the cap (caller holds the lock)."""
+def _session_trim(room, cap):
+    """Evict least-recently-used idle sessions until ``room`` more fit under ``cap`` (caller holds the lock)."""
     idle = sorted((s for s in _session_pool if not s.busy), key=lambda s: (s.expect != 'user', s.last_used))
-    evict = idle[:max(0, len(_session_pool) + room - SESSION_POOL_SIZE)]
+    evict = idle[:max(0, len(_session_pool) + room - cap)]
     for s in evict:
         _session_pool.remove(s)
     return evict
@@ -1347,6 +1396,7 @@ def _session_trim(room):
 def _session_admit(session):
     """Reserve a pool slot for a new busy session; False when every slot is busy."""
     global _session_reaper
+    cap = _session_cap()
     with _session_lock:
         # Start the reaper before reserving anything: a failed start leaves no reservation and allows a retry.
         if _session_reaper is None:
@@ -1357,8 +1407,8 @@ def _session_admit(session):
                 _session_log.warning('session reaper did not start (%s); this step runs per-call', error)
                 return False
             _session_reaper = reaper
-        evict = _session_trim(1)
-        admitted = len(_session_pool) < SESSION_POOL_SIZE
+        evict = _session_trim(1, cap)
+        admitted = len(_session_pool) < cap
         if admitted:
             _session_pool.append(session)
     for s in evict:
@@ -1371,6 +1421,7 @@ def _session_release(session, request):
 
     The owner is set before this runs, so a cancel() whose request flag lands after the check below still finds
     the session idle and owned in _session_cancel_owned (cancel flags requests first, then sweeps owned sessions)."""
+    cap = _session_cap()
     with _session_lock:
         cancelled = request.cancelled.is_set()
         if cancelled:
@@ -1379,7 +1430,7 @@ def _session_release(session, request):
             evict = [session]
         else:
             session.busy, session.last_used = False, time.monotonic()
-            evict = _session_trim(0)
+            evict = _session_trim(0, cap)
     for s in evict:
         s.kill('cancelled-during-handoff' if cancelled else 'lru')
     return not cancelled

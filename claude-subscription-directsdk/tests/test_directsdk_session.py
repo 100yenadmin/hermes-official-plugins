@@ -245,7 +245,9 @@ TOOLS = [{'type': 'function', 'function': {'name': 'probe', 'description': 'prob
 
 
 @pytest.fixture
-def rig(tmp_path):
+def rig(tmp_path, monkeypatch):
+    # Process-wide session-mode state starts fresh for every test.
+    monkeypatch.setattr(directsdk, '_session_noted', set())
     upstream = Upstream()
     native = tmp_path / 'native.py'
     native.write_text(NATIVE)
@@ -526,7 +528,7 @@ def test_r5_cancel_after_tool_calls_kills_the_parked_native(rig):
 
 def test_r9_pool_cap_holds_with_busy_sessions(rig, monkeypatch):
     """R9: with every session slot busy, an extra conversation takes the per-call path; nothing exceeds the cap."""
-    monkeypatch.setattr(directsdk, 'SESSION_POOL_SIZE', 1)
+    monkeypatch.setattr(directsdk, '_session_cap', lambda: 1)
     with ThreadPoolExecutor(max_workers=1) as pool:
         slow = pool.submit(step, rig.client(), [{'role': 'user', 'content': 'slow hi'}])
         deadline = time.monotonic() + 10
@@ -657,7 +659,7 @@ def test_routine_close_after_a_step_keeps_the_session(rig):
 def test_reaper_start_failure_leaks_no_reservation(rig, monkeypatch):
     """A failing reaper Thread.start must not leave a busy reservation or a dead reaper object behind."""
     import threading
-    monkeypatch.setattr(directsdk, 'SESSION_POOL_SIZE', 1)
+    monkeypatch.setattr(directsdk, '_session_cap', lambda: 1)
     monkeypatch.setattr(directsdk, '_session_reaper', None)
     real = threading.Thread
     class Failing(real):
@@ -1004,8 +1006,7 @@ def test_idle_defaults_cover_the_prompt_cache_and_stay_below_clear_tool_uses():
     # re-writes history the cache still holds; both limits stay below native's 3,900 s clear_tool_uses idle trigger.
     if 'CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_IDLE_SECONDS' not in os.environ:
         assert 3600 <= directsdk.SESSION_IDLE_SECONDS < 3900
-    if 'CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_PARKED_IDLE_SECONDS' not in os.environ:
-        assert directsdk.SESSION_PARKED_IDLE_SECONDS < 3900
+    assert directsdk.SESSION_PARKED_IDLE_SECONDS < 3900
 
 
 def test_a_session_parked_on_a_long_tool_survives_the_idle_limit(rig, monkeypatch):
@@ -1013,7 +1014,7 @@ def test_a_session_parked_on_a_long_tool_survives_the_idle_limit(rig, monkeypatc
     first = step(rig.client(), messages)
     old = rig.spawned()[0]['pid']
     monkeypatch.setattr(directsdk, 'SESSION_IDLE_SECONDS', 0.2)
-    monkeypatch.setattr(directsdk, 'SESSION_PARKED_IDLE_SECONDS', 3600, raising=False)
+    monkeypatch.setattr(directsdk, 'SESSION_PARKED_IDLE_SECONDS', 3600)
     time.sleep(0.25)
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': call.id, 'content': 'result'}
                                      for call in first.choices[0].message.tool_calls]
@@ -1028,7 +1029,7 @@ def test_a_session_parked_on_a_long_tool_survives_the_idle_limit(rig, monkeypatc
 
 
 def test_lru_evicts_a_user_idle_session_before_a_tool_parked_one(rig, monkeypatch):
-    monkeypatch.setattr(directsdk, 'SESSION_POOL_SIZE', 2)
+    monkeypatch.setattr(directsdk, '_session_cap', lambda: 2)
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(rig.client(), messages)
     (parked,) = directsdk._session_pool
@@ -1150,7 +1151,7 @@ def test_each_profile_of_a_multi_profile_process_reads_its_own_session_setting(p
     assert directsdk._session_enabled({}) is False
 
 
-def test_the_profile_setting_alone_turns_session_modes_on(profile, rig):
+def test_the_profile_setting_alone_turns_session_mode_on(profile, rig):
     _set_session_mode('true')
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(rig.client(drop=('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE',)), messages)
@@ -1161,3 +1162,40 @@ def test_the_profile_setting_alone_turns_session_modes_on(profile, rig):
     assert second.usage.model_dump()['native_admission']['session'] == 'reused'
     (spawned,) = rig.spawned()
     assert spawned['argv'][spawned['argv'].index('--allowedTools') + 1] == 'mcp__hermes'
+
+
+# ---- session mode review: RAM-sized pool ----
+
+GIB = 1024 ** 3
+
+
+@pytest.mark.parametrize('ram, setting, cap', [(64 * GIB, None, 8), (8 * GIB, None, 5), (2 * GIB, None, 1), (GIB, None, 0),
+                                               (None, None, 8), (64 * GIB, 3, 3), (8 * GIB, 0, 0)])
+def test_pool_cap_is_the_setting_cut_to_a_quarter_of_ram(monkeypatch, ram, setting, cap):
+    monkeypatch.setattr(directsdk, '_physical_ram', lambda: ram)
+    monkeypatch.setattr(directsdk, 'session_pool', lambda: setting)
+    assert directsdk._session_cap() == cap
+
+
+def test_physical_ram_is_read_without_a_dependency():
+    assert directsdk._physical_ram() > 0
+
+
+@pytest.mark.parametrize('value, expected', [('3', 3), ('0', 0), ('-1', None), ("'many'", None), ('true', None)])
+def test_session_pool_setting(profile, value, expected):
+    import directsdk_setup
+    from hermes_cli.config import get_config_path
+    get_config_path().write_text("plugins:\n  enabled: []\n  entries:\n    %s:\n      settings:\n        session_pool: %s\n"
+                                 % (directsdk_setup.PLUGIN_ID, value), encoding='utf-8')
+    assert directsdk_setup.session_pool() == expected
+
+
+def test_a_low_ram_machine_runs_per_call_and_says_why_once(rig, monkeypatch, caplog):
+    caplog.set_level('INFO', logger=directsdk.__name__)
+    monkeypatch.setattr(directsdk, '_physical_ram', lambda: GIB)
+    for text in ('one', 'two'):
+        response = step(rig.client(), [{'role': 'user', 'content': text}])
+        assert response.choices[0].message.content == 'echo ' + text
+        assert 'session' not in response.usage.model_dump()['native_admission']
+    assert [('--max-turns' in s['argv']) for s in rig.spawned()] == [True, True] and not directsdk._session_pool
+    assert caplog.text.count('session mode off: the pool cap is 0') == 1
