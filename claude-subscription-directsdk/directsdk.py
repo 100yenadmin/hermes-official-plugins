@@ -397,6 +397,8 @@ atexit.register(_kill_draining)
 
 
 def _fast_eligible(result, admission, stopped, native_error):
+    """A clean admitted answer returns at native's result event. Its exit code, any later stdout and a hang past
+    the timeout are then never read: the answer is already complete, and the drain kills a native that will not exit."""
     return (admission.used and admission.status == 200 and admission.capture.complete
             and stopped and native_error is None and admission.denied == 0
             and admission.capture.message.get('stop_reason') != 'refusal'

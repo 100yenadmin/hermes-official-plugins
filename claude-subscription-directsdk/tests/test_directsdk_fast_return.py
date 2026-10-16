@@ -290,7 +290,7 @@ def test_ineligible_results_keep_eof_and_exit_checks(native_case):
         ({'subtype': 'error_other'}, 'Native request failed'),
         ({'native_error': True}, 'Native API error'),
         ({'unused': True}, None),
-        ({'denied': True, 'subtype': 'error_other'}, None),
+        ({'denied': True}, None),  # a success after a denied native retry still waits for exit
         ({'stop_reason': 'refusal'}, None),
         ({'is_error': True}, 'Native request failed'),
         ({'subtype': 'error_max_turns', 'exitcode': 1}, 'Native request failed'),
