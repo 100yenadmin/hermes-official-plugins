@@ -995,6 +995,8 @@ class Client:
             _session_log.info('session step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s',
                            session.ident[:8] + ':' + str(session.pid), how, int(admission.used), admission.denied, bool(admission.unrestored), time.monotonic() - started,
                            usage['input_tokens'], usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0), usage['output_tokens'], thinking, len(calls), assistant.get('stop_reason'), assistant.get('id'))
+            if spawn:
+                _session_launched()
             # Settle before the final yield: a caller closing the stream after it must not kill a healthy session.
             session.detach(request)
             if not poisoned:
@@ -1018,6 +1020,8 @@ class Client:
             if yielded or refused or request.cancelled.is_set() or (admission is not None and admission.used):
                 raise
             _session_log.info('session fallback: session=%s per-call after %s', session.ident[:8] + ':' + str(session.pid), type(error).__name__)
+            if spawn:
+                _session_launched(error)
             yield from self._run(request, kwargs, body, manifest, names, system, frames)
         finally:
             if session is not None and not done:
@@ -1114,6 +1118,9 @@ SESSION_PARKED_IDLE_SECONDS = 3600
 # at this size each: the measured RSS of a session native (355-400 MB). A cap below one turns session mode off.
 SESSION_POOL_DEFAULT = 8
 SESSION_NATIVE_BYTES = 400 * 1024 * 1024
+# Session launches in a row that fail before admission (a CLI whose control protocol changed) before session mode turns
+# off for the rest of the process, so every later turn runs per-call instead of trying the launch again.
+SESSION_LAUNCH_FAILURES = 2
 # Native persists an MCP result longer than the tool's maxResultSizeChars (UTF-16 units; 50,000 for an MCP tool
 # without _meta) under <config>/projects/.../tool-results and keeps a ~2 KB <persisted-output> stub in its history.
 # _meta raises the limit up to native's hard ceiling (500,000 in 2.1.285). Longer results, and is_error results native
@@ -1128,6 +1135,7 @@ _session_lock = threading.Lock()
 _session_pool = []
 _session_reaper = None
 _session_noted = set()
+_session_failures, _session_off = 0, False
 # The telemetry setting (applied per spawn) and the proxy route are fixed for a session's life: a change starts a new one.
 _SESSION_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
                      'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy')
@@ -1140,7 +1148,7 @@ def _session_enabled(env):
     A multi-profile desktop backend or gateway loads only its launch home's .env into the process environment,
     so the setting is how a routed profile turns session mode on."""
     value = (env.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE') or '').strip().lower()
-    if not (value in ('1', 'true', 'yes', 'on') if value else session_mode_enabled()):
+    if not (value in ('1', 'true', 'yes', 'on') if value else session_mode_enabled()) or _session_off:
         return False
     cap = _session_cap()
     if cap < 1:
@@ -1149,6 +1157,18 @@ def _session_enabled(env):
                       'every call runs per-call')
         return False
     return True
+
+
+def _session_launched(error=None):
+    """Record a fresh session launch: admitted (``error`` None) or failed before admission with ``error``."""
+    global _session_failures, _session_off
+    with _session_lock:
+        _session_failures = 0 if error is None else _session_failures + 1
+        if error is None or _session_off or _session_failures < SESSION_LAUNCH_FAILURES:
+            return
+        _session_off = True
+    _session_log.warning('session mode off for this process: %d session launches in a row failed before admission (last: %s); '
+                         'every call runs per-call', _session_failures, type(error).__name__)
 
 
 def _session_note(level, message):

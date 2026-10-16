@@ -247,6 +247,8 @@ TOOLS = [{'type': 'function', 'function': {'name': 'probe', 'description': 'prob
 @pytest.fixture
 def rig(tmp_path, monkeypatch):
     # Process-wide session-mode state starts fresh for every test.
+    monkeypatch.setattr(directsdk, '_session_failures', 0)
+    monkeypatch.setattr(directsdk, '_session_off', False)
     monkeypatch.setattr(directsdk, '_session_noted', set())
     upstream = Upstream()
     native = tmp_path / 'native.py'
@@ -1164,7 +1166,7 @@ def test_the_profile_setting_alone_turns_session_mode_on(profile, rig):
     assert spawned['argv'][spawned['argv'].index('--allowedTools') + 1] == 'mcp__hermes'
 
 
-# ---- session mode review: RAM-sized pool ----
+# ---- session mode review: RAM-sized pool, launch-failure latch ----
 
 GIB = 1024 ** 3
 
@@ -1199,3 +1201,20 @@ def test_a_low_ram_machine_runs_per_call_and_says_why_once(rig, monkeypatch, cap
         assert 'session' not in response.usage.model_dump()['native_admission']
     assert [('--max-turns' in s['argv']) for s in rig.spawned()] == [True, True] and not directsdk._session_pool
     assert caplog.text.count('session mode off: the pool cap is 0') == 1
+
+
+def test_two_failed_session_launches_in_a_row_turn_session_mode_off(rig, tmp_path, caplog):
+    """A CLI whose control protocol changed degrades to per-call instead of retrying the launch every turn."""
+    caplog.set_level('INFO', logger=directsdk.__name__)
+    broken = no_session_client(rig, tmp_path)
+    assert step(broken, [{'role': 'user', 'content': 'one'}]).choices[0].message.content == 'echo one'
+    # A launch that reaches admission in between resets the count.
+    assert step(rig.client(), [{'role': 'user', 'content': 'healthy'}]).usage.model_dump()['native_admission']['session'] == 'cold'
+    assert step(broken, [{'role': 'user', 'content': 'two'}]).choices[0].message.content == 'echo two'
+    assert directsdk._session_enabled(broken.env) is True
+    assert step(broken, [{'role': 'user', 'content': 'three'}]).choices[0].message.content == 'echo three'
+    assert directsdk._session_enabled(broken.env) is False
+    assert step(broken, [{'role': 'user', 'content': 'four'}]).choices[0].message.content == 'echo four'
+    assert caplog.text.count('session fallback') == 3
+    warnings = [r for r in caplog.records if r.levelname == 'WARNING' and 'session mode off for this process' in r.getMessage()]
+    assert len(warnings) == 1
