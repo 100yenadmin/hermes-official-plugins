@@ -142,10 +142,16 @@ Catalog entries come in two tiers:
 </tr>
 <tr>
 <td width="50%" valign="top">
+<a href="rea/"><img src="assets/rea.jpg" alt="REA plugin"></a>
+<h3><a href="rea/">REA</a></h3>
+<code>hermes plugins install rea</code>
+<p>Reverse engineer programs with REA's MCP server: native binaries, .NET assemblies, Electron and JavaScript apps, Android packages, firmware and browser activity, with REA's reverse-engineer-anything workflow skill. Static JavaScript and archive inspection work out of the box; native decompilation needs your own Ghidra, Hopper or IDA. Needs Node.js 22.19+.</p>
+<p>MCP server + skill · about 170 tools, loaded on demand</p>
+</td>
+<td width="50%" valign="top">
 <h3>More on the way</h3>
 <p>Official plugins move in here as they leave Hermes core or join from their own repos. Browse everything else, from Nous, vendors and the community, in the <a href="https://hermes-agent.nousresearch.com/docs/plugins">plugin catalog</a>.</p>
 </td>
-<td width="50%" valign="top"></td>
 </tr>
 </table>
 

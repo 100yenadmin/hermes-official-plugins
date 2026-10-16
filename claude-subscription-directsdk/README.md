@@ -66,6 +66,8 @@ export CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR=/path/to/official-cli-config
 
 An inherited `CLAUDE_CONFIG_DIR` also works; the per-profile `claude_config_dir` setting takes precedence over both environment directories. To select an executable outside PATH, set `CLAUDE_SUBSCRIPTION_DIRECTSDK_COMMAND` to its absolute path. There is no unrestricted public CLI-flags setting; isolation and denial flags are plugin-owned. The low-level Python `Client(env=...)` injection is available for explicitly controlled local fixtures and does not apply the inherited-environment guard. It is not the normal Hermes provider path or an OAuth certification mechanism.
 
+**Supervised gateways (launchd, systemd, containers, cron):** Claude Code's local login check reads the process identity — without `USER` in its environment a logged-in CLI reports `loggedIn: false`, instantly and with no upstream request. The plugin derives `USER`/`LOGNAME` (`USERNAME` on Windows) from the parent process or the running uid before every spawn, so a filtered gateway environment no longer surfaces as a false `ClaudeCodeLoggedOut`. When a logged-out error does fire, it now carries native's first stderr lines, which makes a gateway-only failure diagnosable instead of silent (#44).
+
 Persistent configuration:
 
 ```yaml
@@ -140,7 +142,7 @@ A real Sonnet 5 Hermes review task reproduced poor cache reuse: its first reques
 
 Disabling the native reminder restored stable prefixes without adding cache markers or changing cache TTL. A completed seven-call review used ten real Hermes tool executions, ran six offline tests, and wrote its review artifacts. Context grew from 187K to 212K; follow-up requests averaged 97.99% cache reads, or 85.45% including the cold start. Native list-price accounting totalled $1.1030034, not a verified subscription charge. These are Sonnet 5 results: Fable 5.1 required usage credits on the qualification account and was not exercised with paid credits. Model entitlement and allowance consumption remain native-account dependent.
 
-Text streams incrementally. A complete tool batch is published only after assistant completion, `message_stop`, final usage and native exit. Hermes then applies its own hooks, approvals, tools and persistence. Tool names map through `mcp__hermes__`; original names must be unique ASCII alphanumeric/underscore/hyphen identifiers of at most 50 characters.
+Text streams incrementally. A complete tool batch is published only after assistant completion, `message_stop`, final usage and native exit. Hermes then applies its own hooks, approvals, tools and persistence. Tool names map through `mcp__hermes__`; original names must be unique ASCII alphanumeric/underscore/hyphen identifiers of at most 64 characters. Names longer than 50 characters are shown to native under a stable hash-suffixed 50-character alias that maps back to the original name.
 
 `--max-turns 1` is a logical native step; the relay supplies the HTTP admission boundary. `error_max_turns` is accepted with a complete tool batch, usage and exit code 1. Native `num_turns` may be 2 at that boundary. A completed first response also survives a locally denied recovery attempt or native refusal rendering; Hermes receives the actual refusal, not the CLI's synthetic error text. Other failures remain failures.
 
@@ -180,7 +182,7 @@ Selecting the provider asks the Claude CLI itself, never Anthropic, before anyth
 
 The same `discover_models()` feeds `provider_model_ids()`, so the TUI/Desktop pickers and `/model` list the account's picker too.
 
-## Subscription usage: same metering as `claude -p`, ~1.7x the interactive TUI
+## Subscription usage: same metering as `claude -p`; the interactive TUI is metered more lightly
 
 Measured Sept 9 2026 on a Pro plan (Sonnet 5 1M, ~500K fresh input tokens per arm, output pinned to `Hello!`, session meter read on claude.ai before/after each arm):
 
@@ -190,7 +192,9 @@ Measured Sept 9 2026 on a Pro plan (Sonnet 5 1M, ~500K fresh input tokens per ar
 | this provider | 2.36 | +21 | 8.9 |
 | Claude Code interactive TUI (two runs) | 2.22 / 2.25 | +12 / +11 | 5.4 / 4.9 |
 
-This provider draws subscription usage at exactly the `claude -p` / Agent SDK rate; there is no Hermes-specific penalty. Interactive Claude Code is metered at roughly 0.58x that rate, so plan for about 60% of the TUI's throughput per 5-hour window (≈ $6.5 vs ≈ $11 list-equivalent of Sonnet 5 on Pro). The wire-level usage buckets are identical across arms, so the weighting is server-side and applies to every `-p`/SDK harness. On identical coding tasks Hermes sent ~0.6x the tokens native Claude Code did; if your drain looks higher, compare Hermes `/usage` with Claude Code `/cost` on the same task.
+This provider draws subscription usage at exactly the `claude -p` / Agent SDK rate; there is no Hermes-specific penalty. Interactive Claude Code is metered at roughly 0.58x that rate, so plan for about 60% of the TUI's throughput per 5-hour window (≈ $6.5 vs ≈ $11 list-equivalent of Sonnet 5 on Pro). The wire-level usage buckets are identical across arms, so the weighting is server-side and applies to every `-p`/SDK harness. In that Sonnet 5 comparison Hermes sent ~0.6x the tokens native Claude Code did on identical coding tasks. If your drain looks higher, compare Hermes `/usage` with Claude Code `/cost` on the same task.
+
+Re-checked Oct 14–15 2026 on a Max plan with Opus 5.5 and Claude Code 2.1.299. The API reports 5-hour utilization in 0.01 steps, so the list dollars between consecutive steps were measured inside stretches of one kind of traffic: this provider $2.70 per step (4 intervals) and `claude -p` $2.87 and $2.44 (1 interval each), the same rate within noise. A block of interactive TUI conversations took about $6.65 per step, which suggests the TUI drew usage roughly 2.3x more slowly per list dollar than `claude -p` on this plan. That figure rests on about one meter step of TUI traffic, so treat it as an early reading.
 
 ## Model metadata and accounting
 
@@ -229,6 +233,8 @@ Token usage retains native uncached/cache-read/cache-write/output components. Co
 python evals/directsdk_admission.py /path/to/claude
 python evals/directsdk_cache_wire.py /path/to/claude
 ```
+
+CI runs both evals on Linux and macOS through `evals/ci.sh`, against a pinned Claude Code installed from npm (`CLAUDE_CODE_VERSION`, default 2.1.292). They need no credentials and make no inference calls. Bump the pin to qualify a new Claude Code release: a change in native's wire shape fails here before it reaches users.
 
 Transport invariant tests cover signed replay and harmless normalization, transformed projections, final tool batches/usage, async use, lazy failure, invalid parameters, conflicting auth, and active/paused/unstarted stream cleanup. The admission regression fails on the previous implementation (two upstream requests) and passes with one request, preserving first-response usage including zero values. Its cancellation control verifies upstream socket closure. A real-native ten-case loopback qualification covers normal text, tools, output/context limits, thinking-only recovery, refusal, HTTP errors, disconnects and cancellation, with one upstream request per call. Its responses are synthetic protocol fixtures, not paid-model evidence.
 

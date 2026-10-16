@@ -72,3 +72,12 @@ jobs:
           HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
           PYTHONPATH: ${{ github.workspace }}/hermes-agent
         run: python -m pytest -q
+      # A plugin can ship evals/ci.sh for checks beyond its unit suite (e.g. against a real vendor binary, offline).
+      - name: Run the plugin's CI evals
+        if: runner.os != 'Windows' && hashFiles(format('pantheon/{0}/evals/ci.sh', matrix.plugin)) != ''
+        working-directory: pantheon/${{ matrix.plugin }}
+        shell: bash
+        env:
+          HERMES_AGENT_REPO: ${{ github.workspace }}/hermes-agent
+          PYTHONPATH: ${{ github.workspace }}/hermes-agent
+        run: bash evals/ci.sh

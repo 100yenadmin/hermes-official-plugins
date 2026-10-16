@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import atexit
 import copy
+from collections import deque
 import hashlib
 import inspect
 import json
@@ -146,14 +147,22 @@ def prepare_history(messages, names=None):
                 expected = {**carrier['projection'], 'content': carrier['projection']['content'].strip()}
                 if projection(message) == expected:
                     for native in carrier['messages']:
-                        frames.append({'type': 'assistant', 'message': copy.deepcopy(native)})
+                        native = copy.deepcopy(native)
+                        # Native sizes its local "Prompt is too long" gate from the newest assistant
+                        # message's `usage`. A replayed frame keeps the usage of the request that made it,
+                        # so after Hermes compresses the history it still reports the old size and native
+                        # refuses locally without sending (#92). `usage` is local metadata, never on the wire.
+                        native.pop('usage', None)
+                        frames.append({'type': 'assistant', 'message': native})
                     continue
                 # Host compaction/hooks own visible history. Never restore stale
                 # pre-edit blocks or attach their signatures to rewritten content.
             blocks = content_blocks(message.get('content'))
             for call in projection(message)['tool_calls']:
                 # Inverse of the result mapping: a call outside the inventory (#39) replays as the model named it.
-                name = PREFIX + call['name'] if names is None or call['name'] in names else call['name']
+                name = call['name']
+                if names is None or name in names:
+                    name = PREFIX + (names.get(name, name) if isinstance(names, dict) else name)
                 blocks.append({'type': 'tool_use', 'id': call['id'], 'name': name, 'input': call['input']})
         elif role == 'tool':
             role = 'user'
@@ -270,24 +279,29 @@ def request_body(kwargs):
         raise ValueError('max_tokens must be a positive integer')
     if 'stop_sequences' in body and (not isinstance(body['stop_sequences'], list) or not all(isinstance(x, str) and x for x in body['stop_sequences'])):
         raise ValueError('stop_sequences must be a list of nonempty strings')
-    manifest, tools, names = [], [], set()
+    manifest, tools, names = [], [], {}
+    native_names = {}
     for tool in kwargs.get('tools') or []:
         if tool.get('type') != 'function':
             raise ValueError('Only function tools are supported')
         f = tool['function']
         name = f['name']
-        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,50}', name) or name in names:
-            raise ValueError('Tool names must be unique ASCII identifiers of at most 50 characters')
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,64}', name) or name in names:
+            raise ValueError('Tool names must be unique ASCII identifiers of at most 64 characters')
         if f.get('strict'):
             raise ValueError('Strict function schemas are unsupported')
-        names.add(name)
+        native_name = name if len(name) <= 50 else name[:41] + '_' + hashlib.sha256(name.encode()).hexdigest()[:8]
+        if native_name in native_names:
+            raise ValueError(f'Tool name collision: {name!r} and {native_names[native_name]!r} map to {native_name!r}')
+        names[name] = native_name
+        native_names[native_name] = name
         schema, description = f.get('parameters', {'type': 'object'}), f.get('description', '')
         if not isinstance(schema, dict) or not isinstance(description, str):
             raise ValueError('Tool schema must be an object and description a string')
         # The manifest (inert MCP server) and the request body must advertise the same shape.
         schema = normalize_input_schema(schema)
-        manifest.append({'name': name, 'description': description, 'inputSchema': schema})
-        tools.append({'name': PREFIX + name, 'description': description, 'input_schema': schema})
+        manifest.append({'name': native_name, 'description': description, 'inputSchema': schema})
+        tools.append({'name': PREFIX + native_name, 'description': description, 'input_schema': schema})
     body['tools'] = tools
     encoded = json.dumps(body, separators=(',', ':'), allow_nan=False)
     return encoded, manifest, names
@@ -354,6 +368,42 @@ def _with_windows_essentials(env):
         if key.upper() in _WINDOWS_ESSENTIALS and key.upper() not in present:
             env[key] = value
     return env
+
+
+def _with_login_identity(env):
+    """Carry the login identity Claude Code's local check reads into the child env.
+
+    Without ``USER`` a perfectly logged-in CLI reports ``loggedIn: false`` - instantly, with
+    empty stderr and no upstream request (#44; confirmed with ``claude auth status`` in the
+    issue thread). A supervised gateway (launchd background, containers, cron) or a filtered
+    env dict can omit it even when the process itself has one, so derive it before spawn:
+    from the parent environment, else from the running uid on POSIX.
+    """
+    if os.name == 'nt':
+        name = env.get('USERNAME') or env.get('USER') or os.environ.get('USERNAME') or ''
+        if name:
+            env.setdefault('USERNAME', name)
+            env.setdefault('USER', name)
+        return env
+    name = env.get('USER') or os.environ.get('USER') or ''
+    if not name:
+        try:
+            import pwd
+            name = pwd.getpwuid(os.getuid()).pw_name
+        except (ImportError, KeyError):
+            name = ''
+    if name:
+        env.setdefault('USER', name)
+        env.setdefault('LOGNAME', name)
+    return env
+
+
+def _stderr_tail(native_stderr):
+    """The first native stderr lines, for the raised error - a gateway-only failure with
+    stderr sent to DEVNULL is undiagnosable (#44): the reporter had to patch the plugin to
+    learn the stream was empty."""
+    text = ' '.join(line.strip() for line in native_stderr if line.strip())
+    return f' (native stderr: {text[:400]})' if text else ''
 
 
 class Stream:
@@ -590,7 +640,7 @@ class Client:
             stream.close()
 
     def _native_env(self):
-        env = _with_windows_essentials(dict(self.env if self.env is not None else os.environ))
+        env = _with_login_identity(_with_windows_essentials(dict(self.env if self.env is not None else os.environ)))
         if self.env is None:
             conflicts = [key for key in ('ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'ANTHROPIC_FOUNDRY_API_KEY') if env.get(key)]
             conflicts += [key for key in ('CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY') if env.get(key, '').lower() not in ('', '0', 'false', 'no', 'off')]
@@ -614,8 +664,11 @@ class Client:
         return env, resolved
 
     def _run(self, request, kwargs, body, manifest, names, system, frames):
+        hermes_names = {native: hermes for hermes, native in names.items()}
         p = None
         reader = None
+        err_drain = None
+        native_stderr = deque(maxlen=40)
         try:
             timeout = kwargs.get('timeout', self.timeout)
             timeout = getattr(timeout, 'read', timeout)
@@ -645,7 +698,25 @@ class Client:
                 effort = parsed.get('output_config', {}).get('effort')
                 if effort:
                     command += ['--effort', effort]
-                p = request.spawn(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding='utf-8', cwd=self._workdir(), env=env)
+                p = request.spawn(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', cwd=self._workdir(), env=env)
+                # Native's stderr is diagnosis, not noise: a gateway-only failure (issue #44)
+                # previously vanished into DEVNULL, and the reporter had to patch the plugin to
+                # learn the stream was empty. Drain on a thread so the child never blocks.
+                native_stderr = deque(maxlen=40)
+
+                def drain_err():
+                    try:
+                        for line in p.stderr:
+                            native_stderr.append(line)
+                    except Exception:
+                        pass
+                    finally:
+                        try:
+                            p.stderr.close()
+                        except Exception:
+                            pass
+                err_drain = threading.Thread(target=drain_err, daemon=True)
+                err_drain.start()
                 events = queue.Queue()
                 def read():
                     try:
@@ -675,7 +746,7 @@ class Client:
                             continue
                         if isinstance(event, Exception):
                             # The offending stdout line is the whole diagnosis (a shim banner, a stray print); keep it.
-                            raise RuntimeError('Invalid native stream-json output: ' + repr((getattr(event, 'doc', None) or str(event))[:300])) from event
+                            raise RuntimeError('Invalid native stream-json output: ' + repr((getattr(event, 'doc', None) or str(event))[:300]) + _stderr_tail(native_stderr)) from event
                         deadline = time.monotonic() + timeout
                         return event
                 for index, frame in enumerate(frames):
@@ -721,6 +792,8 @@ class Client:
                             yield self._chunk(kwargs['model'], {'reasoning_content': delta['thinking']})
                 p.wait(timeout=max(.1, deadline-time.monotonic()))
                 reader.join(timeout=1)
+                if err_drain is not None:
+                    err_drain.join(timeout=1)
                 if request.cancelled.is_set():
                     raise RuntimeError('Claude request cancelled')
                 admission = request.admission
@@ -739,7 +812,7 @@ class Client:
                 if native_error and not native_failure_handled:
                     if native_error_code == 'authentication_failed' and not admission.used:
                         # No usable login where Hermes runs native: it refuses before any upstream request; only its /api/hello pre-flight reaches the relay.
-                        raise ClaudeCodeLoggedOut(f'{LOGGED_OUT_HINT} (native: {native_error})')
+                        raise ClaudeCodeLoggedOut(f'{LOGGED_OUT_HINT} (native: {native_error}){_stderr_tail(native_stderr)}')
                     raise ClaudeAPIError('Native API error: ' + native_error, NATIVE_ERROR_STATUS.get(str(native_error_code)))
                 if len(results) != 1 or not assistants or not stopped:
                     raise RuntimeError('Incomplete native response: assistant, message_stop and one result required')
@@ -751,15 +824,16 @@ class Client:
                         # Native built-ins are off (--tools '', inert MCP, dontAsk), so any other name is
                         # the model's, e.g. a Tool Search-deferred tool called directly (#39). Hermes owns
                         # validation and answers an unknown name with a recoverable error.
-                        if block['name'] in names:
+                        if block['name'] in hermes_names:
                             # Native sometimes drops the prefix on a tool it was offered (#62); carry the
                             # offered name so replayed history does not teach the slip back to the model.
                             block['name'] = PREFIX + block['name']
                         name = block['name'].removeprefix(PREFIX)
+                        name = hermes_names.get(name, name)
                         calls.append({'id': block['id'], 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(block['input'], separators=(',', ':'), allow_nan=False)}})
                 boundary = bool(calls) and final.get('subtype') == 'error_max_turns' and p.returncode == 1
                 if not boundary and not native_failure_handled and (p.returncode != 0 or final.get('is_error') or final.get('subtype') != 'success'):
-                    raise RuntimeError('Native request failed: ' + str(final.get('subtype')))
+                    raise RuntimeError('Native request failed: ' + str(final.get('subtype')) + _stderr_tail(native_stderr))
                 usage = assistants[0]['usage'] if admission.used else final.get('usage')
                 if not isinstance(usage, dict) or not all(isinstance(usage.get(k), (int, float)) for k in ('input_tokens', 'output_tokens')):
                     raise RuntimeError('Native result missing complete token usage')
