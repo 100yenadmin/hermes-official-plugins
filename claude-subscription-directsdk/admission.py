@@ -159,14 +159,14 @@ def _frame_first(messages, queried, memory=None):
     return True
 
 
-# The only trailing system text the relay moves: native 2.1.299's date line, exactly as its opening request ends the
+# The only system text the relay moves: native 2.1.299's date line, exactly as its opening request ends the
 # environment message. Any other trailing text stays put, since moving text that varies per request into the
 # environment message would change the prefix from message 1 on every request.
 _DATE_LINE = re.compile(r"Today's date is \d{4}-\d{2}-\d{2}\.")
 
 
-def stable_request_context(payload, queried):
-    """Keep native's per-request context in the prefix later per-call requests replay.
+def stable_request_context(payload, queried, *, warm=False):
+    """Keep native's per-request context in the prefix later requests replay.
 
     Native splits today's date out of the environment into a trailing system message
     and prepends reminders to the newest user frame. Neither position recurs when
@@ -174,8 +174,13 @@ def stable_request_context(payload, queried):
     Append that date line (no other trailing text) after two newlines to the first system
     message, keeping a string a string; drop only plain text before the whole queried frame,
     found exactly once, on later user turns, which native already omits from tool-result steps. Removed cache markers move with setdefault, never multiply.
-    Warm sessions skip this transform at the relay. Assistant text/thinking, tool-result-only
-    turns, opening-turn reminders and top-level system/tools are never touched.
+    Warm sessions relocate only the date, including its replayed system row inside
+    later history: their launch reminders belong to #84's remembered context
+    relocation, not per-call stripping. If the warm environment
+    already contains a date (including yesterday's on rollover), leave native's date
+    layout alone rather than append a second date and change its kept-alive prefix.
+    Assistant text/thinking, tool-result-only turns, opening-turn reminders and
+    top-level system/tools are never touched.
     An already-stable or unexpectedly shaped payload forwards unchanged."""
     try:
         body = json.loads(payload)
@@ -192,29 +197,35 @@ def stable_request_context(payload, queried):
         if queried is not None and (not isinstance(queried, list) or any(not isinstance(b, dict) for b in queried)):
             return payload
         changed = False
-        last = messages[-1] if messages else {}
         env = next((m for m in messages[:-1] if m.get('role') == 'system'), None)
-        content = last.get('content')
-        tail = {'type': 'text', 'text': content} if isinstance(content, str) else (
-            content[0] if isinstance(content, list) and len(content) == 1 else {})
-        if last.get('role') == 'system' and env is not None and tail.get('type') == 'text' \
-                and _DATE_LINE.fullmatch(tail.get('text', '')):
+        dates = []
+        candidates = enumerate(messages) if warm else enumerate(messages[-1:], len(messages) - 1)
+        for index, message in candidates:
+            content = message.get('content')
+            tail = {'type': 'text', 'text': content} if isinstance(content, str) else (
+                content[0] if isinstance(content, list) and len(content) == 1 else {})
+            if message is not env and message.get('role') == 'system' and tail.get('type') == 'text' \
+                    and _DATE_LINE.fullmatch(tail.get('text', '')):
+                dates.append((index, message, tail))
+        if env is not None and len(dates) == 1:
+            index, last, tail = dates[0]
             original, line = env['content'], '\n\n' + tail['text']
             target = {'type': 'text', 'text': original} if isinstance(original, str) else (original[-1] if original else {})
-            if target.get('type') == 'text' and not target['text'].endswith(tail['text']):
+            if target.get('type') == 'text' and not target['text'].endswith(tail['text']) \
+                    and not (warm and _DATE_LINE.search(target['text'])):
                 if isinstance(original, str):
                     env['content'] = original + line
                 else:
                     target['text'] += line
                 mark = tail.get('cache_control', last.get('cache_control'))
-                messages.pop()
-                previous = messages[-1]['content']
+                messages.pop(index)
+                previous = messages[index - 1]['content'] if index else []
                 if mark is not None and isinstance(previous, list) and previous:
                     previous[-1].setdefault('cache_control', mark)
                 changed = True
         newest = next((m for m in reversed(messages) if m.get('role') == 'user'), {})
         blocks = newest.get('content')
-        if queried and any(b.get('type') != 'tool_result' for b in queried) and isinstance(blocks, list) \
+        if not warm and queried and any(b.get('type') != 'tool_result' for b in queried) and isinstance(blocks, list) \
                 and any(m.get('role') == 'assistant' for m in messages):
             frame = [_plain(b) for b in queried]
             hits = [i for i in range(len(blocks) - len(frame) + 1) if [_plain(b) for b in blocks[i:i + len(frame)]] == frame]
@@ -700,8 +711,8 @@ class Handler(BaseHTTPRequestHandler):
                 # exactly as native built it (the pre-restoration behaviour), so a CLI that
                 # reshapes its tool results degrades to an uncached tail, never a failed turn.
                 gate.unrestored = str(exc)
-            if not isinstance(getattr(gate, 'first_turn', None), dict):
-                payload = stable_request_context(payload, gate.queried)
+            payload = stable_request_context(payload, gate.queried,
+                                             warm=isinstance(getattr(gate, 'first_turn', None), dict))
             payload = pin_message_breakpoint(payload, gate.queried, gate.first_turn)
             target = gate.upstream
             if target.scheme == 'https':

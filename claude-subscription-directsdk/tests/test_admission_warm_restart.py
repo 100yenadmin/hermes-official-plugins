@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from admission import _breakpoints, _frame_first, _plain, pin_message_breakpoint
+from admission import _breakpoints, _frame_first, _plain, pin_message_breakpoint, stable_request_context
 
 MARKER = {'type': 'ephemeral', 'ttl': '1h'}
 CONTEXT = [{'type': 'text', 'text': '<system-reminder>synthetic context</system-reminder>'},
@@ -86,6 +86,23 @@ def test_restart_boundaries_replay_completed_turn_prefix(rounds, dual):
     for body in (p2_first, p2_last, p3_first):
         assert [_plain(b) for b in body['messages'][0]['content']] == first[0]['content'] + CONTEXT
         assert _breakpoints(body) <= 4
+
+
+def test_warm_date_normalization_preserves_remembered_context_relocation():
+    first, second = turn(1, 1), turn(2, 1)
+    memory = {}
+    for messages in (first + second[:1], first + second):
+        body = native(messages, len(first), dual=True)
+        date = body['messages'][-1]['content'][0]['text']
+        env = body['messages'][1]['content']
+        normalized = stable_request_context(wire(body), messages[-1]['content'], warm=True)
+        out = json.loads(pin_message_breakpoint(normalized, messages[-1]['content'], memory))
+        assert out['messages'][1]['content'] == env + '\n\n' + date
+        assert [_plain(b) for b in out['messages'][0]['content']] == first[0]['content'] + CONTEXT
+        assert [_plain(b) for b in out['messages'][len(first) + 1]['content']] == second[0]['content']
+        assert memory == {'context': {'index': len(first) + 1, 'blocks': CONTEXT}}
+        assert len(out['messages']) == len(body['messages']) - 1
+        assert _breakpoints(out) <= 4
 
 
 def legacy_expected(body, queried, permutation=False):
