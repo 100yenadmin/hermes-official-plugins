@@ -5,6 +5,7 @@ import asyncio
 import atexit
 import copy
 from collections import deque
+from contextlib import suppress
 import hashlib
 import inspect
 import json
@@ -383,6 +384,54 @@ def kill_process_tree(process):
         pass
 
 
+DRAIN_GRACE_S = 10.0
+_draining = set()
+
+
+def _kill_draining():
+    for process in list(_draining):
+        kill_process_tree(process)
+
+
+atexit.register(_kill_draining)
+
+
+def _fast_eligible(result, admission, stopped, native_error):
+    return (admission.used and admission.status == 200 and admission.capture.complete
+            and stopped and native_error is None and admission.denied == 0
+            and admission.capture.message.get('stop_reason') != 'refusal'
+            and ((result.get('subtype') == 'success' and not result.get('is_error'))
+                 or (result.get('subtype') == 'error_max_turns' and any(
+                     b.get('type') == 'tool_use' for b in admission.capture.message['content']))))
+
+
+def _hand_off(process, admission, reader, err_drain):
+    _draining.add(process)
+
+    def drain():
+        try:
+            try:
+                # Kanban may reap native first; its exit code is irrelevant after result.
+                process.wait(timeout=DRAIN_GRACE_S)
+            except subprocess.TimeoutExpired:
+                kill_process_tree(process)
+                with suppress(subprocess.TimeoutExpired):
+                    process.wait(timeout=5)
+            reader.join(timeout=5)
+            err_drain.join(timeout=5)
+        finally:
+            try:
+                # Keep late native requests behind the consumed admission until it exits.
+                admission.close()
+            finally:
+                for pipe in (process.stdin, process.stdout, process.stderr):
+                    if pipe and not pipe.closed:
+                        pipe.close()
+                _draining.discard(process)
+
+    threading.Thread(target=drain, daemon=True, name='directsdk-drain').start()
+
+
 # Node, cmd.exe and Claude Code's own config lookup need these even when the caller hands us a
 # deliberately minimal environment; without SystemRoot a Windows child cannot even open a socket.
 _WINDOWS_ESSENTIALS = ('SYSTEMROOT', 'SYSTEMDRIVE', 'COMSPEC', 'PATHEXT', 'TEMP', 'TMP', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA', 'PROGRAMDATA')
@@ -738,23 +787,23 @@ class Client:
                 # learn the stream was empty. Drain on a thread so the child never blocks.
                 native_stderr = deque(maxlen=40)
 
-                def drain_err():
+                def drain_err(process=p):
                     try:
-                        for line in p.stderr:
+                        for line in process.stderr:
                             native_stderr.append(line)
                     except Exception:
                         pass
                     finally:
                         try:
-                            p.stderr.close()
+                            process.stderr.close()
                         except Exception:
                             pass
                 err_drain = threading.Thread(target=drain_err, daemon=True)
                 err_drain.start()
                 events = queue.Queue()
-                def read():
+                def read(process=p):
                     try:
-                        for line in p.stdout:
+                        for line in process.stdout:
                             events.put(json.loads(line))
                     except Exception as error:
                         events.put(error)
@@ -762,9 +811,9 @@ class Client:
                         # The consumer may close while paused at a yielded chunk.
                         # Reaping belongs to this owner thread, never cancel(). Clear the group
                         # first: a launcher that exits leaves children the reap would orphan.
-                        if os.name != 'nt' and hasattr(os, 'waitid') and _unreaped(p, block=True):
-                            kill_process_tree(p)
-                        p.wait()
+                        if os.name != 'nt' and hasattr(os, 'waitid') and _unreaped(process, block=True):
+                            kill_process_tree(process)
+                        process.wait()
                         events.put(None)
                 reader = threading.Thread(target=read, daemon=True)
                 reader.start()
@@ -823,6 +872,7 @@ class Client:
                 send(None)
                 assistants, results, stopped, emitted = [], [], False, ''
                 native_error = native_error_code = None
+                fast = False
                 while True:
                     event = receive()
                     if event is None:
@@ -836,6 +886,9 @@ class Client:
                             assistants.append(event['message'])
                     elif kind == 'result':
                         results.append(event)
+                        if _fast_eligible(event, request.admission, stopped, native_error):
+                            fast = True
+                            break
                     elif kind == 'stream_event':
                         native = event['event']
                         if native['type'] == 'message_stop':
@@ -846,13 +899,21 @@ class Client:
                             yield self._chunk(kwargs['model'], {'content': delta['text']})
                         elif delta.get('type') == 'thinking_delta':
                             yield self._chunk(kwargs['model'], {'reasoning_content': delta['thinking']})
-                p.wait(timeout=max(.1, deadline-time.monotonic()))
-                reader.join(timeout=1)
-                if err_drain is not None:
-                    err_drain.join(timeout=1)
+                if fast:
+                    with request.lock:
+                        admission = request.admission
+                        request.process = None
+                        request.admission = None
+                    _hand_off(p, admission, reader, err_drain)
+                    p = None
+                else:
+                    p.wait(timeout=max(.1, deadline-time.monotonic()))
+                    reader.join(timeout=1)
+                    if err_drain is not None:
+                        err_drain.join(timeout=1)
+                    proc_returncode, admission = p.returncode, request.admission
                 if request.cancelled.is_set():
                     raise RuntimeError('Claude request cancelled')
-                admission = request.admission
                 if admission.used:
                     if admission.status != 200 or not admission.capture.complete:
                         # Native's last error is the admission denial; name the first attempt's outcome so reports are diagnosable.
@@ -887,8 +948,8 @@ class Client:
                         name = block['name'].removeprefix(PREFIX)
                         name = hermes_names.get(name, name)
                         calls.append({'id': block['id'], 'type': 'function', 'function': {'name': name, 'arguments': json.dumps(block['input'], separators=(',', ':'), allow_nan=False)}})
-                boundary = bool(calls) and final.get('subtype') == 'error_max_turns' and p.returncode == 1
-                if not boundary and not native_failure_handled and (p.returncode != 0 or final.get('is_error') or final.get('subtype') != 'success'):
+                boundary = bool(calls) and final.get('subtype') == 'error_max_turns' and (fast or proc_returncode == 1)
+                if not boundary and not native_failure_handled and ((not fast and proc_returncode != 0) or final.get('is_error') or final.get('subtype') != 'success'):
                     raise RuntimeError('Native request failed: ' + str(final.get('subtype')) + _stderr_tail(native_stderr))
                 usage = assistants[0]['usage'] if admission.used else final.get('usage')
                 if not isinstance(usage, dict) or not all(isinstance(usage.get(k), (int, float)) for k in ('input_tokens', 'output_tokens')):
@@ -927,6 +988,8 @@ class Client:
                 response = obj({'id': assistants[-1].get('id', 'claude-native'), 'model': kwargs['model'], 'object': 'chat.completion', 'choices': [{'index': 0, 'finish_reason': finish, 'message': message}], 'usage': normalized_usage})
                 chunk = self._chunk(kwargs['model'], {'content': None, 'tool_calls': [dict(tc, index=i) for i, tc in enumerate(calls)] or None, 'reasoning_details': [carrier], **({'refusal': message['refusal']} if refused else {})}, finish, normalized_usage)
                 chunk._response = response
+                # Fast return removes these per-request files while native drains: safe on POSIX;
+                # ignore_cleanup_errors already tolerates files still held open on Windows.
                 yield chunk
         finally:
             request.cancel()
