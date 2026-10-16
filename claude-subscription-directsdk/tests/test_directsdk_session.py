@@ -65,7 +65,8 @@ def call_next():
     block = queue[0]
     rpc[0] += 1
     params = {'name':block['name'][len('mcp__hermes__'):],'arguments':block['input']}
-    if not os.environ.get('FAKE_NO_TOOL_USE_ID'):  # Anthropic's Agent SDK sends no claudecode/toolUseId
+    # Anthropic's Agent SDK sends no claudecode/toolUseId; FAKE_TOOL_USE_ID_RPCS names only that many first RPCs.
+    if not os.environ.get('FAKE_NO_TOOL_USE_ID') and rpc[0] <= int(os.environ.get('FAKE_TOOL_USE_ID_RPCS', '1000000')):
         params['_meta'] = {'claudecode/toolUseId':block['id']}
     out({'type':'control_request','request_id':'c%d' % rpc[0],'request':{'subtype':'mcp_message','server_name':'hermes','message':{'jsonrpc':'2.0','id':rpc[0],'method':'tools/call','params':params}}})
 def wire():
@@ -1277,10 +1278,30 @@ def test_identical_tool_calls_dispatched_out_of_order_keep_their_results(rig, to
     messages += [as_history(first), {'role': 'tool', 'tool_call_id': 'toolu_twin1', 'content': 'ONE'},
                  {'role': 'tool', 'tool_call_id': 'toolu_twin2', 'content': 'TWO'}]
     second = step(client, messages)
-    # Named calls keep the session; unnamed ones are replayed before any upstream request sees a guessed pairing.
-    assert second.usage.model_dump()['native_admission']['session'] == ('reused' if tool_use_id else 'rebuild:unpaired')
+    # Named or not, identical calls are replayed before any upstream request sees a guessed pairing.
+    assert second.usage.model_dump()['native_admission']['session'] == 'rebuild:unpaired'
     assert sorted(answered(rig.upstream.bodies[-1])) == [('toolu_twin1', 'ONE'), ('toolu_twin2', 'TWO')]
-    assert len(rig.spawned()) == (1 if tool_use_id else 2)
+    assert len(rig.spawned()) == 2
+
+
+def test_identical_unnamed_calls_after_a_named_one_are_replayed(rig):
+    """An earlier RPC that carried claudecode/toolUseId says nothing about later ones: unnamed identical calls
+    dispatched out of order must not swap results."""
+    client = rig.client()
+    client.env.update(FAKE_TOOL_USE_ID_RPCS='2', FAKE_REVERSE_CALLS='1')
+    twins = [{'type': 'tool_use', 'id': f'toolu_twin{i}', 'name': 'mcp__hermes__probe', 'input': {'key': 'same'}} for i in (1, 2)]
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(client, messages)  # two distinct calls, both named
+    rig.upstream.reply = lambda n, body: sse(f'm{n}', twins, 'tool_use')
+    messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': c.id} for c in first.choices[0].message.tool_calls]
+    second = step(client, messages)  # identical calls, unnamed, dispatched B then A
+    rig.upstream.reply = None
+    assert second.usage.model_dump()['native_admission']['session'] == 'reused'
+    messages += [as_history(second), {'role': 'tool', 'tool_call_id': 'toolu_twin1', 'content': 'ONE'},
+                 {'role': 'tool', 'tool_call_id': 'toolu_twin2', 'content': 'TWO'}]
+    third = step(client, messages)
+    assert third.usage.model_dump()['native_admission']['session'] == 'rebuild:unpaired'
+    assert sorted(answered(rig.upstream.bodies[-1]))[-2:] == [('toolu_twin1', 'ONE'), ('toolu_twin2', 'TWO')]
 
 
 def test_tool_call_arguments_match_as_exact_json(rig):
@@ -1306,6 +1327,18 @@ def test_a_launch_admitted_between_failed_launches_resets_the_count(rig, tmp_pat
     step(broken, [{'role': 'user', 'content': 'one'}])
     with pytest.raises(directsdk.ClaudeAPIError):
         step(rig.client(), [{'role': 'user', 'content': 'hit the limit'}])
+    step(broken, [{'role': 'user', 'content': 'two'}])
+    assert directsdk._session_enabled(broken.env) is True
+
+
+def test_an_admitted_stream_closed_early_resets_the_count(rig, tmp_path):
+    """Stream.close() ends the generator with GeneratorExit, past the except path: the admitted launch still counts."""
+    broken = no_session_client(rig, tmp_path)
+    step(broken, [{'role': 'user', 'content': 'one'}])
+    stream = rig.client().create(model='sonnet', messages=[{'role': 'user', 'content': 'hello'}], tools=TOOLS, stream=True)
+    next(iter(stream))
+    stream.close()
+    assert directsdk._session_failures == 0
     step(broken, [{'role': 'user', 'content': 'two'}])
     assert directsdk._session_enabled(broken.env) is True
 

@@ -1019,8 +1019,6 @@ class Client:
             if admission is not None:
                 admission.abort()  # nothing is admitted after this, so `used` is final
             refused = isinstance(error, (ValueError, ClaudeCodeMissing, ClaudeCodeLoggedOut)) or (isinstance(error, ClaudeAPIError) and error.status_code is not None)
-            if spawn and admission is not None and admission.used:
-                _session_launched()  # the launch reached admission; the step failed upstream, not the launch
             if yielded or refused or request.cancelled.is_set() or (admission is not None and admission.used):
                 raise
             _session_log.info('session fallback: session=%s per-call after %s', session.ident[:8] + ':' + str(session.pid), type(error).__name__)
@@ -1028,6 +1026,10 @@ class Client:
                 _session_launched(error)
             yield from self._run(request, kwargs, body, manifest, names, system, frames)
         finally:
+            if spawn and session.admission is not None and session.admission.used:
+                # The launch reached admission: a step that then failed upstream, or a stream the caller closed early
+                # (GeneratorExit skips the except above), failed after the launch, not in it.
+                _session_launched()
             if session is not None and not done:
                 session.detach(request)
                 _session_discard(session, 'native-rewrote-tool-result' if lossy else 'step-failed-or-poisoned')
@@ -1273,7 +1275,6 @@ class NativeSession:
         self.events = queue.Queue()
         self.lock = threading.Lock()  # stdin writes and the parked/results tables
         self.parked, self.results, self.claimed, self.calls = {}, {}, set(), []
-        self.named = False  # a tools/call named its tool_use in claudecode/toolUseId
         self.busy, self.last_used, self.killed = True, time.monotonic(), False
         self.owner = lambda: None
 
@@ -1338,7 +1339,6 @@ class NativeSession:
         step settles (read it from the relay's capture), later ones after the next step re-armed the relay."""
         tool_id = (params.get('_meta') or {}).get('claudecode/toolUseId')
         if tool_id:
-            self.named = True
             return tool_id
         blocks = (((self.admission.capture.message if self.admission is not None else None) or {}).get('content') or []) + self.calls
         key = _json_key(params.get('arguments') or {})
@@ -1346,11 +1346,10 @@ class NativeSession:
                      and b.get('name') == PREFIX + str(params.get('name')) and _json_key(b.get('input') or {}) == key), None)
 
     def unpaired(self):
-        """True when the parked calls include identical ones (same name and arguments) and this native has not shown it
-        names calls in claudecode/toolUseId: it may dispatch them out of call order, so which result answers which is unknown."""
+        """True when the parked calls include identical ones (same name and arguments). An RPC without
+        claudecode/toolUseId may answer either, and native may dispatch them out of call order, so which result answers
+        which is unknown. Earlier RPCs that carried the ID prove nothing about these, so this never trusts them."""
         with self.lock:
-            if self.named:
-                return False
             keys = [(block.get('name'), _json_key(block.get('input') or {})) for block in self.calls]
             return len(set(keys)) < len(keys)
 
