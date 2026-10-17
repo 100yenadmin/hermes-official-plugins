@@ -295,16 +295,15 @@ class XChatCrypto:
         self,
         conversation_id: str,
         text: str,
-        reply_to_event: dict[str, Any],
+        reply_to_event: str,
         *,
         attachments: Optional[list[dict[str, Any]]] = None,
     ) -> dict[str, str]:
         """Encrypt + sign ``text`` as a native threaded reply.
 
-        ``reply_to_event`` is the DECRYPTED event dict of the message being
-        replied to (from :meth:`decrypt_one` / :meth:`decrypt_batch`).
-        Falls back to :meth:`encrypt_text` semantics on SDK versions without
-        reply support.
+        ``reply_to_event`` is the base64 ``encoded_event`` of the message being
+        replied to, as the events endpoint served it; the SDK verifies it and
+        derives the reply preview from it.
         """
         kwargs: dict[str, Any] = {}
         if attachments:
@@ -363,6 +362,7 @@ def message_attachments(event: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for att in raw if isinstance(raw, (list, tuple)) else []:
         att = _as_dict(att)
+        att = _as_dict(att.get("media")) if att.get("media") else att
         if att.get("media_hash_key"):
             out.append(att)
     return out

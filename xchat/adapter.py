@@ -61,7 +61,6 @@ logger = logging.getLogger(__name__)
 MAX_MESSAGE_LENGTH = 9500
 
 DEFAULT_POLL_INTERVAL = 10.0
-DISCOVERY_INTERVAL = 300.0  # re-list conversations every 5 minutes
 ERROR_BACKOFF = [5, 15, 30, 60, 120]
 DEDUP_MAX_SIZE = 5000
 # Bounded cache of recent decrypted events per conversation — used to build
@@ -103,6 +102,11 @@ def _load_cursors() -> Dict[str, str]:
     if not isinstance(data, dict):
         return {}
     return {str(k): str(v) for k, v in data.items() if str(v)}
+
+
+def _conv_key(conversation_id: str) -> str:
+    """One cache key per conversation: events embed ``A:B``, URL paths and listings use ``A-B``."""
+    return str(conversation_id).replace(":", "-")
 
 
 def _event_id_newer(a: str, b: str) -> bool:
@@ -248,6 +252,9 @@ class XChatAdapter(BasePlatformAdapter):
         # backlog guard; the in-memory dedup set is only a same-session
         # safety net (echo suppression of our own sends).
         self._conversations: Set[str] = set(self._pinned_conversations)
+        # Conversations that appeared after the first discovery pass: no backlog to skip.
+        self._initial_discovery_done = False
+        self._live_conversations: Set[str] = set()
         self._cursors: Dict[str, str] = _load_cursors()
         self._seen_event_ids: Dict[str, float] = {}
         self._conversation_keys: Dict[str, Dict[str, bytes]] = {}
@@ -256,7 +263,7 @@ class XChatAdapter(BasePlatformAdapter):
         self._latest_key_version: Dict[str, str] = {}
         # Recent decrypted events per conversation, keyed by event id — lets
         # send(reply_to=...) build a native threaded reply.
-        self._event_cache: Dict[str, Dict[str, Dict[str, Any]]] = {}
+        self._event_cache: Dict[str, Dict[str, str]] = {}
         # Read receipts (privacy default: off).
         env_read = os.getenv("XCHAT_SEND_READ_RECEIPTS")
         if env_read is not None:
@@ -389,19 +396,20 @@ class XChatAdapter(BasePlatformAdapter):
 
     async def _run_poll_loop(self) -> None:
         backoff_idx = 0
-        last_discovery = 0.0
         while self._running:
             try:
-                now = time.monotonic()
-                if not self._pinned_conversations and (
-                    now - last_discovery >= DISCOVERY_INTERVAL or not self._conversations
-                ):
-                    await self._discover_conversations()
-                    last_discovery = now
-
+                # One conversation-list read per cycle says which conversations have
+                # anything newer than our cursor; only those get an events read. Events
+                # are billed per resource returned, so re-reading idle conversations
+                # every cycle is the dominant cost.
+                newest = await self._discover_conversations()
                 for conv_id in list(self._conversations):
                     if not self._running:
                         return
+                    head = newest.get(_conv_key(conv_id))
+                    cursor = self._cursors.get(conv_id, "")
+                    if head and cursor and not _event_id_newer(head, cursor):
+                        continue
                     await self._poll_conversation(conv_id)
 
                 backoff_idx = 0
@@ -419,23 +427,34 @@ class XChatAdapter(BasePlatformAdapter):
                 logger.warning("[xchat] poll error (retry in %ds): %s", delay, e)
                 await asyncio.sleep(delay)
 
-    async def _discover_conversations(self) -> None:
+    async def _discover_conversations(self) -> Dict[str, str]:
+        """List conversations; returns ``{conversation: newest_event_id}`` where reported."""
         assert self._api is not None
         token: Optional[str] = None
         found: Set[str] = set()
+        newest: Dict[str, str] = {}
         for _ in range(10):  # hard page cap
             page = await self._api.get_conversations(max_results=100, pagination_token=token)
             for conv in page.get("data") or []:
                 cid = str(conv.get("conversation_id") or conv.get("id") or "").strip()
                 if cid:
                     found.add(cid)
+                    if conv.get("newest_event_id"):
+                        newest[_conv_key(cid)] = str(conv["newest_event_id"])
             token = (page.get("meta") or {}).get("next_token")
             if not token:
                 break
         new = found - self._conversations
         if new:
             logger.info("[xchat] discovered %d new conversation(s)", len(new))
+            if self._initial_discovery_done:
+                # Started after we were already watching: every event is a live message.
+                self._live_conversations |= new
+        self._initial_discovery_done = True
+        if self._pinned_conversations:
+            return newest  # pinned: poll exactly those, never widen the set
         self._conversations |= found
+        return newest
 
     async def _poll_conversation(self, conv_id: str) -> None:
         assert self._api is not None and self._crypto is not None
@@ -486,7 +505,7 @@ class XChatAdapter(BasePlatformAdapter):
         if not collected:
             return
 
-        if not cursor:
+        if not cursor and conv_id not in self._live_conversations:
             # First sight of this conversation EVER (no persisted cursor):
             # batch-decrypt to seed the SDK's verified-key cache, but do NOT
             # reply to the historical backlog. The cursor persists, so a
@@ -517,7 +536,7 @@ class XChatAdapter(BasePlatformAdapter):
                 continue
             try:
                 event = self._crypto.decrypt_one(
-                    event_b64, self._conversation_keys.get(conv_id) or None
+                    event_b64, self._conversation_keys.get(_conv_key(conv_id)) or None
                 )
             except Exception as e:
                 logger.warning("[xchat] decrypt failed conv=%s event=%s: %s", conv_id, event_id, e)
@@ -544,7 +563,7 @@ class XChatAdapter(BasePlatformAdapter):
             # The signature covers the canonical conversation id embedded in
             # the event — prefer it for replies.
             canonical_conv = str(event.get("conversation_id") or conv_id)
-            self._cache_event(canonical_conv, event_id, event)
+            self._cache_event(canonical_conv, event_id, event_b64)
 
             # Encrypted media attachments: download + decrypt + cache locally
             # so vision / the agent can read them.
@@ -582,15 +601,15 @@ class XChatAdapter(BasePlatformAdapter):
             return
         keys = (batch.get("conversation_keys") or {}).get("keys") or {}
         if keys:
-            self._conversation_keys.setdefault(conv_id, {}).update(keys)
+            self._conversation_keys.setdefault(_conv_key(conv_id), {}).update(keys)
         latest = batch.get("latest_key_version")
         if latest:
-            self._latest_key_version[conv_id] = str(latest)
+            self._latest_key_version[_conv_key(conv_id)] = str(latest)
 
-    def _cache_event(self, conv_id: str, event_id: str, event: Dict[str, Any]) -> None:
-        """Keep a bounded cache of decrypted events for native threaded replies."""
-        cache = self._event_cache.setdefault(conv_id, {})
-        cache[event_id] = event
+    def _cache_event(self, conv_id: str, event_id: str, event_b64: str) -> None:
+        """Keep a bounded cache of encoded events: the SDK builds a threaded reply from the raw event."""
+        cache = self._event_cache.setdefault(_conv_key(conv_id), {})
+        cache[event_id] = event_b64
         while len(cache) > REPLY_CACHE_MAX:
             cache.pop(next(iter(cache)))
 
@@ -598,14 +617,13 @@ class XChatAdapter(BasePlatformAdapter):
         self, conv_id: str, event: Dict[str, Any]
     ) -> Optional[Dict[str, Any]]:
         """Reply metadata for the inbound event (id/text/author), if present."""
-        reply = event.get("reply_to") or event.get("replied_to_event")
-        if not reply:
+        content = event.get("content") if isinstance(event.get("content"), dict) else {}
+        reply = content.get("replying_to_preview")
+        if not isinstance(reply, dict):
             return None
-        reply = reply if isinstance(reply, dict) else {}
-        rid = str(reply.get("id") or reply.get("sequence_id") or "") or None
         return {
-            "message_id": rid,
-            "text": reply.get("text") or message_text(reply),
+            "message_id": str(reply.get("replying_to_message_sequence_id") or "") or None,
+            "text": reply.get("message_text"),
             "author_id": str(reply.get("sender_id") or "") or None,
         }
 
@@ -629,10 +647,10 @@ class XChatAdapter(BasePlatformAdapter):
             validate_inbound_media_size,
         )
 
-        keys = self._conversation_keys.get(conv_id) or {}
+        keys = self._conversation_keys.get(_conv_key(conv_id)) or {}
         event_key_version = str(event.get("key_version") or "")
         conv_key = keys.get(event_key_version) or (
-            keys.get(self._latest_key_version.get(conv_id, "")) if keys else None
+            keys.get(self._latest_key_version.get(_conv_key(conv_id), "")) if keys else None
         )
         if conv_key is None and keys:
             # Last resort: any cached key (single-key conversations).
@@ -718,10 +736,9 @@ class XChatAdapter(BasePlatformAdapter):
         """Fetch new senders' public keys into the SDK's signing-key store."""
         assert self._api is not None and self._crypto is not None
         senders = {
-            str(e.get("sender_id"))
-            for e in events
-            if e.get("sender_id") and str(e.get("sender_id")) != self._bot_user_id
-        } - self._known_senders
+            str(e.get("sender_id")) for e in events if e.get("sender_id")
+        } | {self._bot_user_id}
+        senders -= self._known_senders
         for sender_id in senders:
             try:
                 for pk in await self._api.get_public_keys(sender_id):
@@ -873,7 +890,7 @@ class XChatAdapter(BasePlatformAdapter):
         replied-to event is in the decrypted-event cache."""
         assert self._crypto is not None
         if reply_to:
-            target = (self._event_cache.get(chat_id) or {}).get(str(reply_to))
+            target = (self._event_cache.get(_conv_key(chat_id)) or {}).get(str(reply_to))
             if target is not None:
                 try:
                     return self._crypto.encrypt_reply(
@@ -888,10 +905,10 @@ class XChatAdapter(BasePlatformAdapter):
 
     def _conversation_key_for_send(self, chat_id: str) -> Optional[bytes]:
         """Latest cached raw conversation key (for media stream encryption)."""
-        keys = self._conversation_keys.get(chat_id) or {}
+        keys = self._conversation_keys.get(_conv_key(chat_id)) or {}
         if not keys:
             return None
-        latest = self._latest_key_version.get(chat_id)
+        latest = self._latest_key_version.get(_conv_key(chat_id))
         if latest and latest in keys:
             return keys[latest]
         # Highest numeric version wins when latest is unknown.
@@ -1130,11 +1147,7 @@ async def _standalone_send(
         raw_key: Optional[bytes] = None
         raw_key_version: Optional[str] = None
         if events_b64:
-            sender_ids = {
-                str(e.get("sender_id"))
-                for e in raw_events
-                if e.get("sender_id") and str(e.get("sender_id")) != user_id
-            }
+            sender_ids = {str(e.get("sender_id")) for e in raw_events if e.get("sender_id")} | {user_id}
             signing_keys: List[Dict[str, str]] = []
             for sender_id in sender_ids:
                 try:
@@ -1254,6 +1267,15 @@ async def _standalone_send(
         await api.aclose()
 
 
+_TARGET_RE = re.compile(r"^(?:\d{1,19}|\d{1,19}[-:]\d{1,19}|g\d{1,19})$")
+
+
+def _parse_target_ref(target_ref: str):
+    """``hermes send xchat:<id>``: a user id, a 1:1 conversation (``A-B`` / ``A:B``) or a group (``g…``)."""
+    ref = str(target_ref).strip()
+    return (ref.replace(":", "-"), None) if _TARGET_RE.match(ref) else None
+
+
 def _is_bare_user_id(chat_id: str) -> bool:
     """True for a bare numeric X user id (a 1:1 target with no conversation yet)."""
     return str(chat_id).isdigit()
@@ -1303,9 +1325,17 @@ async def _initiate_conversation(
 
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin loader at startup."""
+    import dataclasses
+
+    from gateway.platform_registry import PlatformEntry
+
     from . import cli as _cli
 
+    # Newer cores parse `hermes send xchat:<conversation id>` through the plugin; older ones lack the field.
+    optional = {"parse_target_ref_fn": _parse_target_ref}
+    known = {f.name for f in dataclasses.fields(PlatformEntry)}
     ctx.register_platform(
+        **{k: v for k, v in optional.items() if k in known},
         name="xchat",
         label="X Chat (encrypted DMs)",
         adapter_factory=lambda cfg: XChatAdapter(cfg),

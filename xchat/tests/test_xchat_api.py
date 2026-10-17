@@ -197,7 +197,8 @@ async def test_media_upload_three_step_flow():
         body = _json.loads(request.content) if request.content else {}
         calls.append({"path": request.url.path, "body": body})
         if request.url.path == "/2/chat/media/upload/initialize":
-            assert body["conversation_id"] == "111-999"
+            # Media bodies take the colon form (X's reference client, chat-xdk examples/python/x_api.py).
+            assert body["conversation_id"] == "111:999"
             return httpx.Response(
                 200,
                 json={"data": {"session_id": "sess1", "media_hash_key": "mhk9",
@@ -218,6 +219,7 @@ async def test_media_upload_three_step_flow():
     reassembled = b"".join(_b64.b64decode(a["body"]["media"]) for a in appends)
     assert reassembled == blob
     assert paths[-1] == "/2/chat/media/upload/sess1/finalize"
+    assert calls[-1]["body"]["num_parts"] == "3"  # required by X's OpenAPI finalize schema
     await api.aclose()
 
 

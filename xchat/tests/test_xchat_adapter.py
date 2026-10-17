@@ -853,8 +853,8 @@ async def test_inbound_attachment_downloaded_and_decrypted(monkeypatch, tmp_path
 async def test_outbound_media_encrypt_upload_attach(monkeypatch, tmp_path):
     adapter = _make_adapter(monkeypatch)
     api, crypto = _wire(adapter)
-    adapter._conversation_keys["111:999"] = {"2": b"k2"}
-    adapter._latest_key_version["111:999"] = "2"
+    adapter._conversation_keys["111-999"] = {"2": b"k2"}
+    adapter._latest_key_version["111-999"] = "2"
 
     f = tmp_path / "doc.pdf"
     f.write_bytes(b"%PDF-fake")
@@ -886,7 +886,7 @@ async def test_outbound_media_without_key_fails_cleanly(monkeypatch, tmp_path):
 async def test_native_threaded_reply_uses_cached_event(monkeypatch):
     adapter = _make_adapter(monkeypatch)
     api, crypto = _wire(adapter)
-    target = {"type": "Message", "id": "e5", "sender_id": "111", "content": {"text": "orig"}}
+    target = "RU5DT0RFRA=="  # the encoded event as served; the SDK rejects a decrypted dict
     adapter._cache_event("111:999", "e5", target)
 
     result = await adapter.send("111:999", "threaded answer", reply_to="e5")
@@ -971,8 +971,15 @@ async def test_inbound_reply_context_propagates(monkeypatch):
         "id": "e7",
         "sender_id": "111",
         "conversation_id": "111:999",
-        "content": {"text": "and this one?"},
-        "reply_to": {"id": "e4", "sender_id": "999", "text": "earlier bot answer"},
+        # Shape the real Chat XDK returns for a threaded reply.
+        "content": {
+            "text": "and this one?",
+            "replying_to_preview": {
+                "sender_id": "999",
+                "message_text": "earlier bot answer",
+                "replying_to_message_sequence_id": "e4",
+            },
+        },
     }
     api.events_pages["111-999"] = {
         "data": [{"id": "e7", "encoded_event": "RPL", "sender_id": "111"}]
@@ -1057,3 +1064,63 @@ async def test_standalone_new_conversation_handshake(monkeypatch):
     assert api.key_changes and api.key_changes[0][0] == "111"
     assert crypto.explicit_key_used == b"fresh-key"
     assert out["chat_id"] == "111:999"
+
+
+@pytest.mark.asyncio
+async def test_conversation_started_while_running_is_not_backlog(monkeypatch):
+    """A DM that opens a new conversation after startup gets a reply; only conversations
+    present at startup have a backlog to skip."""
+    adapter = _make_adapter(monkeypatch)
+    api, crypto = _wire(adapter)
+    captured = _capture(adapter, monkeypatch)
+    await adapter._discover_conversations()  # startup pass: nothing yet
+
+    api.conversations = ["111-999"]
+    crypto.decrypt_map["NEW"] = {
+        "type": "Message", "id": "e1", "sender_id": "111",
+        "conversation_id": "111:999", "content": {"text": "first ever message"},
+    }
+    api.events_pages["111-999"] = {"data": [{"id": "e1", "encoded_event": "NEW", "sender_id": "111"}]}
+    await adapter._discover_conversations()
+    await adapter._poll_conversation("111-999")
+    assert [e.text for e in captured] == ["first ever message"]
+
+
+@pytest.mark.asyncio
+async def test_idle_conversation_not_reread(monkeypatch):
+    """Events are billed per resource returned: a conversation whose newest event is at the
+    cursor must not get an events read."""
+    adapter = _make_adapter(monkeypatch)
+    api, _ = _wire(adapter)
+    adapter._running = True
+    adapter._poll_interval = 0
+    adapter._conversations = {"111-999"}
+    adapter._cursors["111-999"] = "e5"
+    reads: list = []
+
+    async def get_conversations(**_kw):
+        return {"data": [{"id": "111-999", "newest_event_id": "e5"}], "meta": {}}
+
+    async def poll(conv_id):
+        reads.append(conv_id)
+        adapter._running = False
+
+    monkeypatch.setattr(api, "get_conversations", get_conversations, raising=False)
+    monkeypatch.setattr(adapter, "_poll_conversation", poll)
+
+    async def stop_after_one_cycle(_s):
+        adapter._running = False
+
+    monkeypatch.setattr(xchat_adapter.asyncio, "sleep", stop_after_one_cycle)
+    await adapter._run_poll_loop()
+    assert reads == []
+
+
+def test_send_target_forms():
+    """`hermes send xchat:<id>` accepts the ids the API and events use; anything else is refused."""
+    parse = xchat_adapter._parse_target_ref
+    assert parse("111-999") == ("111-999", None)
+    assert parse("111:999") == ("111-999", None)
+    assert parse("999") == ("999", None)
+    assert parse("g12345") == ("g12345", None)
+    assert parse("#general") is None

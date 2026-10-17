@@ -226,7 +226,10 @@ class XChatApi:
         self, *, max_results: int = 100, pagination_token: Optional[str] = None
     ) -> dict[str, Any]:
         """GET /2/chat/conversations — list the bot's conversations."""
-        params: dict[str, Any] = {"max_results": max_results}
+        params: dict[str, Any] = {
+            "max_results": max_results,
+            "chat_conversation.fields": "id,newest_event_id",
+        }
         if pagination_token:
             params["pagination_token"] = pagination_token
         return await self._request("GET", "/2/chat/conversations", params=params)
@@ -300,7 +303,7 @@ class XChatApi:
         reported to initialize is the ENCRYPTED blob size. Requires the
         ``media.write`` OAuth scope.
         """
-        conv = self._conv_path_id(conversation_id)
+        conv = str(conversation_id).replace("-", ":")
         init = await self._request(
             "POST",
             "/2/chat/media/upload/initialize",
@@ -312,7 +315,8 @@ class XChatApi:
         if not session_id or not media_hash_key:
             raise XChatApiError(500, f"media upload initialize returned no session: {init}")
 
-        for index in range(0, (len(encrypted_blob) + chunk_size - 1) // chunk_size):
+        num_parts = (len(encrypted_blob) + chunk_size - 1) // chunk_size
+        for index in range(num_parts):
             segment = encrypted_blob[index * chunk_size:(index + 1) * chunk_size]
             await self._request(
                 "POST",
@@ -328,7 +332,11 @@ class XChatApi:
         await self._request(
             "POST",
             f"/2/chat/media/upload/{session_id}/finalize",
-            json_body={"conversation_id": conv, "media_hash_key": media_hash_key},
+            json_body={
+                "conversation_id": conv,
+                "media_hash_key": media_hash_key,
+                "num_parts": str(num_parts),
+            },
         )
         return media_hash_key
 
