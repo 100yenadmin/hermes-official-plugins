@@ -44,7 +44,8 @@ def _route_base(base):
     if dotted != base:
         return _route_base(dotted)
     without_vendor = base.removeprefix('claude-')
-    if 'claude-' + without_vendor in CONTEXT_WINDOWS:
+    # `haiku-4-5` names the `claude-haiku-4-5` alias, not a pinned id, so check both tables.
+    if 'claude-' + without_vendor in CONTEXT_WINDOWS or 'claude-' + without_vendor in ALIASES:
         return 'claude-' + without_vendor
     return base
 

@@ -38,7 +38,8 @@ def test_native_argv_enables_only_known_long_context_models(profile, tmp_path):
                'sonnet-5.5':'claude-sonnet-5-5[1m]', 'opus':'claude-opus-5-5[1m]',
                'opus-5-5':'claude-opus-5-5[1m]', 'haiku':'claude-haiku-5-5[1m]',
                'haiku-5.5':'claude-haiku-5-5[1m]', 'claude-haiku-4-5':'claude-haiku-4-5-20251001',
-               'fable':'claude-fable-5-1[1m]',
+               'haiku-4-5':'claude-haiku-4-5-20251001', 'haiku-4.5':'claude-haiku-4-5-20251001',
+               'opus-4.8':'claude-opus-4-8[1m]', 'fable':'claude-fable-5-1[1m]',
                'unqualified-future-model':'unqualified-future-model'}
     with_client = profile.create_client(command=[sys.executable,str(native)], env={'PATH':os.defpath,'HOME':str(tmp_path),'ARGV_CAPTURE':str(capture)})
     try:
@@ -81,6 +82,6 @@ def test_haiku_5_5_never_receives_the_thinking_disable():
         assert 'thinking' not in body(route, {'enabled': False}), route
         assert 'context_management' not in body(route, {'enabled': False}), route
         assert body(route, {'enabled': True, 'effort': 'medium'})['thinking'] == {'type': 'adaptive'}, route
-    for route in ('claude-haiku-4-5', 'claude-haiku-4-5-20251001'):
+    for route in ('claude-haiku-4-5', 'claude-haiku-4-5-20251001', 'haiku-4-5', 'haiku-4.5'):
         assert body(route, {'enabled': False})['thinking'] == {'type': 'disabled'}, route
         assert 'thinking' not in body(route, {'enabled': True, 'effort': 'medium'}), route
