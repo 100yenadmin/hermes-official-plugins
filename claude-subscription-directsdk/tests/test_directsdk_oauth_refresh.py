@@ -138,3 +138,16 @@ def test_config_dir_follows_the_cli_home_rules():
     assert _config_dir(env, windows=False) == Path("/msys/home/user") / ".claude"
     assert _config_dir({**env, "CLAUDE_CONFIG_DIR": "/cfg"}, windows=True) == Path("/cfg")
     assert _config_dir({**env, "CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR": "/own"}, windows=False) == Path("/own")
+
+
+def test_the_lock_is_reaped_in_the_profile_directory_the_probe_uses(profile, tmp_path):
+    """The profile's claude_config_dir outranks an inherited CLAUDE_CONFIG_DIR (#34), so a stale lock there must go."""
+    from test_directsdk_config_dir import _set_config_dir
+    command, env, config, log = _setup(tmp_path, expires_in=3600, lock=120)
+    inherited = tmp_path / "inherited"
+    inherited.mkdir()
+    env["CLAUDE_CONFIG_DIR"] = str(inherited)
+    _set_config_dir(str(config))
+    profile.setup_status(command=command, env=env)
+    assert _calls(log)[0] == {"event": "usage", "lock": False}
+    assert not (config / ".oauth_refresh.lock").exists()
