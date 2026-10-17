@@ -309,9 +309,17 @@ def test_cancellation_during_popen_construction_unwinds(cli, monkeypatch):
     original = ds.subprocess.Popen
     errors = []
     def delayed(*a, **kw):
+        if kw.get('stdin') is not ds.subprocess.PIPE:
+            # Only the native spawn: an earlier helper Popen would let the cancel land before it.
+            return original(*a, **kw)
         p = original(*a, **kw)
         entered.set()
         assert release.wait(3)
+        # Popen runs under the request lock, so cancel() can't kill yet: stand in for its kill
+        # here so the first stdin write always hits a dead pipe (CI raced into this; the close
+        # in cleanup then re-raised BrokenPipe over the cancellation).
+        p.kill()
+        p.wait()
         return p
     monkeypatch.setattr(ds.subprocess, 'Popen', delayed)
     def work():

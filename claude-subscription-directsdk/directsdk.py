@@ -938,7 +938,12 @@ class Client:
                     reader.join(timeout=5)
                 for pipe in (p.stdin, p.stdout):
                     if pipe and not pipe.closed:
-                        pipe.close()
+                        # Closing stdin re-flushes bytes a dead child never read; that BrokenPipe must
+                        # not replace the cancellation or timeout already raised.
+                        try:
+                            pipe.close()
+                        except OSError:
+                            pass
             with self._lock:
                 self._requests.discard(request)
 
