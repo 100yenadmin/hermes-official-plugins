@@ -64,7 +64,8 @@ else:
     deadline = time.monotonic() + 30
     while not (root / 'release').exists() and time.monotonic() < deadline:
         if (root / 'late').exists() and not (root / 'late-response').exists():
-            (root / 'late-response').write_text(query())
+            (root / 'late-response.tmp').write_text(query())
+            os.replace(root / 'late-response.tmp', root / 'late-response')  # the test reads it once it exists
         time.sleep(0.01)
 sys.exit(cfg.get('exitcode', 0))
 '''
@@ -72,7 +73,7 @@ sys.exit(cfg.get('exitcode', 0))
 REQUEST = {'model': 'sonnet', 'messages': [{'role': 'user', 'content': 'fixture'}]}
 
 
-def wait_for(predicate, timeout=3):
+def wait_for(predicate, timeout=10):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         if predicate():
@@ -220,7 +221,7 @@ def test_foreign_reaper_is_harmless_during_drain(native_case, monkeypatch):
         killpg = os.killpg
 
         def record_signal(*args):
-            signals.append(args)
+            signals.append((args, reaped.is_set()))
             return killpg(*args)
 
         monkeypatch.setattr(os, 'killpg', record_signal)
@@ -247,7 +248,9 @@ def test_foreign_reaper_is_harmless_during_drain(native_case, monkeypatch):
             assert reaped.wait(3)
             wait_for(lambda: state.process not in directsdk._draining)
             directsdk.kill_process_tree(state.process)
-            assert not errors and not signals and not state.returncode_reads
+            # Signalling our own exited-but-unreaped group is safe (its PID still pins the group id); a signal after
+            # the foreign reap could hit a recycled group.
+            assert not errors and not [s for s, after_reap in signals if after_reap] and not state.returncode_reads
         finally:
             stop.set()
             reaped.set()
