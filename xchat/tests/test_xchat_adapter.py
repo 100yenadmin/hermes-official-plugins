@@ -469,6 +469,34 @@ async def test_own_messages_filtered(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_self_chat_answers_owner_never_own_replies(monkeypatch):
+    """The account's self-chat reaches the agent; Hermes' own sends (this process or cron) never do."""
+    adapter = _make_adapter(monkeypatch)
+    api, crypto = _wire(adapter)
+    captured = _capture(adapter, monkeypatch)
+    adapter._cursors["999-999"] = "e1"
+    xchat_adapter._remember_sent("uuid-cron")  # sent by another process (cron / hermes send)
+    sent = await adapter.send("999-999", "hermes reply")
+    assert sent.success
+
+    events = [("OWN", "uuid-owner", "hello hermes"), ("ECHO", "mid-1", "hermes reply"), ("CRON", "uuid-cron", "digest")]
+    for blob, msg_id, text in events:
+        crypto.decrypt_map[blob] = {"type": "Message", "id": msg_id, "sender_id": "999",
+                                    "conversation_id": "999:999", "content": {"text": text}}
+    api.events_pages["999-999"] = {"data": [
+        {"id": f"e{n}", "encoded_event": blob, "sender_id": "999"} for n, (blob, _, _) in enumerate(events, 2)
+    ][::-1]}
+    await adapter._poll_conversation("999-999")
+    assert [e.text for e in captured] == ["hello hermes"]
+    assert captured[0].source.user_id == "999"
+    assert adapter.resolved_allowlist_user_ids() == {"999"}
+
+    monkeypatch.setenv("XCHAT_ALLOW_SELF_CHAT", "false")
+    off = _make_adapter(monkeypatch)
+    assert off.resolved_allowlist_user_ids() == set()
+
+
+@pytest.mark.asyncio
 async def test_keychange_routes_through_batch(monkeypatch):
     adapter = _make_adapter(monkeypatch)
     api, crypto = _wire(adapter)

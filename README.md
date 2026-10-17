@@ -152,7 +152,7 @@ Catalog entries come in two tiers:
 <a href="xchat/"><img src="assets/xchat.jpg" alt="X Chat plugin"></a>
 <h3><a href="xchat/">X Chat</a></h3>
 <code>hermes plugins install xchat</code>
-<p>Run Hermes as a bot in X's end-to-end encrypted DMs. Messages are decrypted and encrypted locally with X's official Chat XDK, so X only routes ciphertext. Supports encrypted media, threaded replies, group chats with mention gating, and cron delivery. <code>hermes xchat setup</code> stores the OAuth token and registers the bot's keys. Needs an X developer app with chat API access.</p>
+<p>Talk to Hermes in X's end-to-end encrypted DMs. Hermes runs as the X account you connect: chat with it in your own self-chat ("message yourself"), or give it a separate account and DM that. Messages are decrypted and encrypted locally with X's official Chat XDK, so X only routes ciphertext. Supports encrypted media, threaded replies, group chats with mention gating, and cron delivery. <code>hermes xchat setup</code> shows which account Hermes will run as and registers its keys. Needs an X developer app with chat API access.</p>
 <p>Gateway platform <code>xchat</code> · end-to-end encrypted</p>
 </td>
 </tr>

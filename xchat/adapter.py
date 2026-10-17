@@ -17,7 +17,7 @@ seconds with exponential backoff on errors. Outbound goes through
 Identity / key state (written by ``hermes xchat setup``):
 
 * ``XCHAT_ACCESS_TOKEN``   OAuth2 user token (dm.read, dm.write, users.read, tweet.read)
-* ``XCHAT_USER_ID``        the bot account's numeric user id
+* ``XCHAT_USER_ID``        numeric id of the X account Hermes runs as
 * ``XCHAT_SIGNING_KEY_VERSION``  registered public-key version
 * private-key blob at ``~/.hermes/xchat/private_keys.b64`` (mode 600), or
   ``XCHAT_PRIVATE_KEYS_B64`` env override
@@ -68,6 +68,8 @@ DEDUP_MAX_SIZE = 5000
 REPLY_CACHE_MAX = 200
 # Cap inbound attachments processed per message.
 MAX_INBOUND_ATTACHMENTS = 5
+# Message ids Hermes sent, kept so self-chat echoes are never answered.
+SENT_IDS_MAX = 500
 
 # Group-chat mention wake words — same defaults as the other Hermes channels
 # so group gating behaves identically everywhere.
@@ -107,6 +109,44 @@ def _load_cursors() -> Dict[str, str]:
 def _conv_key(conversation_id: str) -> str:
     """One cache key per conversation: events embed ``A:B``, URL paths and listings use ``A-B``."""
     return str(conversation_id).replace(":", "-")
+
+
+def _is_self_chat(conversation_id: str, account_id: str) -> bool:
+    """True for the account's conversation with itself (``A-A`` / ``A:A``), never a group."""
+    parts = _conv_key(conversation_id).split("-")
+    return bool(account_id) and len(parts) == 2 and parts[0] == parts[1] == account_id
+
+
+def _sent_path() -> Path:
+    return _state_dir() / "sent_message_ids.json"
+
+
+def _load_sent_ids() -> List[str]:
+    try:
+        data = json.loads(_sent_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [str(m) for m in data] if isinstance(data, list) else []
+
+
+def _remember_sent(message_id: str) -> None:
+    """Record a message id this account sent through Hermes.
+
+    The gateway and out-of-process senders (cron, ``hermes send``) share this file, so in the
+    self-chat the poll loop can tell Hermes' own messages from ones the owner typed. Ids are the
+    SDK-generated message UUIDs, which the decrypted event carries back as ``id``.
+    """
+    if not message_id:
+        return
+    ids = [m for m in _load_sent_ids() if m != message_id] + [message_id]
+    try:
+        path = _sent_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(ids[-SENT_IDS_MAX:]) + "\n", encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        logger.debug("[xchat] sent-id persist failed", exc_info=True)
 
 
 def _event_id_newer(a: str, b: str) -> bool:
@@ -264,6 +304,19 @@ class XChatAdapter(BasePlatformAdapter):
         # Recent decrypted events per conversation, keyed by event id — lets
         # send(reply_to=...) build a native threaded reply.
         self._event_cache: Dict[str, Dict[str, str]] = {}
+        # The account's own messages in its self-chat ("message yourself") reach the agent.
+        env_self = os.getenv("XCHAT_ALLOW_SELF_CHAT")
+        if env_self is not None:
+            self._allow_self_chat = env_self.strip().lower() not in {"0", "false", "no", "off"}
+        else:
+            self._allow_self_chat = bool(extra.get("allow_self_chat", True))
+        self._sent_ids: Set[str] = set(_load_sent_ids())
+        if self._allow_self_chat and self._bot_user_id and not os.getenv("XCHAT_ALLOWED_USERS", "").strip():
+            # With no allowlist configured the owner still reaches their own agent from the self-chat;
+            # strangers keep the gateway's normal unknown-sender handling.
+            if config.extra is None:
+                config.extra = {}
+            config.extra.setdefault("allowed_users", self._bot_user_id)
         # Read receipts (privacy default: off).
         env_read = os.getenv("XCHAT_SEND_READ_RECEIPTS")
         if env_read is not None:
@@ -556,13 +609,13 @@ class XChatAdapter(BasePlatformAdapter):
                 continue
 
             sender_id = str(event.get("sender_id") or item.get("sender_id") or "")
-            if sender_id == self._bot_user_id:
-                self._set_cursor(conv_id, event_id)
-                continue  # echo of our own reply
-
             # The signature covers the canonical conversation id embedded in
             # the event — prefer it for replies.
             canonical_conv = str(event.get("conversation_id") or conv_id)
+            if sender_id == self._bot_user_id and not self._is_owner_self_chat_message(canonical_conv, event):
+                # Our own replies, and the account's messages in its other conversations.
+                self._set_cursor(conv_id, event_id)
+                continue
             self._cache_event(canonical_conv, event_id, event_b64)
 
             # Encrypted media attachments: download + decrypt + cache locally
@@ -588,6 +641,28 @@ class XChatAdapter(BasePlatformAdapter):
             )
             self._set_cursor(conv_id, event_id)
             await self._maybe_mark_read(conv_id, item)
+
+    def _is_owner_self_chat_message(self, conv_id: str, event: Dict[str, Any]) -> bool:
+        """A message the account owner typed in their self-chat (not one Hermes sent)."""
+        if not (self._allow_self_chat and _is_self_chat(conv_id, self._bot_user_id)):
+            return False
+        message_id = str(event.get("id") or "")
+        if message_id in self._sent_ids:
+            return False
+        # Cron / `hermes send` deliveries come from other processes: re-read their record.
+        self._sent_ids = set(_load_sent_ids())
+        return bool(message_id) and message_id not in self._sent_ids
+
+    def resolved_allowlist_user_ids(self) -> Set[str]:
+        """Gateway allowlist hook: the account itself is allowed, so its self-chat works for installs
+        whose XCHAT_ALLOWED_USERS predates self-chat. Its messages only ever reach the gateway from the
+        self-chat (every other own-account event is dropped at intake)."""
+        return {self._bot_user_id} if self._allow_self_chat and self._bot_user_id else set()
+
+    def _record_sent(self, message_id: str) -> None:
+        if message_id:
+            self._sent_ids.add(message_id)
+            _remember_sent(message_id)
 
     def _absorb_key_batch(
         self, conv_id: str, events_b64: List[str], *, label: str = "key-events"
@@ -864,6 +939,7 @@ class XChatAdapter(BasePlatformAdapter):
             )
         except Exception as e:
             return SendResult(success=False, error=f"encrypt failed: {e}")
+        self._record_sent(str(body.get("message_id") or ""))
         try:
             out = await self._api.send_message(chat_id, body)
         except XChatApiError as e:
@@ -956,6 +1032,7 @@ class XChatAdapter(BasePlatformAdapter):
             body = self._encrypt_outbound(
                 chat_id, caption or "", reply_to=reply_to, attachments=[att]
             )
+            self._record_sent(str(body.get("message_id") or ""))
             out = await self._api.send_message(chat_id, body)
         except ValueError:
             return SendResult(success=False, error="No verified conversation key.")
@@ -1251,6 +1328,7 @@ async def _standalone_send(
                 conversation_key=explicit_key,
                 conversation_key_version=explicit_key_version,
             )
+        _remember_sent(str(body.get("message_id") or ""))
         out = await api.send_message(canonical, body)
         data = out.get("data") or {}
         return {
@@ -1294,7 +1372,7 @@ async def _initiate_conversation(
     Returns ``{"conversation_id", "conversation_key", "conversation_key_version"}``.
     """
     participants: List[Dict[str, str]] = []
-    for uid in (bot_user_id, recipient_id):
+    for uid in dict.fromkeys((bot_user_id, recipient_id)):  # one entry for a self-chat
         records = await api.get_public_keys(uid)
         if not records:
             raise ValueError(f"user {uid} has no registered X Chat public keys")
@@ -1359,7 +1437,8 @@ def register(ctx) -> None:
         allow_update_command=True,
         platform_hint=(
             "You are communicating via X Chat — X's end-to-end encrypted "
-            "direct messages. Treat replies like regular chat messages: "
+            "direct messages, sending as the owner's X account (in their "
+            "self-chat, the owner is talking to you directly). Treat replies like regular chat messages: "
             "short and conversational. Markdown is NOT rendered — use plain "
             "text. User identifiers are numeric X user ids; conversation ids "
             "starting with 'g' are group chats. You can send files, images, "

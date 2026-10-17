@@ -4,7 +4,20 @@
 
 > Part of the [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent.
 
-[X Chat](https://docs.x.com/xchat/introduction) is X's end-to-end encrypted direct-message system. The Hermes adapter connects your agent to a bot X account's DMs: message bodies are encrypted and decrypted **locally** with the official Chat XDK — X only ever routes ciphertext, and every message is signed so recipients can verify the sender.
+[X Chat](https://docs.x.com/xchat/introduction) is X's end-to-end encrypted direct-message system. The Hermes adapter connects your agent to one X account's DMs: message bodies are encrypted and decrypted **locally** with the official Chat XDK — X only ever routes ciphertext, and every message is signed so recipients can verify the sender.
+
+## Which X account does Hermes use?
+
+**Hermes runs as the X account you connect during setup.** It reads that account's encrypted DMs and its replies are sent from that account. Pick one of two setups:
+
+| Setup | How you talk to Hermes | Who else can reach it |
+|---|---|---|
+| **Your own account** | Open your chat with yourself on X ("message yourself") and type there. Hermes answers in the same chat. | Anyone who DMs you and is on `XCHAT_ALLOWED_USERS` (or approved by pairing) gets answers from Hermes, sent as you. |
+| **A separate account for the agent** (e.g. `@yourname_hermes`) | DM that account from your personal account, like any other chat. | Whoever you allow. Your personal DMs are never touched. |
+
+The self-chat works out of the box: `hermes xchat setup` adds the connected account to `XCHAT_ALLOWED_USERS`, and Hermes never answers its own replies. Turn it off with `XCHAT_ALLOW_SELF_CHAT=false`. Messages you send from your own account in your *other* conversations are never treated as prompts.
+
+Setup registers a new encryption key on the connected account, so try it on a separate account first if you are unsure.
 
 ## Install
 
@@ -28,7 +41,7 @@ Then run `hermes xchat setup` for a guided walk-through, or pick **X Chat** in `
 ## Prerequisites
 
 - An **X developer account** with an app configured for **OAuth 2.0 user context** ([Developer Console](https://developer.x.com/en/portal/dashboard)). X Chat endpoints require API access on your developer plan.
-- A **user access token** for the bot account with scopes: `dm.read`, `dm.write`, `users.read`, `tweet.read` (add `offline.access` to receive a refresh token so Hermes can auto-renew the ~2-hour access token, and `media.write` to send encrypted file/image attachments).
+- A **user access token** for the account Hermes should run as (see above) with scopes: `dm.read`, `dm.write`, `users.read`, `tweet.read` (add `offline.access` to receive a refresh token so Hermes can auto-renew the ~2-hour access token, and `media.write` to send encrypted file/image attachments).
 
 ## Setup
 
@@ -39,7 +52,7 @@ hermes xchat setup
 The wizard:
 
 1. Stores the OAuth2 access token (and optional refresh token + client id) in `~/.hermes/.env`.
-2. Derives the bot account's numeric user id via `GET /2/users/me`.
+2. Shows which account Hermes will run as (`@handle (id)`, from `GET /2/users/me`) and adds that account to `XCHAT_ALLOWED_USERS` so your self-chat works.
 3. Generates the E2EE identity + signing keypairs with the Chat XDK, saves the private-key blob to `~/.hermes/xchat/private_keys.b64` (mode 600), and registers the public keys with the X API.
 
 Key registration is **rate limited to a few writes per 24 hours** per account. The setup is resume-safe: the key blob and registration payload are persisted *before* any network call, so an interrupted or rate-limited run resumes the same identity instead of minting a new one.
@@ -54,14 +67,15 @@ hermes xchat status
 
 | Variable | Required | Description |
 |---|---|---|
-| `XCHAT_ACCESS_TOKEN` | Yes | OAuth2 user access token (dm.read, dm.write, users.read, tweet.read) |
+| `XCHAT_ACCESS_TOKEN` | Yes | OAuth2 user access token for the account Hermes runs as (dm.read, dm.write, users.read, tweet.read) |
 | `XCHAT_REFRESH_TOKEN` | Recommended | Refresh token — enables automatic access-token renewal (rotated on every refresh and re-persisted) |
 | `XCHAT_CLIENT_ID` | With refresh | X app OAuth2 client id (required for token refresh) |
 | `XCHAT_CLIENT_SECRET` | Optional | Only for confidential clients |
-| `XCHAT_USER_ID` | Auto | Bot account's numeric user id (derived by setup) |
+| `XCHAT_USER_ID` | Auto | Numeric id of the account Hermes runs as (derived by setup) |
 | `XCHAT_SIGNING_KEY_VERSION` | Auto | Registered public-key version (written by setup) |
-| `XCHAT_PRIVATE_KEYS_B64` | Optional | Key blob override — takes precedence over the blob file. ⚠️ **This is the bot's entire E2EE identity**: there is no forward secrecy in this protocol, so anyone holding the blob can decrypt all past *and* future messages. Keep it in `~/.hermes/.env` (never commit it, never pass it on a command line) |
-| `XCHAT_ALLOWED_USERS` | Recommended | Comma-separated numeric X user ids allowed to talk to the bot |
+| `XCHAT_PRIVATE_KEYS_B64` | Optional | Key blob override — takes precedence over the blob file. ⚠️ **This is the account's entire E2EE identity for Hermes**: there is no forward secrecy in this protocol, so anyone holding the blob can decrypt all past *and* future messages. Keep it in `~/.hermes/.env` (never commit it, never pass it on a command line) |
+| `XCHAT_ALLOW_SELF_CHAT` | Optional | `false` stops Hermes answering your self-chat (default `true`) |
+| `XCHAT_ALLOWED_USERS` | Recommended | Comma-separated numeric X user ids allowed to talk to Hermes; setup adds the connected account itself |
 | `XCHAT_ALLOW_ALL_USERS` | Optional | `true` allows every sender (dev only) |
 | `XCHAT_CONVERSATION_IDS` | Optional | Pin specific conversation ids to poll; omit to auto-discover |
 | `XCHAT_POLL_INTERVAL` | Optional | Seconds between event polls (default `10`, floor `2`) |
@@ -82,10 +96,18 @@ hermes xchat status
 
 ## Authorization
 
-By default all senders are denied. Either:
+By default only the connected account itself (its self-chat) is allowed; every other sender is denied. To let others in, either:
 
-1. Set `XCHAT_ALLOWED_USERS` to a comma-separated list of numeric X user ids, or
+1. Add their numeric X user ids to `XCHAT_ALLOWED_USERS` (comma-separated), or
 2. Use **DM pairing** — an unknown sender gets a pairing code; approve with `hermes pairing approve xchat <CODE>`.
+
+An unknown sender gets a pairing code by default. On your personal account that code is sent from you, so to ignore strangers silently instead, set it in `config.yaml`:
+
+```yaml
+platforms:
+  xchat:
+    unauthorized_dm_behavior: ignore
+```
 
 ## Group conversations
 

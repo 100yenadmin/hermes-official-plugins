@@ -5,13 +5,16 @@ version: 0.1.0
 description: >
   X Chat gateway adapter for Hermes Agent.
   Connects the agent to X's end-to-end encrypted direct messages via the
-  official X Chat API. Message bodies are encrypted/decrypted locally with
+  official X Chat API. Hermes runs as the X account you connect: use your
+  own account and chat with Hermes in your self-chat ("message yourself"),
+  or connect a separate account made for the agent and DM it. Message bodies are encrypted/decrypted locally with
   the Chat XDK (chatxdk) — X only ever routes ciphertext. Inbound messages
   arrive through a polling loop over the conversation-events endpoint;
   outbound replies are encrypted, signed, and POSTed back.
 
   One-time onboarding runs through `hermes xchat setup`: it stores the
-  OAuth2 user token, derives the bot's user id, generates + registers the
+  OAuth2 user token, shows which account Hermes will run as, adds that
+  account to the allowlist so the self-chat works, generates + registers the
   E2EE keypairs, and persists the private-key blob under
   ``~/.hermes/xchat/`` (mode 600).
 author: NousResearch
@@ -19,7 +22,7 @@ homepage: https://github.com/NousResearch/hermes-official-plugins/tree/main/xcha
 requires_hermes: ">=0.21.5"
 requires_env:
   - name: XCHAT_ACCESS_TOKEN
-    description: "OAuth2 user access token with dm.read, dm.write, users.read, tweet.read scopes (set by `hermes xchat setup`)"
+    description: "OAuth2 user access token for the X account Hermes runs as (scopes dm.read, dm.write, users.read, tweet.read; set by `hermes xchat setup`)"
     prompt: "X OAuth2 user access token"
     url: "https://developer.x.com/en/portal/dashboard"
     password: true
@@ -37,8 +40,8 @@ optional_env:
     prompt: "X app OAuth2 client secret (or empty)"
     password: true
   - name: XCHAT_USER_ID
-    description: "The bot account's numeric X user id (derived automatically by `hermes xchat setup`)"
-    prompt: "Bot X user id (or empty to derive)"
+    description: "Numeric id of the X account Hermes runs as (derived automatically by `hermes xchat setup`)"
+    prompt: "Account X user id (or empty to derive)"
     password: false
   - name: XCHAT_SIGNING_KEY_VERSION
     description: "Registered public-key version for signing (written by `hermes xchat setup`)"
@@ -48,8 +51,12 @@ optional_env:
     description: "Base64 private-key blob from the Chat XDK export — overrides the blob file under ~/.hermes/xchat/"
     prompt: "Private-key blob (or empty to use the blob file)"
     password: true
+  - name: XCHAT_ALLOW_SELF_CHAT
+    description: "Answer the account's own messages in its self-chat (\"message yourself\") (true/false, default true)"
+    prompt: "Allow self-chat? (true/false)"
+    password: false
   - name: XCHAT_ALLOWED_USERS
-    description: "Comma-separated numeric X user ids allowed to talk to the bot"
+    description: "Comma-separated numeric X user ids allowed to talk to Hermes (setup adds the account itself)"
     prompt: "Allowed user ids (comma-separated)"
     password: false
   - name: XCHAT_ALLOW_ALL_USERS

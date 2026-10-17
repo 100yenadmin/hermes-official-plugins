@@ -178,7 +178,7 @@ def cmd_status() -> int:
     print(color("X Chat integration status", Colors.BOLD))
     print(f"  access token:  {'✓ set' if token else '✗ missing'}")
     print(f"  refresh token: {'✓ set' if _get_env('XCHAT_REFRESH_TOKEN') else '– not set (no auto-renew)'}")
-    print(f"  bot user id:   {user_id or '– not set'}")
+    print(f"  account id:    {user_id or '– not set'} (Hermes reads and replies as this X account)")
     print(f"  key blob:      {'✓ ' + str(blob) if blob.exists() else '✗ missing'}")
     if marker.get("registered"):
         print(f"  registration:  ✓ version {marker.get('version')} ({marker.get('registered_at', '?')})")
@@ -187,13 +187,25 @@ def cmd_status() -> int:
     return 0
 
 
+ACCOUNT_EXPLAINER = (
+    "Hermes runs AS the X account whose token you paste here: it reads that\n"
+    "account's encrypted DMs and replies from it. Two ways to use it:\n"
+    "  - Your own account: open your chat with yourself on X (\"message\n"
+    "    yourself\") and talk to Hermes there. Anyone else who DMs you can be\n"
+    "    answered too, so keep XCHAT_ALLOWED_USERS to people you trust.\n"
+    "  - A separate account made for the agent (e.g. @yourname_hermes):\n"
+    "    message it from your personal account like any other chat.\n"
+)
+
+
 def cmd_setup(*, force: bool) -> int:
     print(color("X Chat setup — end-to-end encrypted X DMs", Colors.BOLD))
+    print(ACCOUNT_EXPLAINER)
     print(
         "You need an X developer app with OAuth 2.0 user-context enabled and a\n"
-        "user access token carrying: dm.read dm.write users.read tweet.read\n"
-        "(offline.access too if you want refresh tokens; media.write to send\n"
-        "encrypted attachments).\n"
+        "user access token, for the account Hermes should run as, carrying:\n"
+        "dm.read dm.write users.read tweet.read (offline.access too if you want\n"
+        "refresh tokens; media.write to send encrypted attachments).\n"
         "Docs: https://docs.x.com/xchat/getting-started\n"
     )
 
@@ -231,20 +243,21 @@ def cmd_setup(*, force: bool) -> int:
         try:
             user_id = _run(_fetch_user_id(api))
         except XChatApiError as e:
-            print(color(f"Could not resolve the bot's user id: {e}", Colors.RED))
+            print(color(f"Could not resolve the account's user id: {e}", Colors.RED))
             print("Check the token's scopes (users.read) and validity.")
             return 1
         finally:
             _run(api.aclose())
             api = None
         if not user_id:
-            print(color("Could not resolve the bot's user id.", Colors.RED))
+            print(color("Could not resolve the account's user id.", Colors.RED))
             return 1
         _save_env("XCHAT_USER_ID", user_id)
-        print(f"Bot user id: {user_id}")
     else:
         _run(api.aclose())
         api = None
+    print(f"Hermes will run as X account {_account_label(user_id)}.")
+    _allow_self(user_id)
 
     # 3. Keys + registration
     rc = cmd_register(force=force)
@@ -253,9 +266,37 @@ def cmd_setup(*, force: bool) -> int:
 
     print()
     print(color("Setup complete.", Colors.GREEN))
-    print("Enable the platform and start the gateway:")
+    print("Start the gateway, then message yourself on X (or DM this account from another one):")
     print("  hermes gateway start")
     return 0
+
+
+def _account_label(user_id: str) -> str:
+    """``@handle (id)`` for the configured account, or the bare id when the lookup fails."""
+    from .api import XChatApi, XChatApiError
+
+    async def _lookup() -> str:
+        api = XChatApi(_get_env("XCHAT_ACCESS_TOKEN"))
+        try:
+            me = await api.get_my_user()
+        finally:
+            await api.aclose()
+        return str(me.get("username") or "")
+
+    try:
+        handle = _run(_lookup())
+    except (XChatApiError, OSError):
+        handle = ""
+    return f"@{handle} ({user_id})" if handle else user_id
+
+
+def _allow_self(user_id: str) -> None:
+    """Add the account itself to XCHAT_ALLOWED_USERS so its self-chat reaches Hermes."""
+    current = [u.strip() for u in _get_env("XCHAT_ALLOWED_USERS").split(",") if u.strip()]
+    if user_id in current:
+        return
+    _save_env("XCHAT_ALLOWED_USERS", ",".join([*current, user_id]))
+    print(f"Added {user_id} (this account) to XCHAT_ALLOWED_USERS so your self-chat works.")
 
 
 def cmd_register(*, force: bool) -> int:
@@ -289,7 +330,7 @@ def cmd_register(*, force: bool) -> int:
             if not user_id:
                 user_id = await _fetch_user_id(api)
                 if not user_id:
-                    print(color("Could not resolve the bot's user id.", Colors.RED))
+                    print(color("Could not resolve the account's user id.", Colors.RED))
                     return 1
                 _save_env("XCHAT_USER_ID", user_id)
 
