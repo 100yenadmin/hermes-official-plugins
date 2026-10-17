@@ -228,6 +228,53 @@ def discover_models(command=None, env=None, timeout=40):
     return list(routes.values())
 
 
+def fetch_usage(command=None, env=None, timeout=8):
+    """``(rate_limits, None)`` from Claude Code's own ``get_usage`` control request, else ``(None, reason)``.
+
+    The CLI fetches the plan limits with the login it already holds, so the plugin never reads or
+    sends that token (catalog rule 11) and ``auth.adopt_external_logins: false`` keeps meaning what
+    it says. It follows the same per-profile config dir as every native spawn, runs behind an unused
+    admission gate (zero inference), and fits under core's 10 s ``/usage`` hook deadline.
+    """
+    env = dict(env if env is not None else os.environ)
+    resolved = _resolve(command, env)
+    if resolved is None:
+        return None, INSTALL_HINT
+    child = _child_env(env)
+    gate = Admission("https://api.anthropic.com", timeout)
+    try:
+        child["ANTHROPIC_BASE_URL"] = gate.url
+        argv = resolved + ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+                           "--tools", "", "--setting-sources", "", "--strict-mcp-config", "--mcp-config",
+                           '{"mcpServers":{}}', "--disable-slash-commands", "--no-session-persistence"]
+        request = json.dumps({"type": "control_request", "request_id": "hermes-usage",
+                              "request": {"subtype": "get_usage", "skip_behaviors": True}}) + "\n"
+        with tempfile.TemporaryDirectory(prefix="claude-directsdk-usage-") as cwd:
+            run = subprocess.run(argv, input=request, env=child, cwd=cwd, capture_output=True,
+                                 text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        rows = [json.loads(line) for line in run.stdout.splitlines() if line.startswith("{")]
+        response = next(r["response"] for r in rows if r.get("type") == "control_response"
+                        and r.get("response", {}).get("request_id") == "hermes-usage")
+    except subprocess.TimeoutExpired:
+        return None, "Claude Code did not answer in time"
+    except (OSError, ValueError, StopIteration, KeyError, AttributeError, subprocess.SubprocessError):
+        return None, "Claude Code gave no usage answer (needs a version with get_usage)"
+    finally:
+        gate.close()
+    if response.get("subtype") != "success":
+        return None, "Claude Code refused the usage request (needs a version with get_usage)"
+    body = response.get("response") if isinstance(response.get("response"), dict) else {}
+    limits = body.get("rate_limits")
+    if isinstance(limits, dict):
+        return limits, None
+    if not body.get("rate_limits_available"):
+        return None, "no Claude subscription login found (run `claude` and log in)"
+    if child.get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"):
+        # Measured on 2.1.302: with nonessential traffic off the CLI answers rate_limits: null.
+        return None, "Claude Code skips the usage fetch with nonessential traffic off (claude_code_telemetry)"
+    return None, "Claude Code returned no plan limits"
+
+
 def _catalog_label(model):
     """``claude-opus-4-8`` -> ``Opus 4.8``; a trailing snapshot date is dropped."""
     parts = model.removeprefix("claude-").split("-")
