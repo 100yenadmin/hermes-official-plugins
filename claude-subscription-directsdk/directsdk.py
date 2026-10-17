@@ -348,13 +348,33 @@ def _own_process_group():
     return {'start_new_session': True}
 
 
+def _unreaped(process, block=False):
+    """Whether our leader is still unreaped (exited or not), observed without reaping it.
+
+    While our unreaped leader holds the PID, its group id cannot be recycled, so signalling the
+    group is safe even after a launcher exited and left children behind. Already reaped (by us or
+    a host-wide ``waitpid(-1)`` reaper such as core's Kanban dispatcher): the PID is no longer
+    proof of ownership, so the caller does nothing. ``os.waitid`` is missing on macOS before
+    Python 3.13; there the old ``poll()`` guard stays.
+    """
+    if not hasattr(os, 'waitid'):
+        return process.poll() is None
+    try:
+        os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOWAIT | (0 if block else os.WNOHANG))
+    except ChildProcessError:
+        return False
+    return True
+
+
 def kill_process_tree(process):
     """Kill native and every descendant: the npm shim is cmd.exe -> node on Windows, and a plain
     Popen.kill() would orphan the node child that holds the real request open."""
-    if process.poll() is not None:
-        return
     if os.name == 'nt':
+        if process.poll() is not None:
+            return
         subprocess.run(['taskkill', '/F', '/T', '/PID', str(process.pid)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+        return
+    if not _unreaped(process):
         return
     try:
         os.killpg(process.pid, signal.SIGKILL)  # windows-footgun: ok — the nt branch above never reaches this line
@@ -613,24 +633,37 @@ class Client:
         return self._create(**kwargs)
 
     async def _acreate(self, **kwargs):
-        task = asyncio.create_task(asyncio.to_thread(self._create, **kwargs))
+        request = self._register()
         try:
-            result = await task
+            result = await asyncio.to_thread(self._create, request, **kwargs)
             return AsyncStream(result) if kwargs.get('stream') else result
         except asyncio.CancelledError:
-            self.cancel()
+            # Only this call: a sibling request on the shared client keeps running.
+            request.cancel()
+            with self._lock:
+                self._requests.discard(request)
             raise
 
-    def _create(self, **kwargs):
-        body, manifest, names = request_body(kwargs)
-        system, frames = prepare_history(kwargs.get('messages', []), names)
-        if not isinstance(kwargs.get('model'), str) or not kwargs['model']:
-            raise ValueError('model is required')
+    def _register(self):
         request = Request(self)
         with self._lock:
             if self._closed:
                 raise RuntimeError('Claude client is closed')
             self._requests.add(request)
+        return request
+
+    def _create(self, request=None, **kwargs):
+        # Register before preparing, so a cancel during a slow history build reaches this call.
+        request = request or self._register()
+        try:
+            body, manifest, names = request_body(kwargs)
+            system, frames = prepare_history(kwargs.get('messages', []), names)
+            if not isinstance(kwargs.get('model'), str) or not kwargs['model']:
+                raise ValueError('model is required')
+        except BaseException:
+            with self._lock:
+                self._requests.discard(request)
+            raise
         stream = Stream(self._run(request, kwargs, body, manifest, names, system, frames), request)
         if kwargs.get('stream'):
             return stream
@@ -727,7 +760,10 @@ class Client:
                         events.put(error)
                     finally:
                         # The consumer may close while paused at a yielded chunk.
-                        # Reaping belongs to this owner thread, never cancel().
+                        # Reaping belongs to this owner thread, never cancel(). Clear the group
+                        # first: a launcher that exits leaves children the reap would orphan.
+                        if os.name != 'nt' and hasattr(os, 'waitid') and _unreaped(p, block=True):
+                            kill_process_tree(p)
                         p.wait()
                         events.put(None)
                 reader = threading.Thread(target=read, daemon=True)
@@ -750,12 +786,31 @@ class Client:
                             raise RuntimeError('Invalid native stream-json output: ' + repr((getattr(event, 'doc', None) or str(event))[:300]) + _stderr_tail(native_stderr)) from event
                         deadline = time.monotonic() + timeout
                         return event
+                def send(data):
+                    # A child that stops reading stdin blocks a plain write past the timeout: kill it then.
+                    stalled = threading.Event()
+                    timer = threading.Timer(timeout, lambda: (stalled.set(), request.cancel()))
+                    timer.start()
+                    try:
+                        if data is None:
+                            p.stdin.close()
+                        else:
+                            p.stdin.write(data)
+                            p.stdin.flush()
+                    except OSError:
+                        if not request.cancelled.is_set():
+                            raise
+                    finally:
+                        timer.cancel()
+                    if stalled.is_set():
+                        raise TimeoutError('Claude request timed out')
+                    if request.cancelled.is_set():
+                        raise RuntimeError('Claude request cancelled')
                 for index, frame in enumerate(frames):
                     frame = copy.deepcopy(frame)
                     if frame['type'] == 'user' and index < len(frames) - 1:
                         frame['shouldQuery'] = False
-                    p.stdin.write(json.dumps(frame, allow_nan=False) + '\n')
-                    p.stdin.flush()
+                    send(json.dumps(frame, allow_nan=False) + '\n')
                     if frame.get('shouldQuery') is False:
                         while True:
                             ack = receive()
@@ -765,7 +820,7 @@ class Client:
                                 if ack.get('num_turns') != 0 or ack.get('is_error'):
                                     raise RuntimeError('Native history replay not supported: expected zero-turn acknowledgment')
                                 break
-                p.stdin.close()
+                send(None)
                 assistants, results, stopped, emitted = [], [], False, ''
                 native_error = native_error_code = None
                 while True:
