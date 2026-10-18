@@ -58,6 +58,8 @@ def _resolve(command, env):
 PLUGIN_ID = "claude-subscription-directsdk-experimental"
 TELEMETRY_SETTING = "claude_code_telemetry"
 CONFIG_DIR_SETTING = "claude_config_dir"
+SESSION_SETTING = "session_mode"
+SESSION_POOL_SETTING = "session_pool"
 # Any one of these turns off Claude Code's feature-flag fetch, and with it every model its picker
 # only offers through a flag (#86: 11 models become 5). Off only when the user turns the setting off.
 QUIET_TRAFFIC = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1"}
@@ -90,12 +92,34 @@ def _setting(key, default=None):
     return value
 
 
+def _flag(key, default):
+    """A boolean plugin setting, ``default`` when unset, empty or unreadable."""
+    value = _setting(key)
+    if isinstance(value, str):
+        return value.strip().lower() not in _OFF if value.strip() else default
+    return default if value is None else value is not False and value != 0
+
+
 def telemetry_enabled():
     """The active profile's ``claude_code_telemetry`` plugin setting, default on."""
-    value = _setting(TELEMETRY_SETTING, True)
-    if isinstance(value, str):
-        return value.strip().lower() not in _OFF
-    return value is not False and value != 0
+    return _flag(TELEMETRY_SETTING, True)
+
+
+def session_mode_enabled():
+    """The ``session_mode`` plugin setting, default off; CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE overrides it when set."""
+    return _flag(SESSION_SETTING, False)
+
+
+def session_pool():
+    """The ``session_pool`` plugin setting as a count of sessions, ``None`` when unset or not a whole number >= 0."""
+    value = _setting(SESSION_POOL_SETTING)
+    if isinstance(value, bool):
+        return None
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
 
 
 def apply_config_dir(env):
