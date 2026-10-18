@@ -1137,11 +1137,12 @@ class Client:
                 n = len(session.consumed)
                 session.attach(request)
                 if session.expect == 'user':
-                    session.admission.rearm(timeout, frames[-1]['message']['content'])
                     frame = copy.deepcopy(frames[-1])
                     reminder = skills_reminder(frames, names)
                     if reminder:
                         frame['message']['content'].append(reminder)
+                    # Anchor on the frame as sent: native's account context must follow the reminder too.
+                    session.admission.rearm(timeout, frame['message']['content'])
                     session.send(frame)
                 else:
                     results = {m['tool_call_id']: (m['content'], bool(m.get('is_error'))) for m in messages[n:]}
@@ -1282,8 +1283,12 @@ class Client:
         session.root, session.manifest = root, manifest
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.
         env.update(MCP_TOOL_TIMEOUT='86400000', MAX_MCP_OUTPUT_TOKENS='100000000')
-        # The queried frame lets the relay keep the cache breakpoint off native's per-request context.
-        session.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=frames[-1]['message']['content'], first_turn={})
+        # The queried frame lets the relay keep the cache breakpoint off native's per-request context. It includes the
+        # skills reminder replay_history adds, so native's account context follows the whole sent frame in the opening
+        # request, where the relay also puts it after a restart; otherwise every restart rewrites the cache.
+        reminder = skills_reminder(frames, names) if frames[-1]['type'] == 'user' else None
+        queried = frames[-1]['message']['content'] + ([reminder] if reminder else [])
+        session.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=queried, first_turn={})
         env['ANTHROPIC_BASE_URL'] = session.admission.url
         command = native_command(resolved, kwargs['model'], root, body, system, {'mcpServers': {'hermes': {'type': 'sdk', 'name': 'hermes'}}}, env, session=True)
         command += ['--session-id', session_id]
