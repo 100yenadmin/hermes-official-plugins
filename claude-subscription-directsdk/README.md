@@ -1,5 +1,7 @@
 # Claude Subscription DirectSDK (Experimental) — Hermes plugin
 
+> **Session-mode fork.** This branch (`eva/session-main` on 100yenadmin/hermes-official-plugins) is upstream main plus session mode (closed upstream PR #101), rebased onto upstream as it moves. The plugin id is unchanged on purpose: existing profiles store it in their history. Upstream: [NousResearch/hermes-official-plugins](https://github.com/NousResearch/hermes-official-plugins/tree/main/claude-subscription-directsdk).
+
 > Part of [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent. Formerly [`NousResearch/hermes-plugin-claude-subscription-directsdk`](https://github.com/NousResearch/hermes-plugin-claude-subscription-directsdk), which is archived; this directory carries its full history.
 
 ![Claude Subscription DirectSDK — a Hermes model-provider plugin: Hermes → claude CLI → stream-json, on your Claude Pro/Max subscription](assets/hero-technohellenic.png)
