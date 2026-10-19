@@ -22,7 +22,7 @@ CA_ENV = ('SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE
 
 
 def error(message):
-    return json.dumps({'error': {'message': message}}).encode()
+    return json.dumps({'type': 'error', 'error': {'type': 'invalid_request_error', 'message': message}}).encode()
 
 
 @pytest.fixture(autouse=True)
@@ -181,6 +181,7 @@ REJECTIONS = [
         'bad json: invalid character \'x\' looking for beginning of value', 'bad json: unexpected EOF',
         'bad json: unexpected end of JSON input', 'bad json: EOF') for body in (
             (go + ' \n').encode(), json.dumps({'reason': 'bad_json', 'error': go}).encode())],
+    (400, {'cf-ray': 'fixture'}, 'bad json: EOF\ufeff'.encode()),  # JavaScript trimEnd() removes U+FEFF
 ]
 
 
@@ -229,7 +230,11 @@ NOT_REJECTIONS = [
         b'{"reason":"bad_json","error":"prefix bad json: EOF"}',
         b' ' * 8192 + b'bad json: EOF',
         b' bad json: EOF',  # Claude Code trims only the end of a raw body
-        b'\x0c' + error('The request body is not valid JSON'))],  # not JSON whitespace: no parse
+        b'\x0c' + error('The request body is not valid JSON'),  # not JSON whitespace: no parse
+        'bad json: EOF\u0085'.encode(),  # JavaScript trimEnd() keeps U+0085
+        b'{"reason":"bad_json","error":"bad json: EOF\\n"}',  # untrimmed; JavaScript $ is end of input
+        b'{"error":{"message":"The request body is not valid JSON"}}',  # no Anthropic error envelope
+        b'{"type":"error","error":{"type":1,"message":"The request body is not valid JSON"}}')],
 ]
 
 

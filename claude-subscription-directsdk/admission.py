@@ -34,7 +34,10 @@ KEEPALIVE = (('TCP_KEEPIDLE', 15), ('TCP_KEEPALIVE', 15), ('TCP_KEEPINTVL', 5), 
 GZIP_HOSTS = ('api.anthropic.com',)
 _gzip_latched = None
 _GZIP_CA_ENV = ('SSL_CERT_FILE', 'SSL_CERT_DIR', 'REQUESTS_CA_BUNDLE', 'CURL_CA_BUNDLE', 'NODE_EXTRA_CA_CERTS')
-_GO_BAD_JSON = re.compile(r'^bad json: (?:invalid character |unexpected EOF$|unexpected end of JSON input$|EOF$)')
+# Claude Code 2.1.302's origin-400 test. JavaScript's `$` never matches before a trailing newline, hence `\Z`;
+# _JS_TRIM is what String.prototype.trimEnd removes (str.rstrip() keeps U+FEFF, strips U+001C-001F and U+0085).
+_GO_BAD_JSON = re.compile(r'^bad json: (?:invalid character |unexpected EOF\Z|unexpected end of JSON input\Z|EOF\Z)')
+_JS_TRIM = ' \t\n\v\f\r\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
 
 
 def _gzip_eligible(gate, payload, headers):
@@ -58,7 +61,7 @@ def _rejection_kind(response, body):
     try:
         value = json.loads(text)
     except ValueError:
-        return 'invalid_json_at_origin' if _GO_BAD_JSON.match(text.rstrip()) else None  # Claude Code: trimEnd()
+        return 'invalid_json_at_origin' if _GO_BAD_JSON.match(text.rstrip(_JS_TRIM)) else None
     if not isinstance(value, dict):
         return None
     error = value.get('error')
@@ -67,8 +70,10 @@ def _rejection_kind(response, body):
         if (isinstance(details, dict) and details.get('error_code') == 'request_body_encoding_unsupported') \
                 or (isinstance(message, str) and message.startswith('Unsupported Content-Encoding')):
             return 'unsupported_encoding'
-        if isinstance(message, str) and message.startswith(('The request body is not valid JSON',
-                'Failed to parse request: could not parse request body as JSON')):
+        # The message prefix counts only in a full Anthropic error envelope; the bad_json string is matched untrimmed.
+        if value.get('type') == 'error' and isinstance(error.get('type'), str) and isinstance(message, str) \
+                and message.startswith(('The request body is not valid JSON',
+                                        'Failed to parse request: could not parse request body as JSON')):
             return 'invalid_json_at_origin'
     elif value.get('reason') == 'bad_json' and isinstance(error, str) and _GO_BAD_JSON.match(error):
         return 'invalid_json_at_origin'
