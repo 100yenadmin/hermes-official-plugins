@@ -33,7 +33,7 @@
           "type": "secret",
           "env": "MESHY_API_KEY",
           "label": "Meshy API key",
-          "description": "From meshy.ai → API. Start a new chat after changing it so the Meshy tools pick it up."
+          "description": "From meshy.ai → API. Saving it restarts the Meshy tools with the new key."
         },
         "show_credits": {
           "type": "bool",
