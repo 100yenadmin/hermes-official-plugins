@@ -158,6 +158,13 @@ Catalog entries come in two tiers:
 </tr>
 <tr>
 <td width="50%" valign="top">
+<a href="meshy/"><img src="assets/meshy.jpg" alt="Meshy plugin"></a>
+<h3><a href="meshy/">Meshy</a></h3>
+<code>hermes plugins install meshy</code>
+<p>Make 3D models with Meshy's first-party MCP server: text or image to 3D, texturing, rigging and animation, format conversion, and 3D-print preparation (printability repair, multicolor 3MF, split into parts, slicer handoff), with a meshy-3d workflow skill. Hermes asks before every credit-spending call. Needs Node.js 18+ and a Meshy API key (Pro plan).</p>
+<p>MCP server + skill · 28 tools, loaded on demand</p>
+</td>
+<td width="50%" valign="top">
 <h3>More on the way</h3>
 <p>Official plugins move in here as they leave Hermes core or join from their own repos. Browse everything else, from Nous, vendors and the community, in the <a href="https://hermes-agent.nousresearch.com/docs/plugins">plugin catalog</a>.</p>
 </td>

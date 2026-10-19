@@ -46,8 +46,10 @@ setup step from Meshy's docs: the plugin already registers the server, and a sec
 
 The server is marked untrusted, so Hermes asks the user before every call that is not
 read-only (every create, download, cancel). Read-only calls (balance, status, lists, slicer
-detection) run without a prompt. In an unattended run (cron, `chat -q`, a gateway without an
-approver) those calls are refused: report what you would have run instead of retrying.
+detection) run without a prompt. When a call comes back "The user did not approve", stop:
+the user declined, or the run is unattended (cron, `chat -q`, a gateway with no approver)
+and cannot approve. Do not retry, inspect config or look for a workaround; tell the user the
+exact call you would make and its cost, and that an interactive session can approve it.
 
 ## Quick Reference
 
