@@ -19,10 +19,22 @@ export interface FilePayload {
   dataUrl: string
 }
 
+export interface MeshySettings {
+  show_credits: boolean
+  inline_viewer: boolean
+  auto_rotate: boolean
+  gallery_limit: number
+}
+
+/** Mirrors plugin.json's config_schema defaults until the backend answers. */
+export const DEFAULT_SETTINGS: MeshySettings = { show_credits: true, inline_viewer: true, auto_rotate: true, gallery_limit: 24 }
+
 export interface Balance {
   configured: boolean
   balance?: number
   key_env?: string
+  error?: string
+  settings?: Partial<MeshySettings>
 }
 
 export interface RemoteModel {
@@ -268,7 +280,19 @@ export function TranscriptCard({
 }
 
 /** Full workspace: recent Meshy generations + local downloads on the left, the viewer on the right. */
-export function Gallery({ rest, os, initial }: { rest: Rest; os: Os; initial: null | Source }) {
+export function Gallery({
+  rest,
+  os,
+  initial,
+  autoRotate,
+  onOpenSettings
+}: {
+  rest: Rest
+  os: Os
+  initial: null | Source
+  autoRotate: boolean
+  onOpenSettings: () => void
+}) {
   const [selected, setSelected] = useState<null | Source>(initial)
   const [remote, setRemote] = useState<RemoteModel[] | null>(null)
   const [local, setLocal] = useState<LocalFile[] | null>(null)
@@ -277,7 +301,7 @@ export function Gallery({ rest, os, initial }: { rest: Rest; os: Os; initial: nu
 
   const refresh = useCallback(() => {
     setError(null)
-    rest<{ configured: boolean; models: RemoteModel[] }>('models?limit=24', { timeoutMs: 60_000 })
+    rest<{ configured: boolean; models: RemoteModel[] }>('models', { timeoutMs: 60_000 })
       .then(r => {
         setConfigured(r.configured)
         setRemote(r.models)
@@ -303,11 +327,23 @@ export function Gallery({ rest, os, initial }: { rest: Rest; os: Os; initial: nu
       <aside style={V.list}>
         <div style={V.listHead}>
           <span>Meshy models</span>
-          <Button aria-label="Refresh" onClick={refresh} size="icon" title="Refresh" variant="ghost">
-            <Codicon name="refresh" />
-          </Button>
+          <span>
+            <Button aria-label="Meshy settings" onClick={onOpenSettings} size="icon" title="Meshy settings" variant="ghost">
+              <Codicon name="settings-gear" />
+            </Button>
+            <Button aria-label="Refresh" onClick={refresh} size="icon" title="Refresh" variant="ghost">
+              <Codicon name="refresh" />
+            </Button>
+          </span>
         </div>
-        {!configured && <div style={V.hint}>Set MESHY_API_KEY to list your generations.</div>}
+        {!configured && (
+          <div style={V.hint}>
+            Add your Meshy API key to list your generations.{' '}
+            <Button onClick={onOpenSettings} size="sm" variant="outline">
+              Open Meshy settings
+            </Button>
+          </div>
+        )}
         {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
         {local && local.length > 0 && <div style={V.section}>On this machine</div>}
         {local?.map(f => {
@@ -351,7 +387,7 @@ export function Gallery({ rest, os, initial }: { rest: Rest; os: Os; initial: nu
       </aside>
       <section style={V.main}>
         {selected ? (
-          <ModelViewer height="100%" os={os} rest={rest} source={selected} />
+          <ModelViewer autoRotate={autoRotate} height="100%" key={String(autoRotate)} os={os} rest={rest} source={selected} />
         ) : (
           <div style={V.empty}>
             <Codicon name="symbol-misc" size={32} />
@@ -368,9 +404,21 @@ export function BalanceChip({ balance, onOpen }: { balance: Balance | null; onOp
   if (!balance) {
     return null
   }
-  const label = balance.configured ? `${(balance.balance ?? 0).toLocaleString()} cr` : 'no key'
+  const label = !balance.configured
+    ? 'no key'
+    : balance.error
+      ? /rejected/i.test(balance.error)
+        ? 'key rejected'
+        : 'offline'
+      : `${(balance.balance ?? 0).toLocaleString()} cr`
   return (
-    <button data-meshy-chip style={V.chip} onClick={onOpen} title="Meshy credits — open the 3D gallery" type="button">
+    <button
+      data-meshy-chip
+      onClick={onOpen}
+      style={V.chip}
+      title={balance.error ? `Meshy: ${balance.error}` : 'Meshy credits — open the 3D gallery'}
+      type="button"
+    >
       <Codicon name="symbol-misc" />
       <span>Meshy {label}</span>
     </button>

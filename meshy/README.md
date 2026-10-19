@@ -27,15 +27,16 @@ hermes plugins install meshy        # from the Nous plugin catalog
 hermes plugins enable meshy
 ```
 
-Then add your Meshy API key to the Hermes profile's `.env` (`~/.hermes/.env`, or
-`~/.hermes/profiles/<name>/.env`):
+Then add your Meshy API key. In Hermes Desktop: **Settings → Plugins → Meshy** (or the gear on
+the plugin's row in Capabilities → Plugins), paste it into *Meshy API key*, Save. The running Meshy
+server restarts with the new key on its own. Without Desktop, either of these does the same:
 
 ```bash
-MESHY_API_KEY=msy_...
+hermes config set MESHY_API_KEY msy_...        # writes the profile's .env
+# or put MESHY_API_KEY=msy_... in ~/.hermes/.env (~/.hermes/profiles/<name>/.env)
 ```
 
-Create the key at meshy.ai → Settings → API. API keys need a Pro plan or above. Start a new
-Hermes session and ask, for example, "Make a low-poly treasure chest for Godot" or "Turn
+Create the key at meshy.ai → Settings → API. API keys need a Pro plan or above. Then ask, for example, "Make a low-poly treasure chest for Godot" or "Turn
 ~/photos/mug.jpg into a 3D model and get it ready to print at 10 cm".
 
 Requirements: Node.js 18+ with `npx` on PATH. The first start downloads the pinned package
@@ -69,6 +70,22 @@ mcp_servers:
 it to always pass one). Without it, the server writes under `meshy_output/` in its working
 directory, which this plugin sets to its own data directory
 (`~/.hermes/plugin-data/agent-plugin-meshy-<hash>/meshy_output/`), not your project.
+
+## Settings
+
+One page in Desktop: **Settings → Plugins → Meshy** (⌘K → "Meshy: settings", or the gear in
+the gallery). Every option is a plain config key too, so the CLI and other surfaces reach the
+same values:
+
+| Setting | Default | CLI |
+|---|---|---|
+| Meshy API key | — | `hermes config set MESHY_API_KEY msy_...` (stored in `.env`, never `config.yaml`) |
+| Credit balance in the status bar | on | `hermes config set plugins.entries.meshy.settings.show_credits false` |
+| Inline 3D cards in chat | on | `… .settings.inline_viewer false` (directive lines then show as text) |
+| Auto-rotate in the gallery | on | `… .settings.auto_rotate false` |
+| Recent generations shown | 24 | `… .settings.gallery_limit 10` (1–60) |
+
+Desktop applies a saved change immediately; nothing needs a restart.
 
 ## Hermes Desktop
 

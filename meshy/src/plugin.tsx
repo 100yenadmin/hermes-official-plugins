@@ -15,9 +15,11 @@ import type { HermesPlugin, PaletteContribution } from '@hermes/plugin-sdk'
 import { host, PALETTE_AREA, STATUSBAR_AREAS, TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 
-import { type Balance, BalanceChip, Gallery, type Source, TranscriptCard } from './views.tsx'
+import { type Balance, BalanceChip, DEFAULT_SETTINGS, Gallery, type MeshySettings, type Source, TranscriptCard } from './views.tsx'
 
 const WORKSPACE_ID = 'meshy-gallery'
+// Settings ▸ Plugins ▸ Meshy is generated from plugin.json's config_schema (agent key `meshy`).
+const SETTINGS_HREF = '/settings?tab=plugins&agent=meshy'
 
 const plugin: HermesPlugin = {
   id: 'meshy',
@@ -25,7 +27,19 @@ const plugin: HermesPlugin = {
   description: 'View Meshy 3D models inline in chat and in a gallery tab, with your credit balance in the status bar.',
   register(ctx) {
     let balance: Balance | null = null
+    let settings: MeshySettings = DEFAULT_SETTINGS
     const listeners = new Set<(b: Balance | null) => void>()
+    const settingsListeners = new Set<(s: MeshySettings) => void>()
+    const useSettings = () => {
+      const [value, setValue] = useState<MeshySettings>(settings)
+      useEffect(() => {
+        settingsListeners.add(setValue)
+        return () => {
+          settingsListeners.delete(setValue)
+        }
+      }, [])
+      return value
+    }
     let pendingSource: null | Source = null
     const galleryListeners = new Set<(s: null | Source) => void>()
     let closeWorkspace: (() => void) | null = null
@@ -36,6 +50,10 @@ const plugin: HermesPlugin = {
         .then(b => {
           balance = b
           listeners.forEach(fn => fn(b))
+          if (b.settings) {
+            settings = { ...DEFAULT_SETTINGS, ...b.settings }
+            settingsListeners.forEach(fn => fn(settings))
+          }
         })
         .catch(() => undefined) // backend not mounted yet (plugin just enabled) or Meshy down: keep the last value
     }
@@ -48,7 +66,16 @@ const plugin: HermesPlugin = {
           galleryListeners.delete(setSource)
         }
       }, [])
-      return <Gallery initial={source} os={ctx.os} rest={ctx.rest} />
+      const prefs = useSettings()
+      return (
+        <Gallery
+          autoRotate={prefs.auto_rotate}
+          initial={source}
+          onOpenSettings={() => host.navigate(SETTINGS_HREF)}
+          os={ctx.os}
+          rest={ctx.rest}
+        />
+      )
     }
 
     const openGallery = (source: null | Source = null, title = 'Meshy 3D') => {
@@ -69,6 +96,7 @@ const plugin: HermesPlugin = {
     }
 
     function Chip() {
+      const prefs = useSettings()
       const [b, setB] = useState<Balance | null>(balance)
       useEffect(() => {
         listeners.add(setB)
@@ -76,6 +104,9 @@ const plugin: HermesPlugin = {
           listeners.delete(setB)
         }
       }, [])
+      if (!prefs.show_credits) {
+        return null
+      }
       return <BalanceChip balance={b} onOpen={() => openGallery()} />
     }
 
@@ -85,10 +116,29 @@ const plugin: HermesPlugin = {
         refreshBalance()
       }
     })
+    function DirectiveCard({ attrs, source, streaming }: { attrs: Readonly<Record<string, string>>; source: string; streaming: boolean }) {
+      const prefs = useSettings()
+      if (!prefs.inline_viewer) {
+        return <p>{source}</p>
+      }
+      return (
+        <TranscriptCard
+          attrs={attrs}
+          openInWorkspace={(src, title) => openGallery(src, title)}
+          os={ctx.os}
+          rest={ctx.rest}
+          streaming={streaming}
+        />
+      )
+    }
+
+    // Saved from Settings ▸ Plugins ▸ Meshy (a new API key, a toggle): re-read and apply live.
+    ctx.onEvent('plugin.meshy.settings.changed', () => refreshBalance())
     ctx.onDispose(() => {
       closeWorkspace?.()
       listeners.clear()
       galleryListeners.clear()
+      settingsListeners.clear()
     })
     refreshBalance()
 
@@ -98,14 +148,8 @@ const plugin: HermesPlugin = {
         area: TRANSCRIPT_DIRECTIVE_AREA,
         data: {
           name: 'meshy-model',
-          render: ({ attrs, streaming }: { attrs: Readonly<Record<string, string>>; streaming: boolean }) => (
-            <TranscriptCard
-              attrs={attrs}
-              openInWorkspace={(source, title) => openGallery(source, title)}
-              os={ctx.os}
-              rest={ctx.rest}
-              streaming={streaming}
-            />
+          render: ({ attrs, source, streaming }: { attrs: Readonly<Record<string, string>>; source: string; streaming: boolean }) => (
+            <DirectiveCard attrs={attrs} source={source} streaming={streaming} />
           )
         }
       },
@@ -123,6 +167,16 @@ const plugin: HermesPlugin = {
           label: 'Meshy: open 3D gallery',
           keywords: ['meshy', '3d', 'model', 'glb', 'gallery', 'viewer'],
           run: () => openGallery()
+        } satisfies PaletteContribution
+      },
+      {
+        id: 'open-settings',
+        area: PALETTE_AREA,
+        data: {
+          id: 'meshy.settings',
+          label: 'Meshy: settings',
+          keywords: ['meshy', 'settings', 'api key', 'credits', 'preferences'],
+          run: () => host.navigate(SETTINGS_HREF)
         } satisfies PaletteContribution
       },
       {

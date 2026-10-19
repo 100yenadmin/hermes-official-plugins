@@ -6,6 +6,7 @@ cannot read files or call Meshy itself, so this router does both, scoped to the 
 
 Routes:
     GET /status             key configured? + balance (no key → configured: false, never an error)
+                            + the user's Settings ▸ Plugins ▸ Meshy preferences
     GET /models?limit=      recent finished Meshy generations: task id, type, prompt, thumbnail, credits
     GET /local?limit=       .glb files under the plugin's meshy_output/ (the server's default download dir)
     GET /file?path=         bytes of one .glb/.gltf/.png/.jpg (data URL), refused outside allowed roots
@@ -38,6 +39,25 @@ _MIME = {".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".png": "image
 _MODEL_ENDPOINTS = (("text-to-3d", "/openapi/v2/text-to-3d"), ("image-to-3d", "/openapi/v1/image-to-3d"),
                     ("multi-image-to-3d", "/openapi/v1/multi-image-to-3d"), ("remesh", "/openapi/v1/remesh"),
                     ("retexture", "/openapi/v1/retexture"), ("rigging", "/openapi/v1/rigging"))
+
+
+# Defaults mirror plugin.json ``extensions.com.nousresearch.hermes.config_schema``; Settings ▸ Plugins
+# writes the user's choices to ``plugins.entries.meshy.settings``.
+_SETTING_DEFAULTS = {"show_credits": True, "inline_viewer": True, "auto_rotate": True, "gallery_limit": 24}
+
+
+def _settings() -> dict:
+    from hermes_cli.config import load_config_readonly
+    entry = ((load_config_readonly() or {}).get("plugins") or {}).get("entries", {}).get("meshy") or {}
+    saved = entry.get("settings") if isinstance(entry.get("settings"), dict) else {}
+    out = dict(_SETTING_DEFAULTS)
+    for key, default in _SETTING_DEFAULTS.items():
+        value = saved.get(key)
+        # bool is an int subclass: match the default's exact type so True never passes as a count.
+        if type(value) is type(default):
+            out[key] = value
+    out["gallery_limit"] = max(1, min(60, out["gallery_limit"]))
+    return out
 
 
 def _api_key() -> str | None:
@@ -102,12 +122,13 @@ def _resolve_readable(raw: str) -> Path:
 async def status():
     key = _api_key()
     if not key:
-        return {"configured": False, "key_env": _KEY_ENV}
+        return {"configured": False, "key_env": _KEY_ENV, "settings": _settings()}
     try:
         bal = _meshy_get("/openapi/v1/balance", key)
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        raise _meshy_error(exc) from exc
-    return {"configured": True, "balance": bal.get("balance"),
+        # The status chip shows WHY there is no number (bad key vs offline) instead of a stale one.
+        return {"configured": True, "settings": _settings(), "error": _meshy_error(exc).detail}
+    return {"configured": True, "settings": _settings(), "balance": bal.get("balance"),
             "monthly_credits": bal.get("monthly_credits"), "permanent_credits": bal.get("permanent_credits"),
             "monthly_resets_at": bal.get("monthly_resets_at")}
 
@@ -122,7 +143,8 @@ def _credits_by_task(key: str) -> dict[str, int]:
 
 
 @router.get("/models")
-async def models(limit: int = Query(24, ge=1, le=60)):
+async def models(limit: int | None = Query(None, ge=1, le=60)):
+    limit = limit or _settings()["gallery_limit"]
     key = _api_key()
     if not key:
         return {"configured": False, "models": []}

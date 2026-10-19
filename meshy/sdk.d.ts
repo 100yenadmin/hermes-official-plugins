@@ -55,6 +55,7 @@ export const PALETTE_AREA: string
 export const STATUSBAR_AREAS: { left: string; right: string }
 export const TRANSCRIPT_DIRECTIVE_AREA: string
 export const host: {
+  navigate: (path: string) => void
   notify: (input: { kind: 'error' | 'info' | 'success' | 'warning'; message: string }) => string
   openWorkspace?: (
     id: string,

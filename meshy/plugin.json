@@ -27,6 +27,38 @@
         "meshy": {
           "trust": "untrusted"
         }
+      },
+      "config_schema": {
+        "api_key": {
+          "type": "secret",
+          "env": "MESHY_API_KEY",
+          "label": "Meshy API key",
+          "description": "From meshy.ai → API. Start a new chat after changing it so the Meshy tools pick it up."
+        },
+        "show_credits": {
+          "type": "bool",
+          "default": true,
+          "label": "Credit balance in the status bar",
+          "description": "Desktop: show remaining Meshy credits in the status bar."
+        },
+        "inline_viewer": {
+          "type": "bool",
+          "default": true,
+          "label": "Inline 3D cards in chat",
+          "description": "Desktop: render ::meshy-model replies as interactive 3D cards. Off shows them as text."
+        },
+        "auto_rotate": {
+          "type": "bool",
+          "default": true,
+          "label": "Auto-rotate in the gallery",
+          "description": "Desktop: slowly spin the model in the gallery viewer."
+        },
+        "gallery_limit": {
+          "type": "int",
+          "default": 24,
+          "label": "Recent generations shown",
+          "description": "How many recent Meshy generations the gallery lists (1-60)."
+        }
       }
     }
   }
