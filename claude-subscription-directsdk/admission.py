@@ -54,11 +54,11 @@ def _rejection_kind(response, body):
         return 'unsupported_encoding'
     if response.status != 400:
         return None
-    text = body[:8192].decode('utf-8', errors='replace').strip()
+    text = body[:8192].decode('utf-8', errors='replace')
     try:
         value = json.loads(text)
     except ValueError:
-        return 'invalid_json_at_origin' if _GO_BAD_JSON.match(text) else None
+        return 'invalid_json_at_origin' if _GO_BAD_JSON.match(text.rstrip()) else None  # Claude Code: trimEnd()
     if not isinstance(value, dict):
         return None
     error = value.get('error')
@@ -776,6 +776,9 @@ class Handler(BaseHTTPRequestHandler):
             response = conn.getresponse()
             prefix = b''
             if compressed and response.status in (400, 403, 415):
+                # Recorded before the body read, so a failed read still reports this answer as an identity send would.
+                gate.request_id = response.getheader('request-id') or response.getheader('x-request-id')
+                gate.status = response.status
                 prefix = response.read(65536)
                 reason = _rejection_kind(response, prefix)
                 if reason:
