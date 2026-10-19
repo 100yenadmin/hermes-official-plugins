@@ -35,11 +35,11 @@ optional_env:
     prompt: "Home Assistant default notify target"
     password: false
   - name: HASS_ENTITY_DENYLIST
-    description: "Comma-separated entity_id prefixes or globs the HA tools always exclude (final veto)"
+    description: "Comma-separated entity_id prefixes or globs ha_list_entities/ha_get_state always exclude (final veto; not applied to ha_call_service)"
     prompt: "Home Assistant entity denylist (e.g. office_thermostat_*)"
     password: false
   - name: HASS_ENTITY_ALLOWLIST
-    description: "Comma-separated entity_id prefixes or globs the HA tools are limited to (whitelist; the denylist still vetoes)"
+    description: "Comma-separated entity_id prefixes or globs ha_list_entities/ha_get_state are limited to (whitelist; the denylist still vetoes; not applied to ha_call_service)"
     prompt: "Home Assistant entity allowlist (e.g. climate.*, sensor.office_*)"
     password: false
   - name: HASS_MAX_ENTITIES

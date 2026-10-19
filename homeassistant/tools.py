@@ -283,17 +283,20 @@ def _filter_and_summarize(
             states = [s for s in states if s.get("entity_id", "").startswith(f"{domain}.")]
         if area:
             area_lower = area.lower()
-            if entity_area:
-                # Registry-backed: authoritative. An entity belongs to an area even
-                # when its name says nothing about the room.
-                states = [s for s in states
-                          if area_lower in entity_area.get(s.get("entity_id", ""), "").lower()]
-            else:
-                # Degraded fallback only when the registry was unreachable.
-                states = [
-                    s for s in states
-                    if area_lower in (s.get("attributes", {}).get("friendly_name", "") or "").lower()
-                    or area_lower in (s.get("attributes", {}).get("area", "") or "").lower()]
+            def _in_area(s: Dict[str, Any]) -> bool:
+                registered = entity_area.get(s.get("entity_id", ""))
+                if registered is not None:
+                    # Registry-backed: authoritative. An entity belongs to an area even
+                    # when its name says nothing about the room.
+                    return area_lower in registered.lower()
+                # No registry area (registry unreachable, entity not registered, or no
+                # area assigned): keep the name/attribute match so nothing main found
+                # disappears.
+                attrs = s.get("attributes", {})
+                return (area_lower in (attrs.get("friendly_name", "") or "").lower()
+                        or area_lower in (attrs.get("area", "") or "").lower())
+
+            states = [s for s in states if _in_area(s)]
         if name:
             name_lower = name.lower()
             states = [
@@ -341,7 +344,9 @@ def _filter_and_summarize(
 # which silently misses every entity whose name doesn't repeat its room.
 _REGISTRY_CACHE: Dict[str, Any] = {"ts": 0.0, "entity_area": {}, "entity_device": {}}
 _REGISTRY_TTL = 300.0
+_REGISTRY_FAILURE_TTL = 60.0  # a failed pull is not retried on every call for this long
 _REGISTRY_TIMEOUT_S = 20.0
+_REGISTRY_MAX_MSG = 64 * 1024 * 1024  # entity_registry/list on a big install exceeds aiohttp's 4 MiB default
 
 
 async def _registry_area_map():
@@ -351,12 +356,18 @@ async def _registry_area_map():
     # ``ts`` is 0.0 until the first successful fetch. A successful fetch is cached
     # even when it maps nothing (an install with no areas assigned) — otherwise
     # every list call would re-download the full registry.
-    if _REGISTRY_CACHE["ts"] and _time.time() - _REGISTRY_CACHE["ts"] < _REGISTRY_TTL:
-        return _REGISTRY_CACHE["entity_area"], _REGISTRY_CACHE["entity_device"]
+    hass_url, hass_token = _get_config()
+    # Keyed by instance: profiles pointing at different Home Assistants must not
+    # see each other's area names.
+    if _REGISTRY_CACHE.get("url") == hass_url:
+        age = _time.time() - _REGISTRY_CACHE.get("failed_at", 0.0)
+        if age < _REGISTRY_FAILURE_TTL:
+            return {}, {}
+        if _REGISTRY_CACHE["ts"] and _time.time() - _REGISTRY_CACHE["ts"] < _REGISTRY_TTL:
+            return _REGISTRY_CACHE["entity_area"], _REGISTRY_CACHE["entity_device"]
 
     import aiohttp
 
-    hass_url, hass_token = _get_config()
     ws_url = hass_url.replace("https://", "wss://").replace("http://", "ws://") + "/api/websocket"
 
     async def pull() -> Optional[tuple]:
@@ -364,7 +375,7 @@ async def _registry_area_map():
         ent_area: Dict[str, str] = {}
         ent_dev: Dict[str, str] = {}
         async with aiohttp.ClientSession() as session:
-            async with session.ws_connect(ws_url) as ws:
+            async with session.ws_connect(ws_url, max_msg_size=_REGISTRY_MAX_MSG) as ws:
                 await ws.receive_json()                      # auth_required
                 await ws.send_json({"type": "auth", "access_token": hass_token})
                 auth_reply = await ws.receive_json()
@@ -379,6 +390,8 @@ async def _registry_area_map():
                     while True:
                         m = await ws.receive_json()
                         if m.get("id") == mid and m.get("type") == "result":
+                            if not m.get("success", True):
+                                raise RuntimeError(f"{mtype} refused: {m.get('error')}")
                             return m.get("result") or []
 
                 areas = {a["area_id"]: a["name"] for a in await fetch(1, "config/area_registry/list")}
@@ -400,16 +413,35 @@ async def _registry_area_map():
     except asyncio.TimeoutError:
         logger.warning(
             "HA registry lookup timed out after %ss; area filter degraded", _REGISTRY_TIMEOUT_S)
-        return {}, {}
+        pulled = None
     except Exception as exc:                                  # noqa: BLE001
         logger.warning("HA registry lookup failed (%s: %s); area filter degraded", type(exc).__name__, exc)
-        return {}, {}
+        pulled = None
     if pulled is None:
-        return {}, {}                                         # auth refused: retried next call
+        # Remember the failure briefly so a stalled or refusing HA costs one
+        # timeout per window, not one per call.
+        _REGISTRY_CACHE.update({"url": hass_url, "ts": 0.0, "failed_at": _time.time(),
+                                "entity_area": {}, "entity_device": {}})
+        return {}, {}
 
     ent_area, ent_dev = pulled
-    _REGISTRY_CACHE.update({"ts": _time.time(), "entity_area": ent_area, "entity_device": ent_dev})
+    _REGISTRY_CACHE.update({"url": hass_url, "ts": _time.time(), "failed_at": 0.0,
+                            "entity_area": ent_area, "entity_device": ent_dev})
     return ent_area, ent_dev
+
+
+def _warm_registry_maps():
+    """Area/device maps from a fresh cache for this instance, without a network call."""
+    import time as _time
+
+    try:
+        hass_url, _ = _get_config()
+    except ValueError:
+        return {}, {}
+    if (_REGISTRY_CACHE.get("url") == hass_url and _REGISTRY_CACHE["ts"]
+            and _time.time() - _REGISTRY_CACHE["ts"] < _REGISTRY_TTL):
+        return _REGISTRY_CACHE["entity_area"], _REGISTRY_CACHE["entity_device"]
+    return {}, {}
 
 
 async def _async_list_entities(
@@ -421,7 +453,11 @@ async def _async_list_entities(
 ) -> Dict[str, Any]:
     """Fetch entity states from HA; filters are applied before the payload is built."""
     states = await _api_json("GET", "/api/states", 15)
-    entity_area, entity_device = await _registry_area_map()
+    # The registry is only needed to resolve rooms; a plain list stays one REST call.
+    if area:
+        entity_area, entity_device = await _registry_area_map()
+    else:
+        entity_area, entity_device = _warm_registry_maps()
     return _filter_and_summarize(
         states, domain=domain, area=area, entity_ids=entity_ids, name=name,
         max_entities=max_entities, entity_area=entity_area, entity_device=entity_device)
@@ -570,7 +606,7 @@ HA_LIST_ENTITIES_SCHEMA: Dict[str, Any] = {
         "List Home Assistant entities. On a large install a bare call can return "
         "thousands of entities, so use the filters (domain, area, name, "
         "entity_ids) to keep the response small and targeted. Each entity "
-        "includes its area and device when known.\n"
+        "includes its area and device when known (always after an area query).\n"
         "An operator may configure a global cap (HASS_MAX_ENTITIES); when that "
         "or a 'max' parameter limits a result, the response is marked "
         "'truncated' with a note on how to narrow the query or get more."

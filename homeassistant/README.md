@@ -61,8 +61,8 @@ HASS_HOME_CHANNEL=mobile_app_my_phone
 | `HASS_TOKEN` | yes | Long-Lived Access Token. Enables both the tools and the gateway platform. |
 | `HASS_URL` | no | Base URL of your instance. Default `http://homeassistant.local:8123`. Seeds `platforms.homeassistant.extra.url` when the platform is enabled from env. |
 | `HASS_HOME_CHANNEL` | no | Default target for cron `deliver=homeassistant`. `HASS_HOME_CHANNEL_NAME` sets a display name. |
-| `HASS_ENTITY_DENYLIST` | no | Comma-separated entity ID prefixes or globs the tools always exclude (final veto). |
-| `HASS_ENTITY_ALLOWLIST` | no | Comma-separated entity ID prefixes or globs the tools are limited to (whitelist; unset = unrestricted). |
+| `HASS_ENTITY_DENYLIST` | no | Comma-separated entity ID prefixes or globs that `ha_list_entities` and `ha_get_state` always exclude (final veto). Not applied to `ha_call_service`. |
+| `HASS_ENTITY_ALLOWLIST` | no | Comma-separated entity ID prefixes or globs that `ha_list_entities` and `ha_get_state` are limited to (whitelist; unset = unrestricted). Not applied to `ha_call_service`. |
 | `HASS_MAX_ENTITIES` | no | Optional cap on `ha_list_entities` results (unset = no cap; a per-call `max` overrides it). |
 
 ### 3. Tools
@@ -79,8 +79,9 @@ cut by a cap is marked `truncated` with a note on how to narrow the query or get
 
 #### Operator entity filters (optional)
 
-Three environment variables constrain the tools without a code change. All are opt-in: unset means
-the tools behave exactly as before.
+Three environment variables constrain what the tools list and read without a code change. All are opt-in:
+unset means the tools behave exactly as before. They hide entities from discovery; they are not an access
+control for `ha_call_service`, which can still target any entity (use a scoped Home Assistant user/token for that).
 
 | Variable | Effect |
 |---|---|
@@ -90,7 +91,8 @@ the tools behave exactly as before.
 
 Patterns match exact IDs, family prefixes (`.` and `_` are interchangeable at the boundary, so
 `office_thermostat_*` covers `office_thermostat.0_valve_position`) and shell-style globs
-(`climate.*`, `*.valve*`).
+(`climate.*`, `*.valve*`). A prefix pattern starts at the start of the entity ID, so it does not
+cover `climate.office_thermostat`; use a glob such as `*office_thermostat*` to catch every domain.
 
 ### 4. Gateway platform
 

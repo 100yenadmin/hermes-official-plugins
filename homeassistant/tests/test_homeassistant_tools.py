@@ -876,3 +876,65 @@ class TestRegistryBackedAreaFilter:
         result = json.loads(ha_tool._handle_list_entities({"area": "kitchen"}))["result"]
         assert [e["entity_id"] for e in result["entities"]] == ["sensor.fridge_temp"]
         assert result["entities"][0]["area"] == "Kitchen"
+
+
+class TestRegistryHardening:
+    """Review follow-ups: per-instance cache, failure backoff, refused lists, no websocket on plain lists."""
+
+    AREAS = [{"area_id": "kitchen", "name": "Kitchen"}]
+    ENTITIES = [{"entity_id": "light.ceiling", "area_id": "kitchen", "device_id": None}]
+
+    def test_unregistered_entity_still_matches_by_name(self, monkeypatch):
+        _reset_filter_mirrors(monkeypatch)
+        states = [
+            {"entity_id": "light.ceiling", "state": "on", "attributes": {"friendly_name": "Ceiling"}},
+            {"entity_id": "light.kitchen_strip", "state": "on", "attributes": {"friendly_name": "Kitchen strip"}},
+            {"entity_id": "light.kitchen_lamp", "state": "on", "attributes": {"friendly_name": "Kitchen lamp"}},
+        ]
+        # light.kitchen_strip has no registry entry (YAML entity); light.kitchen_lamp is registered in the hall.
+        result = _filter_and_summarize(
+            states, area="kitchen", entity_area={"light.ceiling": "Kitchen", "light.kitchen_lamp": "Hall"})
+        assert [e["entity_id"] for e in result["entities"]] == ["light.ceiling", "light.kitchen_strip"]
+
+    def test_cache_is_per_instance(self, monkeypatch):
+        _install_fake_ws(monkeypatch, _registry_frames(self.AREAS, [], self.ENTITIES))
+        assert asyncio.run(ha_tool._registry_area_map())[0] == {"light.ceiling": "Kitchen"}
+        monkeypatch.setattr(ha_tool, "_get_config", lambda: ("http://other.local:8123", "tok-b"))
+        _FakeSession.ws = _FakeWS(_registry_frames([], [], []))
+        assert asyncio.run(ha_tool._registry_area_map()) == ({}, {})
+        assert _FakeSession.connect_calls == 2
+
+    def test_failure_is_not_retried_on_every_call(self, monkeypatch):
+        _install_fake_ws(monkeypatch, _registry_frames(self.AREAS, [], self.ENTITIES, auth="auth_invalid"))
+        assert asyncio.run(ha_tool._registry_area_map()) == ({}, {})
+        assert asyncio.run(ha_tool._registry_area_map()) == ({}, {})
+        assert _FakeSession.connect_calls == 1
+
+    def test_failure_backoff_expires(self, monkeypatch):
+        clock = [1000.0]
+        _install_fake_ws(monkeypatch, _registry_frames(self.AREAS, [], self.ENTITIES, auth="auth_invalid"), clock)
+        asyncio.run(ha_tool._registry_area_map())
+        clock[0] += ha_tool._REGISTRY_FAILURE_TTL + 1
+        _FakeSession.ws = _FakeWS(_registry_frames(self.AREAS, [], self.ENTITIES))
+        assert asyncio.run(ha_tool._registry_area_map())[0] == {"light.ceiling": "Kitchen"}
+        assert _FakeSession.connect_calls == 2
+
+    def test_refused_registry_list_is_a_failure_not_an_empty_success(self, monkeypatch, caplog):
+        frames = _registry_frames(self.AREAS, [], self.ENTITIES)
+        frames[-1] = {"id": 3, "type": "result", "success": False, "error": {"code": "unauthorized"}}
+        _install_fake_ws(monkeypatch, frames)
+        with caplog.at_level(logging.WARNING, logger="homeassistant_plugin.tools"):
+            assert asyncio.run(ha_tool._registry_area_map()) == ({}, {})
+        assert "refused" in caplog.text
+        assert ha_tool._REGISTRY_CACHE["ts"] == 0.0
+
+    def test_plain_list_does_not_open_the_websocket(self, monkeypatch):
+        _reset_filter_mirrors(monkeypatch)
+        monkeypatch.setattr(ha_tool, "_api_json", AsyncMock(return_value=[]))
+        pull = AsyncMock(return_value=({}, {}))
+        monkeypatch.setattr(ha_tool, "_registry_area_map", pull)
+        monkeypatch.setattr(ha_tool, "_get_config", lambda: ("http://ha.local:8123", "tok"))
+        json.loads(ha_tool._handle_list_entities({"domain": "light"}))
+        assert pull.await_count == 0
+        json.loads(ha_tool._handle_list_entities({"area": "kitchen"}))
+        assert pull.await_count == 1
