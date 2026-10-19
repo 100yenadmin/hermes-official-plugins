@@ -206,6 +206,15 @@ def test_rejection_resends_original_once_and_latches(relay, first, caplog):
     assert 'status=' in warnings[0].message and 'final rejection' not in warnings[0].message
 
 
+
+def test_failed_raw_resend_does_not_report_the_rejected_answer(relay):
+    relay.replies.extend([(415, {'Request-ID': 'req_rejected'}, b'rejected'),
+                          lambda peer: setattr(peer, 'close_connection', True)])  # resend: no answer at all
+    with pytest.raises((http.client.RemoteDisconnected, ConnectionResetError)):
+        relay.post()
+    gate = relay.gates[-1]
+    assert len(relay.calls) == 2 and gate.failure and gate.status is None and gate.request_id is None
+
 NOT_REJECTIONS = [
     *[(status, {}, error('The request body is not valid JSON')) for status in (401, 429, 500)],
     (400, {'request-id': 'req_fixture'}, error('prompt is too long')),
