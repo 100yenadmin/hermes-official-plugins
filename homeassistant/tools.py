@@ -710,6 +710,12 @@ HA_LIST_ENTITIES_SCHEMA: Dict[str, Any] = {
         "thousands of entities, so use the filters (domain, area, name, "
         "entity_ids) to keep the response small and targeted. Each entity "
         "includes its area and device when known (always after an area query).\n"
+        "For a request about a room (\"the kitchen lights\"), filter by `area`, "
+        "not `name`: a device belongs to a room by its Home Assistant area, and "
+        "its name often does not mention the room. Take everything the area "
+        "filter returns as part of that room, and judge what an entity is by "
+        "the domain prefix of its entity_id (every light.* is a light), not by "
+        "its name.\n"
         "An operator may configure a global cap (HASS_MAX_ENTITIES); when that "
         "or a 'max' parameter limits a result, the response is marked "
         "'truncated' with a note on how to narrow the query or get more."
@@ -730,6 +736,7 @@ HA_LIST_ENTITIES_SCHEMA: Dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "Area/room name to filter by (e.g. 'living room', 'kitchen'). "
+                    "Use this, not name, for any request about a room. "
                     "Resolved against the Home Assistant area registry, so an "
                     "entity is matched even when its name does not mention the "
                     "room; falls back to matching friendly names when the "
@@ -741,7 +748,8 @@ HA_LIST_ENTITIES_SCHEMA: Dict[str, Any] = {
                 "description": (
                     "Substring to match against entity friendly names and "
                     "entity_ids (e.g. 'thermostat', 'temperature'). "
-                    "Useful when you don't know the domain."
+                    "Useful when you don't know the domain. Not for rooms: "
+                    "use area, because names rarely mention the room."
                 ),
             },
             "entity_ids": {
