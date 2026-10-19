@@ -70,6 +70,27 @@ it to always pass one). Without it, the server writes under `meshy_output/` in i
 directory, which this plugin sets to its own data directory
 (`~/.hermes/plugin-data/agent-plugin-meshy-<hash>/meshy_output/`), not your project.
 
+## Hermes Desktop
+
+Turn on the plugin's **Desktop** switch in Capabilities → Plugins (Desktop halves are opt-in) and
+you get, rendered with stock three.js:
+
+- **Inline 3D cards.** After a download the agent ends its reply with
+  `::meshy-model{path="/abs/model.glb"}`; Desktop shows it as a card you click to orbit, zoom,
+  toggle wireframe and grid, or open in a tab. Other clients show the line as text.
+- **Meshy 3D gallery** (status-bar chip or ⌘K → "Meshy: open 3D gallery"): your recent
+  generations and local downloads next to a full viewer. "Meshy: view a .glb file…" opens any
+  model on disk.
+- **Credit chip** in the status bar, refreshed after every Meshy tool call.
+
+The renderer never reads files or holds the key. `dashboard/plugin_api.py` (mounted at
+`/api/plugins/meshy/` once the plugin is enabled) answers the viewer: the balance and recent tasks
+from Meshy's API, `.glb`/`.gltf`/image bytes from your home directory or the plugin's output folder
+(nothing else, symlinks resolved first), and signed `assets.meshy.ai` downloads. Cards load on
+click, render only while on screen, and free their WebGL context when unmounted, so a long chat
+of models stays light. Build the bundle with `npm ci && npm run build` (output:
+`desktop/plugin.js`, committed).
+
 ## Tools
 
 28 tools (about 19K tokens of schemas), loaded on demand through Hermes' tool search, so they

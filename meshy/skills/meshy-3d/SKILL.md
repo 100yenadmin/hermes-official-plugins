@@ -83,11 +83,17 @@ user's goal before the first paid call.
    `task_id` again.
 5. **Never re-create on doubt.** If a create fails with a timeout, network error or 5xx, the
    task may exist and be billed: check `meshy_list_tasks` with that `task_type` first.
-6. **Download** with `meshy_download_model`. Pass `save_to` as an ABSOLUTE path in the user's
+6. **Download** with `meshy_download_model` (`format: "glb"`, singular; there is no `formats`).
+   Pass `save_to` as an ABSOLUTE path in the user's
    project or wherever they asked. Without it, files land under the plugin's data directory
    (`meshy_output/`), not the current project. Report every saved path and the file size.
 7. **Report** the result: files and paths, formats, credits spent, and the `task_id` for
    follow-ups (refine, rig, convert reuse it instead of regenerating).
+8. **Show it in Hermes Desktop.** After a `.glb` download, end the reply with a paragraph that is
+   only the directive `::meshy-model{path="<absolute path of the .glb>"}` (one per model, each
+   on its own line). Desktop renders it as an interactive 3D card; other clients show the line
+   as text, so write the path in prose as well. Before a download, a finished task's signed
+   `model_urls.glb` works too: `::meshy-model{url="https://assets.meshy.ai/..." title="..."}`.
 
 ## Pitfalls
 
