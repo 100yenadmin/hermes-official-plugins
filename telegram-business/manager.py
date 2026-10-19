@@ -230,7 +230,9 @@ class BusinessModeManager:
 
         ``message`` is a PTB ``Message`` from a business_message update.
         It has ``business_connection_id``, ``chat`` (the customer chat),
-        ``from_user`` (the customer), and ``text``/``caption``.
+        ``from_user`` and ``text``/``caption``. Telegram delivers both sides
+        of a business chat, so ``from_user`` is the customer only for
+        incoming messages; outgoing ones are skipped below.
         """
         conn_id = getattr(message, "business_connection_id", None)
         if not conn_id:
@@ -244,6 +246,17 @@ class BusinessModeManager:
             return
         if not conn.get("auto_draft", True):
             logger.debug("Business connection %s has auto_draft=False; skipping draft", conn_id)
+            return
+
+        # Only draft replies to the other party. Outgoing messages come through
+        # the same update: ones the owner typed carry the owner as from_user, and
+        # ones a bot sent on the owner's behalf (including an approved draft)
+        # carry sender_business_bot. Return before the debounce so they cannot
+        # cancel a pending draft for the customer's message.
+        if getattr(message, "sender_business_bot", None) is not None:
+            return
+        sender = getattr(message, "from_user", None)
+        if sender is not None and str(getattr(sender, "id", "")) == str(conn.get("owner_user_id")):
             return
 
         chat = getattr(message, "chat", None)

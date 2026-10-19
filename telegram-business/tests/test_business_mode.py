@@ -236,7 +236,7 @@ def _fake_business_connection(
 
 def _fake_business_message(
     *, conn_id="conn1", customer_chat_id=200, customer_id=999,
-    text="Hi there", msg_id=42,
+    text="Hi there", msg_id=42, sender_business_bot=None,
 ) -> Any:
     """Build a duck-typed business_message-style PTB Message."""
     return SimpleNamespace(
@@ -249,6 +249,7 @@ def _fake_business_message(
         text=text,
         caption=None,
         message_id=msg_id,
+        sender_business_bot=sender_business_bot,
     )
 
 
@@ -445,6 +446,41 @@ class TestBusinessMessageDraftFlow:
         # Only one draft should have been generated and one owner DM sent.
         owner_dms = [c for c in sender.calls if c.get("chat_id") == 100]
         assert len(owner_dms) == 1
+
+
+    @pytest.mark.asyncio
+    async def test_owner_outgoing_message_not_drafted(self, db):
+        mgr, sender = _make_manager(db)
+        await mgr.handle_connection_update(_fake_business_connection(owner_id=42))
+        sender.calls.clear()
+        await mgr.handle_business_message(_fake_business_message(customer_id=42, text="On my way"))
+        assert sender.calls == []
+        assert db.get_pending_telegram_business_drafts_for_owner("100") == []
+
+    @pytest.mark.asyncio
+    async def test_bot_sent_message_not_drafted(self, db):
+        mgr, sender = _make_manager(db)
+        await mgr.handle_connection_update(_fake_business_connection())
+        sender.calls.clear()
+        # An approved draft echoes back with sender_business_bot set; from_user is the owner
+        # here, but the bot check must hold on its own.
+        await mgr.handle_business_message(_fake_business_message(
+            text="Draft reply!", sender_business_bot=SimpleNamespace(id=7, is_bot=True)))
+        assert sender.calls == []
+        assert db.get_pending_telegram_business_drafts_for_owner("100") == []
+
+    @pytest.mark.asyncio
+    async def test_owner_reply_keeps_pending_customer_draft(self, db):
+        mgr, sender = _make_manager(db, debounce=0.05, draft_text="customer draft")
+        await mgr.handle_connection_update(_fake_business_connection(owner_id=42))
+        sender.calls.clear()
+        await mgr.handle_business_message(_fake_business_message(text="Is it open?", msg_id=1))
+        # The owner answers by hand inside the debounce window.
+        await mgr.handle_business_message(_fake_business_message(customer_id=42, text="Yes", msg_id=2))
+        await asyncio.sleep(0.2)
+        owner_dms = [c for c in sender.calls if c.get("chat_id") == 100]
+        assert len(owner_dms) == 1
+        assert "Is it open?" in owner_dms[0]["text"]
 
 
 class TestCallbackDispatch:
