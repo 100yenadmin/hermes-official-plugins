@@ -782,6 +782,7 @@ class Handler(BaseHTTPRequestHandler):
                 prefix = response.read(65536)
                 reason = _rejection_kind(response, prefix)
                 if reason:
+                    gate.request_id = gate.status = None  # The resend reports its own answer, or none.
                     if _gzip_latched is None:
                         _gzip_latched = reason
                         logging.getLogger(__name__).warning('request gzip disabled: %s status=%s', reason, response.status)
