@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 import sys
 import threading
+import time
 from types import SimpleNamespace
 from urllib.parse import urlsplit
 import zlib
@@ -179,7 +180,7 @@ REJECTIONS = [
     *[(400, {'cF-rAy': 'fixture'}, body) for go in (
         'bad json: invalid character \'x\' looking for beginning of value', 'bad json: unexpected EOF',
         'bad json: unexpected end of JSON input', 'bad json: EOF') for body in (
-            (' \n' + go + '\n').encode(), json.dumps({'reason': 'bad_json', 'error': go}).encode())],
+            (go + ' \n').encode(), json.dumps({'reason': 'bad_json', 'error': go}).encode())],
 ]
 
 
@@ -217,7 +218,9 @@ NOT_REJECTIONS = [
         b'prefix bad json: EOF', b'bad json: EOF extra', b'bad json: invalid characters',
         b'{"reason":"other","error":"bad json: EOF"}',
         b'{"reason":"bad_json","error":"prefix bad json: EOF"}',
-        b' ' * 8192 + b'bad json: EOF')],
+        b' ' * 8192 + b'bad json: EOF',
+        b' bad json: EOF',  # Claude Code trims only the end of a raw body
+        b'\x0c' + error('The request body is not valid JSON'))],  # not JSON whitespace: no parse
 ]
 
 
@@ -310,6 +313,7 @@ def test_rejection_body_read_obeys_request_timeout(relay):
         with pytest.raises(http.client.RemoteDisconnected):
             relay.post(configure=lambda gate: setattr(gate, 'timeout', .1))
         assert relay.gates[-1].failure == 'TimeoutError' and len(relay.calls) == 1
+        assert relay.gates[-1].status == 400 and relay.gates[-1].request_id == 'req_fixture'
         assert admission._gzip_latched is None
     finally:
         release.set()
@@ -355,6 +359,10 @@ def test_cancellation_between_attempts_prevents_resend(relay, monkeypatch):
     relay.replies.append((415, {}, b'rejected'))
     with pytest.raises((http.client.RemoteDisconnected, ConnectionResetError)):
         relay.post()
+    gate, deadline = relay.gates[-1], time.monotonic() + 3
+    while gate.sockets and time.monotonic() < deadline:
+        time.sleep(.01)
+    assert not gate.sockets  # the relay handler is done, so a resend would already have reached the peer
     assert len(relay.calls) == 1
 
 
