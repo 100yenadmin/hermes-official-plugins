@@ -1,0 +1,33 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "meshy",
+  "version": "0.1.0",
+  "description": "Generate, texture, rig, animate and 3D-print models with Meshy AI through Meshy's first-party MCP server (pinned @meshy-ai/meshy-mcp-server@0.6.4 over npx stdio), with a meshy-3d workflow skill bundled. Credit-spending calls ask for approval first.",
+  "author": {
+    "name": "Nous Research",
+    "url": "https://github.com/NousResearch"
+  },
+  "homepage": "https://github.com/NousResearch/hermes-official-plugins/tree/main/meshy",
+  "repository": "https://github.com/NousResearch/hermes-official-plugins/tree/main/meshy",
+  "license": "MIT",
+  "keywords": [
+    "meshy",
+    "3d",
+    "text-to-3d",
+    "image-to-3d",
+    "rigging",
+    "animation",
+    "3d-printing",
+    "game-assets",
+    "mcp"
+  ],
+  "extensions": {
+    "com.nousresearch.hermes": {
+      "servers": {
+        "meshy": {
+          "trust": "untrusted"
+        }
+      }
+    }
+  }
+}
