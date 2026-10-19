@@ -691,6 +691,78 @@ class TestGetStateOperatorFilters:
         )
 
 
+# ---------------------------------------------------------------------------
+# Control path (ha_call_service) honors the operator allow/deny lists
+# ---------------------------------------------------------------------------
+
+
+class TestCallServiceOperatorFilters:
+    """The lists block control too: a denied or non-allowlisted entity cannot be
+    switched, and a call whose targets cannot be checked is refused. Every refusal
+    happens before any network call."""
+
+    def _call(self, args):
+        with patch.object(ha_tool, "_run_async") as run:
+            result = json.loads(_handle_call_service(args))
+        return result, run
+
+    def test_denylisted_entity_cannot_be_controlled(self, monkeypatch):
+        _reset_filter_mirrors(monkeypatch)
+        monkeypatch.setenv("HASS_ENTITY_DENYLIST", "lock.*,office_thermostat_*")
+        for args in (
+            {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"},
+            {"domain": "light", "service": "turn_on",
+             "data": '{"entity_id": ["light.kitchen", "lock.front_door"]}'},
+            {"domain": "climate", "service": "set_temperature",
+             "data": {"target": {"entity_id": "office_thermostat.0_valve"}, "temperature": 30}},
+        ):
+            result, run = self._call(args)
+            assert "HASS_ENTITY_DENYLIST" in result.get("error", ""), args
+            run.assert_not_called()
+        assert "'lock.*'" in self._call(
+            {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"})[0]["error"]
+
+    def test_allowlist_refuses_outside_and_unresolvable_targets(self, monkeypatch):
+        _reset_filter_mirrors(monkeypatch)
+        monkeypatch.setenv("HASS_ENTITY_ALLOWLIST", "light.*,script.goodnight")
+        refused = (
+            {"domain": "switch", "service": "turn_on", "entity_id": "switch.heater"},
+            {"domain": "light", "service": "turn_off"},                       # no target = every light
+            {"domain": "light", "service": "turn_off", "data": {"area_id": "kitchen"}},
+            {"domain": "light", "service": "turn_off", "data": {"target": {"device_id": "abc"}}},
+            {"domain": "light", "service": "turn_off", "data": {"floor_id": "f1"}},
+            {"domain": "light", "service": "turn_off", "data": {"label_id": "l1"}},
+            {"domain": "light", "service": "turn_off", "data": {"entity_id": "all"}},
+            {"domain": "script", "service": "wake_up"},                       # runs script.wake_up
+        )
+        for args in refused:
+            result, run = self._call(args)
+            assert "Refused by operator config" in result.get("error", ""), args
+            run.assert_not_called()
+        with patch.object(ha_tool, "_async_call_service", new_callable=AsyncMock) as call:
+            call.return_value = {"success": True}
+            for args in (
+                {"domain": "light", "service": "turn_on", "entity_id": "light.kitchen"},
+                {"domain": "script", "service": "goodnight"},
+                {"domain": "script", "service": "turn_on", "entity_id": "script.goodnight"},
+                {"domain": "notify", "service": "mobile_app_phone", "data": {"message": "hi"}},
+            ):
+                assert json.loads(_handle_call_service(args))["result"]["success"] is True, args
+        assert call.await_count == 4
+
+    def test_no_filters_leaves_control_unchanged(self, monkeypatch):
+        _reset_filter_mirrors(monkeypatch)
+        with patch.object(ha_tool, "_async_call_service", new_callable=AsyncMock) as call:
+            call.return_value = {"success": True}
+            for args in (
+                {"domain": "light", "service": "turn_off"},
+                {"domain": "light", "service": "turn_off", "data": {"area_id": "kitchen"}},
+                {"domain": "lock", "service": "unlock", "entity_id": "lock.front_door"},
+            ):
+                assert json.loads(_handle_call_service(args))["result"]["success"] is True, args
+        assert call.await_count == 3
+
+
 # ── Registry-backed area/device resolution ───────────────────────────────────
 class _FakeWS:
     """Scripted HA websocket: hands out the queued frames, records what was sent."""

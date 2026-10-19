@@ -10,7 +10,8 @@ the public plugin API (``register_tools(ctx)`` -> ``ctx.register_tool``) instead
 
 Optional operator configuration (all opt-in; unset preserves plain behaviour):
 ``HASS_ENTITY_ALLOWLIST`` / ``HASS_ENTITY_DENYLIST`` restrict which entities
-``ha_list_entities`` may return and ``ha_get_state`` may read, and
+``ha_list_entities`` may return, ``ha_get_state`` may read and ``ha_call_service``
+may control (see ``_service_call_violation``), and
 ``HASS_MAX_ENTITIES`` caps list results. ``ha_list_entities`` also supports
 targeted queries (``name``, ``entity_ids``, ``max``) and resolves areas and
 devices through the WebSocket registries, so ``area`` filters work even when
@@ -74,7 +75,8 @@ def _get_entity_filter_config():
     change:
 
     - ``HASS_ENTITY_DENYLIST`` — comma-separated entity_id prefixes or globs
-      (e.g. ``office_thermostat_*``) to always exclude from ha_list_entities.
+      (e.g. ``office_thermostat_*``) to always exclude from ha_list_entities,
+      ha_get_state and ha_call_service.
       Acts as a final veto: it wins even against the allowlist.
     - ``HASS_ENTITY_ALLOWLIST`` — same format; when non-empty it restricts
       results to matching entities (a whitelist).
@@ -185,6 +187,96 @@ def _operator_filter_violation(entity_id: str) -> Optional[str]:
         return "excluded by HASS_ENTITY_DENYLIST"
     if allow and not _entity_matches(entity_id, allow):
         return "not in HASS_ENTITY_ALLOWLIST"
+    return None
+
+
+# ── Operator lists on control (ha_call_service) ──────────────────────────────
+# Home Assistant target keys that select entities indirectly. They cannot be
+# checked against entity-id patterns without resolving them on the server, so a
+# filtered call that uses them is refused (see _service_call_violation).
+_INDIRECT_TARGET_KEYS = ("area_id", "device_id", "floor_id", "label_id")
+# Domains whose services act on no entity (they deliver a message), so a call
+# with no entity target is allowed even when the operator lists are set.
+_NON_ENTITY_DOMAINS = frozenset({"notify", "persistent_notification"})
+# Built-in script services; any other ``script.<name>`` service runs the
+# ``script.<name>`` entity itself.
+_SCRIPT_BUILTIN_SERVICES = frozenset({"turn_on", "turn_off", "toggle", "reload"})
+
+
+def _is_entity_key(key: str) -> bool:
+    return key in ("entity_id", "entities", "snapshot_entities") or key.endswith(
+        ("_entity_id", "_entity_ids"))
+
+
+def _collect_service_targets(payload: Any, entity_ids: set, indirect: set) -> None:
+    """Gather the entities a service payload names, recursing into nested dicts.
+
+    ``entity_ids`` gets every value under an entity key (``entity_id``,
+    ``*_entity_id(s)``, ``entities``: list items or dict keys,
+    ``snapshot_entities``); ``indirect`` gets the names of area/device/floor/label
+    target keys that carry a value.
+    """
+    if not isinstance(payload, dict):
+        return
+    for key, value in payload.items():
+        if not isinstance(key, str) or value in (None, "", [], {}):
+            continue
+        if key in _INDIRECT_TARGET_KEYS:
+            indirect.add(key)
+        elif _is_entity_key(key):
+            # Home Assistant lowercases entity ids before matching, so check them the same way.
+            entity_ids.update(
+                e.lower() for e in _normalize_id_list(list(value) if isinstance(value, dict) else value))
+        elif isinstance(value, dict):
+            _collect_service_targets(value, entity_ids, indirect)
+
+
+def _service_call_violation(domain: str, service: str, payload: Any) -> Optional[str]:
+    """Why the operator allow/deny lists refuse this service call, or ``None``.
+
+    With neither list set nothing is checked (behaviour unchanged). Otherwise:
+
+    1. Every entity the payload names must pass the same check as ha_get_state
+       (deny is a final veto; with an allowlist, every entity must match it).
+    2. Area/device/floor/label targets are refused: they select entities on the
+       server, where the lists cannot be checked.
+    3. ``entity_id: all`` is refused: it acts on every entity of the domain.
+    4. A call that names no entity is refused (an entity service with no target
+       can act on every entity of its domain), except ``notify.*`` /
+       ``persistent_notification.*``, which act on no entity, and
+       ``script.<name>``, which is checked as the entity ``script.<name>``.
+    """
+    allow, deny = _get_entity_filter_config()
+    if not allow and not deny:
+        return None
+    hint = ("Call ha_call_service with explicit entity_id values that the operator "
+            "allow/deny lists permit, or ask the operator to adjust the lists.")
+    entity_ids: set = set()
+    indirect: set = set()
+    _collect_service_targets(payload, entity_ids, indirect)
+    if indirect:
+        return (f"{domain}.{service} targets by {', '.join(sorted(indirect))}, which cannot be "
+                f"checked against HASS_ENTITY_ALLOWLIST/HASS_ENTITY_DENYLIST. {hint}")
+    if "all" in entity_ids:
+        return (f"{domain}.{service} with entity_id 'all' would act on every entity, which "
+                f"HASS_ENTITY_ALLOWLIST/HASS_ENTITY_DENYLIST do not permit. {hint}")
+    entity_ids.discard("none")
+    if not entity_ids:
+        if domain in _NON_ENTITY_DOMAINS:
+            return None
+        if domain == "script" and service not in _SCRIPT_BUILTIN_SERVICES:
+            entity_ids = {f"script.{service}"}
+        else:
+            return (f"{domain}.{service} names no entity, so it could act on every {domain} "
+                    f"entity while HASS_ENTITY_ALLOWLIST/HASS_ENTITY_DENYLIST are set. {hint}")
+    for eid in sorted(entity_ids):
+        if deny:
+            hit = next((p for p in deny if _entity_matches(eid, [p])), None)
+            if hit:
+                return (f"{eid} is excluded by HASS_ENTITY_DENYLIST (pattern {hit!r}); "
+                        f"{domain}.{service} refused. {hint}")
+        if allow and not _entity_matches(eid, allow):
+            return f"{eid} is not in HASS_ENTITY_ALLOWLIST; {domain}.{service} refused. {hint}"
     return None
 
 
@@ -589,6 +681,17 @@ def _handle_call_service(args: dict, **kw) -> str:
             data = json.loads(data) if data.strip() else None
         except json.JSONDecodeError as e:
             return tool_error(f"Invalid JSON string in 'data' parameter: {e}")
+    # Operator allow/deny lists also govern control: refuse before any network call.
+    # Checked on the payload actually sent (entity_id overrides data["entity_id"]).
+    if any(_get_entity_filter_config()):
+        if data is not None and not isinstance(data, dict):
+            return tool_error(
+                f"Invalid 'data' parameter: expected a JSON object, got {type(data).__name__}")
+        violation = _service_call_violation(domain, service, _build_service_payload(entity_id, data))
+    else:
+        violation = None
+    if violation:
+        return tool_error(f"Refused by operator config: {violation}")
     return _dispatch(
         _async_call_service(domain, service, entity_id, data),
         "ha_call_service", f"Failed to call {domain}.{service}")
@@ -712,7 +815,9 @@ HA_CALL_SERVICE_SCHEMA: Dict[str, Any] = {
     "name": "ha_call_service",
     "description": (
         "Call a Home Assistant service to control a device. Use ha_list_services "
-        "to discover available services and their parameters for each domain."
+        "to discover available services and their parameters for each domain. "
+        "If the operator restricts entities, target explicit entity_ids: calls "
+        "on restricted entities, or by area/device/label or with no target, are refused."
     ),
     "parameters": {
         "type": "object",
