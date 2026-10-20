@@ -125,12 +125,12 @@ Unless the user already said, ask where the model is going, not for a triangle n
 
 | Where it goes | Route |
 |---|---|
-| Game asset, prop, character, mobile, background | Smart Topology: `model_type: "smart-topology"`, `ai_model: "meshy-t2.5"`, `target_polycount` 15000 (lower for mobile/background). 5 preview / 15 textured |
+| Game asset, prop, character, mobile, background | Smart Topology: `model_type: "smart-topology"`, `ai_model: "meshy-t2.5"`, `target_polycount` 15000 (lower for mobile/background). Text: 5 preview (+10 refine for textures); image: 15 textured |
 | Hero, close-up, renders, cinematics, 3D printing | Standard full detail (`latest`, no remesh) |
 | Detail AND a triangle budget | Standard, then reduce: `meshy_remesh` (5 credits) or the Blender optimized copy (no additional Meshy credits) |
 
 Put the choice in one line inside the cost confirmation, e.g. "Smart Topology at 15k triangles,
-15 credits; say if you want full detail instead." Ask for a number only if the user cares or the use
+5 credits for the untextured preview; say if you want full detail instead." Ask for a number only if the user cares or the use
 is unclear. Polycount never changes the price. Smart Topology is triangle-only (no quads), keeps
 textured characters and props close to Standard at game distance, but smooths away engraving,
 filigree and crisp bevels, can drop thin hanging parts (cloth tails) and returns several separate,
