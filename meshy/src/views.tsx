@@ -68,7 +68,7 @@ export interface LocalFile {
   prompt?: null | string
 }
 
-export type Source = { kind: 'file'; path: string; task?: string } | { kind: 'remote'; url: string; label: string }
+export type Source = { kind: 'file'; path: string; task?: string } | { kind: 'remote'; url: string; label: string; task?: string }
 
 // Inline styles with theme variables: no injected <style> tag (nothing global to leak or clean up),
 // and every surface reskins with the active theme.
@@ -560,7 +560,11 @@ export function TranscriptCard({
   const url = (attrs.url || '').trim()
   const title = attrs.title || (path ? path.split(/[\\/]/).pop() : 'Meshy model') || 'Meshy model'
   const task = (attrs.task || '').trim()
-  const source: null | Source = path ? { kind: 'file', path, ...(task ? { task } : {}) } : url ? { kind: 'remote', url, label: title } : null
+  const source: null | Source = path
+    ? { kind: 'file', path, ...(task ? { task } : {}) }
+    : url
+      ? { kind: 'remote', url, label: title, ...(task ? { task } : {}) }
+      : null
 
   if (!source) {
     return <div style={{ ...V.card, ...V.error }}>Meshy model: give a path="..." or url="..."</div>
@@ -793,14 +797,18 @@ export function Gallery({
   useEffect(() => {
     if (initial) {
       setSelected(initial)
-      setSelTask(initial.kind === 'file' && initial.task ? { task: initial.task, title: initial.path.split(/[\\/]/).pop() || '' } : null)
+      setSelTask(
+        initial.task
+          ? { task: initial.task, title: initial.kind === 'file' ? initial.path.split(/[\\/]/).pop() || '' : initial.label }
+          : null
+      )
     }
   }, [initial])
 
   const pickTask = (task: string) => {
     const r = remote?.find(m => m.task_id === task && m.glb_url)
     if (r?.glb_url) {
-      setSelected({ kind: 'remote', url: r.glb_url, label: r.prompt || r.task_type })
+      setSelected({ kind: 'remote', url: r.glb_url, label: r.prompt || r.task_type, task })
       setSelTask({ task, title: r.prompt || r.task_type })
       return
     }
@@ -871,7 +879,7 @@ export function Gallery({
         {remote && remote.length > 0 && <div style={V.section}>Recent generations</div>}
         {remote === null && configured && !error && <div style={V.hint}>Loading…</div>}
         {remote?.filter(m => matches(m.prompt, m.task_type)).map(m => {
-          const s: null | Source = m.glb_url ? { kind: 'remote', url: m.glb_url, label: m.prompt || m.task_type } : null
+          const s: null | Source = m.glb_url ? { kind: 'remote', url: m.glb_url, label: m.prompt || m.task_type, task: m.task_id } : null
           return (
             <button
               data-meshy-item style={s && isSel(s) ? { ...V.item, ...V.itemOn } : V.item}

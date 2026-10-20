@@ -243,7 +243,11 @@ export function createStage(host: HTMLElement, background: string): Stage {
       if (clips.length) {
         mixer = new AnimationMixer(model)
         // Play-once: hold the last pose and let the UI flip back to "paused".
-        mixer.addEventListener('finished', () => {
+        // Only the CURRENT clip ends playback: a clip fading out after a switch also fires `finished`.
+        mixer.addEventListener('finished', (e: { action?: unknown }) => {
+          if (e.action !== action) {
+            return
+          }
           playing = false
           dirty = true
         })

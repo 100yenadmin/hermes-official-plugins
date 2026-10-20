@@ -29,6 +29,7 @@ import base64
 import json
 import logging
 import os
+import threading
 import re
 import shutil
 import time
@@ -447,7 +448,7 @@ def _save_target(task_id: str, beside: str | None) -> tuple[Path, str]:
     if beside:
         anchor = _resolve_readable(beside)
         return anchor.parent, anchor.stem
-    return _data_root() / "meshy_output" / task_id[:8], "model"
+    return _data_root() / "meshy_output" / task_id, "model"  # full id: UUIDv7 prefixes repeat within ms
 
 
 def _download(url: str, dest: Path) -> None:
@@ -672,6 +673,7 @@ def actions(task: str):
 # Provenance: what made each model. Meshy's task record keeps a text prompt but not an image task's
 # input, nor which task a remesh/rig/animation came from, so Desktop records the creating tool call here.
 _PROV_NAME = "provenance.json"
+_PROV_LOCK = threading.Lock()
 _PROV_CAP = 2000
 _PROV_TEXT = ("prompt", "texture_prompt", "text_style_prompt", "negative_prompt", "object_prompt")
 _PROV_PARENT = ("preview_task_id", "input_task_id", "rig_task_id")
@@ -727,15 +729,18 @@ def provenance(body: dict):
     sid = body.get("session_id")
     if isinstance(sid, str) and _SESSION_ID.match(sid):
         row["session_id"] = sid
-    rows = _load_prov()
-    rows[task_id] = row
-    if len(rows) > _PROV_CAP:
-        rows = dict(sorted(rows.items(), key=lambda kv: kv[1].get("recorded_at") or 0)[-_PROV_CAP:])
-    target = _prov_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    tmp = target.with_name(target.name + ".part")
-    tmp.write_text(json.dumps(rows, indent=1), encoding="utf-8")
-    tmp.replace(target)
+    # Read-modify-write under one lock: completions for parallel calls arrive together, and an unlocked
+    # pair of writers each saved its own copy and dropped the other's record.
+    with _PROV_LOCK:
+        rows = _load_prov()
+        rows[task_id] = row
+        if len(rows) > _PROV_CAP:
+            rows = dict(sorted(rows.items(), key=lambda kv: kv[1].get("recorded_at") or 0)[-_PROV_CAP:])
+        target = _prov_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.part")
+        tmp.write_text(json.dumps(rows, indent=1), encoding="utf-8")
+        tmp.replace(target)
     return {"ok": True}
 
 

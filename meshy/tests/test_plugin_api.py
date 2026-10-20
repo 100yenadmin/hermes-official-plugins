@@ -156,3 +156,13 @@ def test_provenance_keeps_what_made_a_model_and_never_a_signed_url(api, monkeypa
     assert [p["task_id"] for p in d["parents"]] == [parent]
     assert [c["task_id"] for c in api.details(parent)["children"]] == [child]
     assert api.details(parent)["session_id"] == "sess-1"
+
+
+def test_parallel_provenance_writes_keep_every_record_and_tasks_get_their_own_folder(api):
+    """Completions of a parallel tool_call arrive together; two tasks a millisecond apart share a prefix."""
+    from concurrent.futures import ThreadPoolExecutor
+    ids = [f"01a15976-d838-7532-99d8-{i:012x}" for i in range(24)]
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        list(pool.map(lambda i: api.provenance({"task_id": i, "tool": "meshy_remesh", "args": {}}), ids))
+    assert set(ids) <= set(api._load_prov())
+    assert api._save_target(ids[0], None)[0] != api._save_target(ids[1], None)[0]

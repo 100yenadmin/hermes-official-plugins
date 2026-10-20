@@ -21,6 +21,13 @@ export interface GatewayEvent {
   type: string
   payload?: unknown
   session_id?: string
+  /** Renderer-side owner tags (apps/shared gateway-events.ts); absent on the local primary path. */
+  profile?: string
+  connectionId?: string
+}
+export interface ReadableAtom<T> {
+  get: () => T
+  subscribe: (fn: (value: T) => void) => () => void
 }
 export interface PluginContribution {
   id: string
@@ -60,6 +67,8 @@ export const host: {
     submit: (sessionId: null | string, text: string) => boolean
     insertText?: (sessionId: null | string, text: string, opts?: { mode?: 'block' | 'inline' | 'prefix' }) => Promise<boolean>
   }
+  /** Read-only app state; ctx.rest goes to the backend of `profile` on `connectionId`. */
+  state?: { profile: ReadableAtom<string>; connectionId: ReadableAtom<null | string> }
   openSession?: (storedSessionId: string, options?: { intent?: 'in-place' | 'stack' | 'tab' | 'window' }) => Promise<void>
   navigate: (path: string) => void
   notify: (input: { kind: 'error' | 'info' | 'success' | 'warning'; message: string }) => string
