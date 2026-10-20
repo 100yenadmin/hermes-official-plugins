@@ -268,7 +268,11 @@ async function cdpConnect(chromeBin, profileDir, size) {
   // aborts (SIGTRAP) past the 108-byte sockaddr limit, as with deep per-profile scratch dirs.
   const env = { ...process.env }
   let shortTmp = null
-  if (process.platform !== 'win32') env.TMPDIR = shortTmp = fs.mkdtempSync(path.join(os.tmpdir().length > 60 ? '/tmp' : os.tmpdir(), 'meshy-'))
+  if (process.platform !== 'win32') {
+    // <base>/meshy-XXXXXX/org.chromium.Chromium.XXXXXX/SingletonSocket must fit in 107 bytes.
+    const base = Buffer.byteLength(os.tmpdir()) + '/meshy-XXXXXX/org.chromium.Chromium.XXXXXX/SingletonSocket'.length > 100 ? '/tmp' : os.tmpdir()
+    env.TMPDIR = shortTmp = fs.mkdtempSync(path.join(base, 'meshy-'))
+  }
   const proc = spawn(chromeBin, args, { stdio: ['ignore', 'ignore', 'pipe'], detached: false, env })
   // Never leave a browser behind, even on Ctrl-C / timeout.
   const reap = () => {
