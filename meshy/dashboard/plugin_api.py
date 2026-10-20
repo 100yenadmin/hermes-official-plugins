@@ -10,6 +10,8 @@ Routes:
     GET /models?limit=      recent finished Meshy generations: task id, type, prompt, thumbnail, credits
     GET /local?limit=       .glb files under the plugin's meshy_output/ (the server's default download dir)
     GET /file?path=         bytes of one .glb/.gltf/.png/.jpg (data URL), refused outside allowed roots
+    GET /formats?task=      the file types a finished task offers (glb, fbx, obj, stl, usdz ...) + any already saved
+    POST /save              {task, format, beside?}: download one format next to ``beside`` (no credits)
 """
 
 from __future__ import annotations
@@ -18,6 +20,8 @@ import base64
 import json
 import logging
 import os
+import re
+import shutil
 import time
 import urllib.error
 import urllib.parse
@@ -68,7 +72,7 @@ def _api_key() -> str | None:
 def _meshy_get(path: str, key: str, timeout: float = 15.0):
     req = urllib.request.Request(_API + path, headers={
         "Authorization": f"Bearer {key}", "User-Agent": "hermes-meshy-plugin/0.2"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 - fixed https host
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -119,7 +123,7 @@ def _resolve_readable(raw: str) -> Path:
 
 
 @router.get("/status")
-async def status():
+def status():
     key = _api_key()
     if not key:
         return {"configured": False, "key_env": _KEY_ENV, "settings": _settings()}
@@ -143,7 +147,7 @@ def _credits_by_task(key: str) -> dict[str, int]:
 
 
 @router.get("/models")
-async def models(limit: int | None = Query(None, ge=1, le=60)):
+def models(limit: int | None = Query(None, ge=1, le=60)):
     limit = limit or _settings()["gallery_limit"]
     key = _api_key()
     if not key:
@@ -174,7 +178,7 @@ async def models(limit: int | None = Query(None, ge=1, le=60)):
 
 
 @router.get("/local")
-async def local(limit: int = Query(50, ge=1, le=200)):
+def local(limit: int = Query(50, ge=1, le=200)):
     out_dir = _data_root() / "meshy_output"
     if not out_dir.is_dir():
         return {"dir": str(out_dir), "files": []}
@@ -185,15 +189,135 @@ async def local(limit: int = Query(50, ge=1, le=200)):
 
 
 @router.get("/file")
-async def file(path: str):
+def file(path: str):
     target = _resolve_readable(path)
     data = target.read_bytes()
     return {"name": target.name, "bytes": len(data), "mtime": int(target.stat().st_mtime * 1000),
             "dataUrl": f"data:{_MIME[target.suffix.lower()]};base64,{base64.b64encode(data).decode('ascii')}"}
 
 
+# Display order and labels for the download menu; ``mtl`` rides along with ``obj``, never on its own.
+_FORMAT_ORDER = ("glb", "fbx", "obj", "stl", "usdz", "3mf", "blend")
+_TASK_ID = re.compile(r"^[0-9a-f][0-9a-f-]{15,63}$")
+# A refined Meshy OBJ is ~180 MB; the cap bounds a runaway response, not a real model.
+_MAX_SAVE_BYTES = 1024 * 1024 * 1024
+
+
+def _task(task_id: str, key: str) -> dict:
+    """The task record (with signed ``model_urls``), found on whichever generation endpoint owns it."""
+    if not _TASK_ID.match(task_id or ""):
+        raise HTTPException(status_code=400, detail="task id required")
+    for _task_type, path in _MODEL_ENDPOINTS:
+        try:
+            row = _meshy_get(f"{path}/{task_id}", key)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise _meshy_error(exc) from exc
+            continue  # 404/400: another endpoint owns this id
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            raise _meshy_error(exc) from exc
+        if isinstance(row, dict) and row.get("id") == task_id:
+            return row
+    raise HTTPException(status_code=404, detail="Meshy has no finished task with that id")
+
+
+def _asset_url(url: object) -> str:
+    parts = urllib.parse.urlsplit(str(url or ""))
+    if parts.scheme != "https" or parts.hostname != "assets.meshy.ai":
+        raise HTTPException(status_code=502, detail="unexpected asset host")
+    return str(url)
+
+
+def _save_target(task_id: str, beside: str | None) -> tuple[Path, str]:
+    """Folder + file stem for a saved format: next to the model the card shows, else meshy_output/<task>."""
+    if beside:
+        anchor = _resolve_readable(beside)
+        return anchor.parent, anchor.stem
+    return _data_root() / "meshy_output" / task_id[:8], "model"
+
+
+def _download(url: str, dest: Path) -> None:
+    part = dest.with_name(dest.name + ".part")
+    try:
+        with urllib.request.urlopen(_asset_url(url), timeout=120) as resp, open(part, "wb") as out:
+            copied = 0
+            while chunk := resp.read(1 << 20):
+                copied += len(chunk)
+                if copied > _MAX_SAVE_BYTES:
+                    raise HTTPException(status_code=413, detail="asset larger than 1 GB")
+                out.write(chunk)
+        part.replace(dest)
+    except (urllib.error.URLError, OSError) as exc:
+        raise _meshy_error(exc) from exc
+    finally:
+        part.unlink(missing_ok=True)
+
+
+@router.get("/formats")
+def formats(task: str, beside: str | None = None):
+    key = _api_key()
+    if not key:
+        raise HTTPException(status_code=400, detail="no Meshy API key")
+    urls = _task(task, key).get("model_urls") or {}
+    folder, stem = _save_target(task, beside)
+    out = []
+    for fmt in _FORMAT_ORDER:
+        if isinstance(urls, dict) and urls.get(fmt):
+            saved = folder / f"{stem}.{fmt}"
+            out.append({"format": fmt, "saved": str(saved) if saved.is_file() else None})
+    return {"task": task, "formats": out}
+
+
+@router.post("/save")
+def save(body: dict):
+    """Download one format of a finished task. Meshy produced every listed format at generation time,
+    so this spends no credits. OBJ brings its .mtl and base-colour texture, renamed per model."""
+    task_id, fmt = str(body.get("task") or ""), str(body.get("format") or "").lower()
+    if fmt not in _FORMAT_ORDER:
+        raise HTTPException(status_code=400, detail="unknown format")
+    key = _api_key()
+    if not key:
+        raise HTTPException(status_code=400, detail="no Meshy API key")
+    row = _task(task_id, key)
+    urls = row.get("model_urls") or {}
+    if not isinstance(urls, dict) or not urls.get(fmt):
+        raise HTTPException(status_code=404, detail=f"this model has no {fmt.upper()} file")
+    folder, stem = _save_target(task_id, body.get("beside") or None)
+    folder.mkdir(parents=True, exist_ok=True)
+    dest = folder / f"{stem}.{fmt}"
+    if not dest.is_file():
+        _download(urls[fmt], dest)
+        if fmt == "obj" and urls.get("mtl"):
+            _save_obj_material(row, urls["mtl"], folder, stem)
+    return {"path": str(dest), "bytes": dest.stat().st_size}
+
+
+def _save_obj_material(row: dict, mtl_url: str, folder: Path, stem: str) -> None:
+    """The .mtl names ``texture_0.png``; save it as ``<stem>_texture.png`` so two models in one folder
+    never share (and overwrite) a texture, and point the .mtl at the new name."""
+    with urllib.request.urlopen(_asset_url(mtl_url), timeout=60) as resp:
+        mtl = resp.read(1 << 20).decode("utf-8", "replace")
+    textures = row.get("texture_urls") or []
+    base = textures[0].get("base_color") if textures and isinstance(textures[0], dict) else None
+    if base:
+        _download(base, folder / f"{stem}_texture.png")
+        mtl = re.sub(r"(?m)^(\s*map_Kd\s+).*$", rf"\g<1>{stem}_texture.png", mtl)
+    (folder / f"{stem}.mtl").write_text(mtl, encoding="utf-8")
+    # Repoint ``mtllib`` (a header line) by streaming: the OBJ is ~180 MB, never read it whole.
+    obj = folder / f"{stem}.obj"
+    tmp = obj.with_name(obj.name + ".part")
+    with open(obj, "rb") as src, open(tmp, "wb") as dst:
+        for _ in range(64):
+            line = src.readline()
+            if not line:
+                break
+            dst.write(f"mtllib {stem}.mtl\n".encode() if line.startswith(b"mtllib ") else line)
+        shutil.copyfileobj(src, dst, 1 << 20)
+    tmp.replace(obj)
+
+
 @router.get("/remote")
-async def remote(url: str):
+def remote(url: str):
     """Fetch a Meshy asset URL (signed ``assets.meshy.ai`` link) server-side; the renderer cannot
     (no CORS on that host). Only that host, only model/image types."""
     parts = urllib.parse.urlsplit(url)
@@ -204,7 +328,7 @@ async def remote(url: str):
         raise HTTPException(status_code=415, detail="only .glb and image assets")
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(url, timeout=60) as resp:  # noqa: S310 - host pinned above
+        with urllib.request.urlopen(url, timeout=60) as resp:
             data = resp.read(_MAX_FILE_BYTES + 1)
     except (urllib.error.URLError, OSError) as exc:
         raise _meshy_error(exc) from exc

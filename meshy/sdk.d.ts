@@ -66,3 +66,11 @@ export function Button(
   props: ComponentProps<'button'> & { size?: 'default' | 'icon' | 'sm'; variant?: 'default' | 'ghost' | 'outline' }
 ): ReactNode
 export function Codicon(props: { name: string; size?: number; spinning?: boolean; style?: CSSProperties }): ReactNode
+// Radix-backed menu primitives the Desktop SDK re-exports (components/ui/dropdown-menu).
+export function DropdownMenu(props: { children?: ReactNode; open?: boolean; onOpenChange?: (open: boolean) => void }): ReactNode
+export function DropdownMenuTrigger(props: { asChild?: boolean; children?: ReactNode }): ReactNode
+export function DropdownMenuContent(props: { align?: 'center' | 'end' | 'start'; children?: ReactNode; style?: CSSProperties }): ReactNode
+export function DropdownMenuItem(
+  props: { children?: ReactNode; disabled?: boolean; onSelect?: (event: Event) => void; title?: string } & Record<`data-${string}`, string>
+): ReactNode
+export function DropdownMenuSeparator(): ReactNode

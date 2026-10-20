@@ -90,10 +90,13 @@ user's goal before the first paid call.
 7. **Report** the result: files and paths, formats, credits spent, and the `task_id` for
    follow-ups (refine, rig, convert reuse it instead of regenerating).
 8. **Show it in Hermes Desktop.** After a `.glb` download, end the reply with a paragraph that is
-   only the directive `::meshy-model{path="<absolute path of the .glb>"}` (one per model, each
-   on its own line). Desktop renders it as an interactive 3D card; other clients show the line
-   as text, so write the path in prose as well. Before a download, a finished task's signed
-   `model_urls.glb` works too: `::meshy-model{url="https://assets.meshy.ai/..." title="..."}`.
+   only the directive `::meshy-model{path="<absolute path of the .glb>" task="<task_id>"}` (one per
+   model, each on its own line). Desktop renders it as an interactive 3D card whose **Download**
+   menu lists every file type Meshy produced for that task (a refined model: GLB, FBX, OBJ, STL,
+   USDZ) and saves the one the user picks beside the .glb, at no credit cost; without `task=` the
+   card has no menu. Other clients show the line as text, so write the path in prose as well.
+   To show a finished task the user has not downloaded yet, download it first (free) and use
+   `path=`; a `url=` card with a signed Meshy link does not render in current Desktop builds.
 
 ## Pitfalls
 

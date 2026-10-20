@@ -5,7 +5,16 @@
  */
 
 import type { PluginContext } from '@hermes/plugin-sdk'
-import { Button, Codicon, host } from '@hermes/plugin-sdk'
+import {
+  Button,
+  Codicon,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+  host
+} from '@hermes/plugin-sdk'
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 
 import { createStage, dataUrlToBuffer, type ModelStats, type Stage } from './stage.ts'
@@ -227,6 +236,93 @@ export function ModelViewer({
   )
 }
 
+/** Labels for the download menu, in the order Meshy's API lists them. */
+const FORMAT_LABEL: Record<string, string> = {
+  glb: 'GLB · web, Blender, three.js',
+  fbx: 'FBX · Unity, Unreal, Maya',
+  obj: 'OBJ · with .mtl + texture',
+  stl: 'STL · 3D printing',
+  usdz: 'USDZ · Apple AR Quick Look',
+  '3mf': '3MF · 3D printing',
+  blend: 'BLEND · Blender project'
+}
+
+interface FormatRow {
+  format: string
+  saved: null | string
+}
+
+/** "Download ▾": one row per file type Meshy produced for this task. Picking one saves it beside the
+ *  model on screen (no credits: Meshy made every listed format at generation time) and reveals it. */
+export function FormatMenu({ rest, os, task, beside }: { rest: Rest; os: Os; task: string; beside?: string }) {
+  const [rows, setRows] = useState<FormatRow[] | null>(null)
+  const [error, setError] = useState<null | string>(null)
+  const [busy, setBusy] = useState<null | string>(null)
+  const query = `formats?task=${encodeURIComponent(task)}${beside ? `&beside=${encodeURIComponent(beside)}` : ''}`
+
+  const load = useCallback(() => {
+    setError(null)
+    rest<{ formats: FormatRow[] }>(query, { timeoutMs: 30_000 })
+      .then(r => setRows(r.formats))
+      .catch((err: unknown) => setError(errorText(err)))
+  }, [rest, query])
+
+  const pick = (fmt: string, saved: null | string) => {
+    if (saved) {
+      void os.revealPath(saved)
+      return
+    }
+    setBusy(fmt)
+    rest<{ path: string }>('save', { method: 'POST', body: { task, format: fmt, beside }, timeoutMs: 600_000 })
+      .then(r => {
+        setRows(prev => prev?.map(row => (row.format === fmt ? { ...row, saved: r.path } : row)) ?? prev)
+        host.notify({ kind: 'success', message: `Saved ${r.path.split(/[\\/]/).pop()}` })
+        void os.revealPath(r.path)
+      })
+      .catch((err: unknown) => host.notify({ kind: 'error', message: `Meshy ${fmt.toUpperCase()}: ${errorText(err)}` }))
+      .finally(() => setBusy(null))
+  }
+
+  return (
+    <DropdownMenu onOpenChange={open => open && load()}>
+      <DropdownMenuTrigger asChild>
+        <Button data-meshy-formats size="sm" variant="ghost">
+          <Codicon name={busy ? 'loading' : 'cloud-download'} spinning={!!busy} /> {busy ? `Saving ${busy.toUpperCase()}…` : 'Download'}
+          <Codicon name="chevron-down" size={12} />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" style={{ minWidth: 260 }}>
+        {error ? (
+          <DropdownMenuItem disabled>{error}</DropdownMenuItem>
+        ) : rows === null ? (
+          <DropdownMenuItem disabled>
+            <Codicon name="loading" spinning /> Checking formats…
+          </DropdownMenuItem>
+        ) : (
+          rows.map(({ format, saved }) => (
+            <DropdownMenuItem
+              data-meshy-format={format}
+              disabled={busy !== null}
+              key={format}
+              onSelect={() => pick(format, saved)}
+              title={saved ?? undefined}
+            >
+              <span style={{ flex: 1 }}>{FORMAT_LABEL[format] ?? format.toUpperCase()}</span>
+              <Codicon name={saved ? 'check' : 'cloud-download'} style={{ opacity: saved ? 1 : 0.55 }} />
+            </DropdownMenuItem>
+          ))
+        )}
+        {rows !== null && rows.length === 1 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem disabled>A preview has GLB only; refine it for FBX, OBJ, STL, USDZ</DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 /** Transcript directive card: `::meshy-model{path="/abs/model.glb"}` or `{url="https://assets.meshy.ai/..."}`.
  *  Shows a click-to-load poster first so a long transcript never opens N WebGL contexts at once. */
 export function TranscriptCard({
@@ -246,6 +342,7 @@ export function TranscriptCard({
   const path = (attrs.path || attrs.file || '').trim()
   const url = (attrs.url || '').trim()
   const title = attrs.title || (path ? path.split(/[\\/]/).pop() : 'Meshy model') || 'Meshy model'
+  const task = (attrs.task || '').trim()
   const source: null | Source = path ? { kind: 'file', path } : url ? { kind: 'remote', url, label: title } : null
 
   if (!source) {
@@ -258,6 +355,7 @@ export function TranscriptCard({
         <Codicon name="symbol-misc" />
         <span style={V.cardTitle}>{title}</span>
         <span style={V.spacer} />
+        {task && !streaming && <FormatMenu beside={path || undefined} os={os} rest={rest} task={task} />}
         <Button onClick={() => openInWorkspace(source, title)} size="sm" variant="ghost">
           <Codicon name="link-external" /> Open
         </Button>

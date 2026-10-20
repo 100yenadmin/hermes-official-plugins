@@ -93,8 +93,12 @@ Turn on the plugin's **Desktop** switch in Capabilities → Plugins (Desktop hal
 you get, rendered with stock three.js:
 
 - **Inline 3D cards.** After a download the agent ends its reply with
-  `::meshy-model{path="/abs/model.glb"}`; Desktop shows it as a card you click to orbit, zoom,
-  toggle wireframe and grid, or open in a tab. Other clients show the line as text.
+  `::meshy-model{path="/abs/model.glb" task="<task_id>"}`; Desktop shows it as a card you click to
+  orbit, zoom, toggle wireframe and grid, or open in a tab. Other clients show the line as text.
+- **Download menu on every card.** It lists each file type Meshy produced for that task (a refined
+  model: GLB, FBX, OBJ with its .mtl and texture, STL, USDZ; a preview: GLB only) and saves the one
+  you pick next to the .glb, then opens its folder. No credits: Meshy made them all at generation
+  time. A tick marks formats already on disk.
 - **Meshy 3D gallery** (status-bar chip or ⌘K → "Meshy: open 3D gallery"): your recent
   generations and local downloads next to a full viewer. "Meshy: view a .glb file…" opens any
   model on disk.
