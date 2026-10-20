@@ -299,7 +299,7 @@ def test_ineligible_rejection_never_retries_or_latches(relay):
 def test_compression_and_raw_resend_follow_all_payload_transforms(relay, monkeypatch):
     transforms = []
     def transform(name):
-        def apply(payload, queried):
+        def apply(payload, queried, *args, **kwargs):  # session mode passes first_turn / session=
             transforms.append(name)
             return payload + b' '
         return apply
