@@ -1,4 +1,4 @@
-<!-- Adapted for Hermes Agent from the server instructions of meshy-mcp-server 0.6.4 (https://github.com/meshy-dev/meshy-mcp-server, src/instructions.ts, MIT, Copyright (c) 2026 Meshy AI). Hermes does not forward MCP server instructions to the model, so the skill carries them. Changes: title; Scenario C picks the format per engine and adds approval checkpoints. -->
+<!-- Adapted for Hermes Agent from the server instructions of meshy-mcp-server 0.6.4 (https://github.com/meshy-dev/meshy-mcp-server, src/instructions.ts, MIT, Copyright (c) 2026 Meshy AI). Hermes does not forward MCP server instructions to the model, so the skill carries them. Changes: title; Scenario C picks the format per engine and adds approval checkpoints; Scenario K adds detail-level defaults, face-count reporting and Hermes measurements. -->
 
 # Meshy workflow guide (from the server)
 
@@ -67,7 +67,7 @@ Trigger: user mentions game, Unity, Unreal, Godot, game-ready.
 Format by engine (Hermes change: the server text picks FBX for every engine): Unity → FBX (GLB also works through glTFast); Unreal → FBX; Godot → GLB (glTF is Godot's native import); a Blender step in between → GLB; web engines → GLB.
 Suggested flow:
 1. Before any paid call, ask: which engine; triangle budget per asset; units and forward/up axis the project expects (Meshy exports are metres, Y-up; scale with meshy_resize or in the engine); whether it needs textures, and whether it needs a rig or animation.
-2. Generate with target_formats for that engine (["fbx"] for Unity/Unreal, ["glb"] for Godot); Smart Topology (model_type "smart-topology", target_polycount) when there is a budget.
+2. Generate with target_formats for that engine (["fbx"] for Unity/Unreal, ["glb"] for Godot); Smart Topology by default (model_type "smart-topology", ai_model "meshy-t2.5", target_polycount = the budget, else 15000; Scenario K), Standard for hero / close-up assets.
 3. Checkpoint: show the preview geometry (thumbnail / viewer card) and get approval BEFORE paid texturing, remeshing or rigging.
 4. Textures: image-to-3d / multi-image output is already textured (unless should_texture:false); a text-to-3d preview needs meshy_text_to_3d_refine
 5. Inspect topology and face count. Smart Topology may already meet the budget; remesh only if needed and separately approved
@@ -117,11 +117,16 @@ Suggested flow:
 2. Download with the task_type it reports; omit format to save every part.
 
 ## Scenario K: Cleaner Topology / Part-Separated Geometry (cheaply)
-Trigger: user wants an editable, part-separated, or lower-poly model from an image or text.
+Trigger: user wants an editable, part-separated, or lower-poly model from an image or text, or a game / mobile asset (see "Pick the detail level" in SKILL.md).
 Suggested flow:
-1. Confirm the model (meshy-t2, or meshy-t2.5: newest, sharper detail for game assets), cost, face target, and whether textures are wanted.
+1. Confirm the model (meshy-t2.5 by default: newest, sharper detail, target_polycount 100–30,000, default 15,000; meshy-t2: 100–15,000, default 4,000), cost, face target, and whether textures are wanted.
 2. Call meshy_image_to_3d or meshy_text_to_3d with model_type:"smart-topology", that ai_model, and target_polycount. Set should_texture false on the image route when only geometry is approved.
 3. Text preview is untextured; confirm refine separately, without a refine ai_model override.
+4. Report the actual triangle count: face_count from meshy_get_task_status when it is present; otherwise count it from the downloaded GLB: `python3 <plugin dir>/skills/meshy-3d/scripts/glb_stats.py <file.glb>` (stdlib, prints triangles/vertices; Desktop's card stats line also shows "N tris"). Meshy lands near, not on, the target (measured: 14,860 and 15,929 for a 15,000 target).
+Hermes notes (measured 2026-10-20, Smart meshy-t2.5 @15k vs Standard latest + remesh @15k, same prompt / image):
+- Textured character from an image: near parity at viewing distance (face, hands, shield, belt) for 15 vs 30 credits; Smart dropped a thin cloth tail and came back as 8 separate parts.
+- Ornate prop from text (engraved runes, filigree guard): Standard kept crisp engraving and bevels; Smart smoothed the runes away and returned 11 parts with open edges.
+- So: Smart for game assets seen at distance; Standard (optionally remeshed, 5 credits, or the Blender copy) when fine sculpted detail, close-ups, renders or printing matter. Smart is triangle-only: quad topology needs Standard + meshy_remesh with topology "quad".
 
 ## Scenario L: Print in Parts (Auto Split)
 Trigger: model is too big for the print bed, or parts should be printed separately / in different colors and assembled.
