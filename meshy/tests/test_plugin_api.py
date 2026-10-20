@@ -238,6 +238,29 @@ def test_gallery_hides_expired_unsaved_assets_and_deduplicates_tasks(api, monkey
     assert result[0]["task_type"] == "image-to-image"
 
 
+def test_gallery_dedup_prefers_owning_endpoint_animation_outputs(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    generic = {"id": _TASK, "type": "rigging", "status": "SUCCEEDED", "created_at": 100,
+               "model_urls": {"glb": "https://assets.meshy.ai/bind-pose.glb"}}
+    rig = {**generic, "model_urls": None,
+           "result": {"rigged_character_glb_url": "https://assets.meshy.ai/bind-pose.glb",
+                      "basic_animations": {"walking_glb_url": "https://assets.meshy.ai/walking.glb"}}}
+
+    def get(path, *_a, **_k):
+        endpoint = path.split("?")[0]
+        if endpoint == "/openapi/v2/text-to-3d":
+            return [generic]
+        if endpoint == "/openapi/v1/rigging":
+            return [rig]
+        return []
+
+    monkeypatch.setattr(api, "_meshy_get", get)
+    rows = api.models(limit=10)["models"]
+    assert len(rows) == 1
+    assert rows[0]["task_type"] == "rigging"
+    assert rows[0]["glb_url"] == "https://assets.meshy.ai/walking.glb"
+
+
 def test_storage_counts_companions_and_indexed_files_once_without_network(api):
     folder = api.data / "meshy_output" / "project"
     folder.mkdir(parents=True)

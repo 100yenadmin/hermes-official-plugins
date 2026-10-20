@@ -137,8 +137,7 @@ The renderer never reads files or holds the key. `dashboard/plugin_api.py` (moun
 from Meshy's API, `.glb`/`.gltf`/image bytes from your home directory or the plugin's output folder
 (nothing else, symlinks resolved first), and signed `assets.meshy.ai` downloads. Cards load on
 click, render only while on screen, and free their WebGL context when unmounted, so a long chat
-of models stays light. **Close preview** releases an inline viewer's resources. Loading a dense GLB
-can still stall the renderer initially.
+of models stays light.
 
 ### Development
 

@@ -177,7 +177,7 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
     if not key:
         return {"configured": False, "models": []}
     merged: list[dict] = []
-    seen: set[str] = set()
+    records: dict[str, tuple[str, dict]] = {}
     for task_type, path in (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS):
         try:
             rows = _meshy_get(f"{path}?page_size={limit}&sort_by=-created_at", key)
@@ -191,23 +191,27 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
             if row.get("status") != "SUCCEEDED":
                 continue
             task_id = row.get("id")
-            if not isinstance(task_id, str) or not task_id or task_id in seen:
+            if not isinstance(task_id, str) or not task_id:
                 continue
-            seen.add(task_id)
-            actual_type = row.get("type")
-            label_type = actual_type if actual_type in {t for t, _ in (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS)} else task_type
-            urls = _result_urls(row)
-            # A rig's bind-pose character sits still; its walking clip shows what the rig is for.
-            clips = [u for k, u in sorted(urls.items()) if k.startswith("glb:")]
-            glb = (clips[-1] if clips and task_type == "rigging" else None) or urls.get("glb") or next(iter(clips), None)
-            images = [u for u in (row.get("image_urls") or []) if isinstance(u, str) and u]
-            expires = row.get("expires_at")
-            merged.append({"task_id": row.get("id"), "task_type": label_type, "prompt": row.get("prompt") or _clip_label(urls),
-                           "created_at": row.get("created_at"), "finished_at": row.get("finished_at"), "thumbnail_url": row.get("thumbnail_url"),
-                           "glb_url": glb, "kind": "image" if task_type in {t for t, _ in _IMAGE_ENDPOINTS} else "model",
-                           "image_urls": images, "expires_at": expires,
-                           "expired": isinstance(expires, (int, float)) and 0 < expires <= time.time() * 1000,
-                           "credits": row.get("consumed_credits")})
+            # Some list endpoints overlap. Prefer the task's owning endpoint so a generic
+            # representation cannot hide its images or animation clips.
+            if task_id not in records or row.get("type") == task_type:
+                records[task_id] = (task_type, row)
+    for task_type, row in records.values():
+        actual_type = row.get("type")
+        label_type = actual_type if actual_type in {t for t, _ in (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS)} else task_type
+        urls = _result_urls(row)
+        # A rig's bind-pose character sits still; its walking clip shows what the rig is for.
+        clips = [u for k, u in sorted(urls.items()) if k.startswith("glb:")]
+        glb = (clips[-1] if clips and task_type == "rigging" else None) or urls.get("glb") or next(iter(clips), None)
+        images = [u for u in (row.get("image_urls") or []) if isinstance(u, str) and u]
+        expires = row.get("expires_at")
+        merged.append({"task_id": row.get("id"), "task_type": label_type, "prompt": row.get("prompt") or _clip_label(urls),
+                       "created_at": row.get("created_at"), "finished_at": row.get("finished_at"), "thumbnail_url": row.get("thumbnail_url"),
+                       "glb_url": glb, "kind": "image" if task_type in {t for t, _ in _IMAGE_ENDPOINTS} else "model",
+                       "image_urls": images, "expires_at": expires,
+                       "expired": isinstance(expires, (int, float)) and 0 < expires <= time.time() * 1000,
+                       "credits": row.get("consumed_credits")})
     merged.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
     credits = _credits_by_task(key)
     prov = _load_prov()

@@ -1,4 +1,3 @@
-import { createRenderLoop } from './render-loop.ts'
 /**
  * The three.js stage: owns one WebGLRenderer, a camera with orbit controls, studio lighting, and
  * whichever GLB is loaded. Plain DOM + three, no React: the React side mounts a <div>, hands it to
@@ -66,8 +65,8 @@ export interface Stage {
 }
 
 export function createStage(host: HTMLElement, background: string): Stage {
-  const renderer = new WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: false })
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5))
+  const renderer = new WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true })
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
   renderer.outputColorSpace = SRGBColorSpace
   renderer.toneMapping = ACESFilmicToneMapping
   renderer.domElement.style.display = 'block'
@@ -79,10 +78,7 @@ export function createStage(host: HTMLElement, background: string): Stage {
   const scene = new Scene()
   scene.background = new Color(background)
   const pmrem = new PMREMGenerator(renderer)
-  const room = new RoomEnvironment()
-  const environment = pmrem.fromScene(room, 0.04)
-  room.dispose()
-  const envTexture = environment.texture
+  const envTexture = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
   scene.environment = envTexture
   scene.add(new AmbientLight(0xffffff, 0.25))
   const key = new DirectionalLight(0xffffff, 1.6)
@@ -109,45 +105,57 @@ export function createStage(host: HTMLElement, background: string): Stage {
   const clock = new Clock()
   let dirty = true
   let home = { pos: camera.position.clone(), target: new Vector3() }
+  let frame = 0
   let disposed = false
 
-  const invalidate = () => { dirty = true; renderLoop.invalidate() }
-  const renderLoop = createRenderLoop(() => {
-    const delta = clock.getDelta()
-    const moved = controls.update(Math.min(delta, 0.1))
-    const animating = playing && mixer !== null && action !== null
-    if (animating) mixer!.update(Math.min(delta, 0.1))
-    if (moved || dirty || animating) {
-      dirty = false
-      renderer.render(scene, camera)
-    }
-    return moved || controls.autoRotate || animating
-  })
   const resize = () => {
     const w = Math.max(1, host.clientWidth)
     const h = Math.max(1, host.clientHeight)
     renderer.setSize(w, h, false)
     camera.aspect = w / h
     camera.updateProjectionMatrix()
-    invalidate()
+    dirty = true
   }
   const observer = new ResizeObserver(resize)
   observer.observe(host)
-  let onScreen = false
-  const updateVisibility = () => {
-    clock.getDelta() // do not advance animation by the time spent hidden
+  resize()
+
+  // Render on demand: a frame is drawn only when the camera moved (orbit, damping, auto-rotate) or
+  // something visible changed, and never while the viewport is off-screen or the window hidden. A
+  // dense Meshy mesh is ~1M triangles; drawing it 60x/s per idle card starves the renderer.
+  let onScreen = true
+  const invalidate = () => {
     dirty = true
-    renderLoop.setActive(onScreen && !document.hidden)
   }
   const visibility = new IntersectionObserver(entries => {
     onScreen = entries.some(e => e.isIntersecting)
-    updateVisibility()
+    dirty = true
   })
-  renderLoop.setActive(false)
   visibility.observe(host)
-  document.addEventListener('visibilitychange', updateVisibility)
   controls.addEventListener('change', invalidate)
-  resize()
+
+  const tick = () => {
+    if (disposed) {
+      return
+    }
+    frame = requestAnimationFrame(tick)
+    if (!onScreen || document.hidden) {
+      return
+    }
+    const moved = controls.update()
+    // A playing clip needs every frame; the clock is read each tick so a resume after pause or an
+    // off-screen stretch does not jump the pose forward by the time spent away.
+    const delta = clock.getDelta()
+    const animating = playing && mixer !== null && action !== null
+    if (animating) {
+      mixer!.update(Math.min(delta, 0.1))
+    }
+    if (moved || dirty || animating) {
+      dirty = false
+      renderer.render(scene, camera)
+    }
+  }
+  tick()
 
   const disposeModel = () => {
     if (!model) {
@@ -218,7 +226,7 @@ export function createStage(host: HTMLElement, background: string): Stage {
     action.paused = false
     playing = true
     clock.getDelta()
-    invalidate()
+    dirty = true
     return index
   }
 
@@ -241,14 +249,14 @@ export function createStage(host: HTMLElement, background: string): Stage {
             return
           }
           playing = false
-          invalidate()
+          dirty = true
         })
         // Frame on the first clip's first pose: a rig's bind pose can differ from its animated stance.
         playClipAt(0)
         mixer.update(0)
       }
       const size = frameModel(model)
-      invalidate()
+      dirty = true
       clock.getDelta()
       const stats: ModelStats = {
         triangles: 0,
@@ -273,12 +281,11 @@ export function createStage(host: HTMLElement, background: string): Stage {
         }
       })
       stats.materials = mats.size
-      renderLoop.setMaxFps(stats.triangles > 500_000 ? 15 : 30)
       return stats
     },
     setAutoRotate(on) {
       controls.autoRotate = on
-      invalidate()
+      dirty = true
     },
     setWireframe(on) {
       model?.traverse(node => {
@@ -289,17 +296,17 @@ export function createStage(host: HTMLElement, background: string): Stage {
           }
         }
       })
-      invalidate()
+      dirty = true
     },
     setGrid(on) {
       grid.visible = on
-      invalidate()
+      dirty = true
     },
     resetView() {
       camera.position.copy(home.pos)
       controls.target.copy(home.target)
       controls.update()
-      invalidate()
+      dirty = true
     },
     listClips() {
       return clips.map((c, i) => c.name || `Clip ${i + 1}`)
@@ -319,7 +326,7 @@ export function createStage(host: HTMLElement, background: string): Stage {
       action.paused = !on
       action.enabled = true
       clock.getDelta()
-      invalidate()
+      dirty = true
     },
     setLoop(on) {
       loop = on
@@ -340,7 +347,7 @@ export function createStage(host: HTMLElement, background: string): Stage {
       action.setEffectiveWeight(1)
       action.paused = !playing
       mixer.update(0)
-      invalidate()
+      dirty = true
     },
     clipState() {
       return action
@@ -353,14 +360,13 @@ export function createStage(host: HTMLElement, background: string): Stage {
     },
     dispose() {
       disposed = true
-      renderLoop.dispose()
-      document.removeEventListener('visibilitychange', updateVisibility)
+      cancelAnimationFrame(frame)
       observer.disconnect()
       visibility.disconnect()
       controls.removeEventListener('change', invalidate)
       controls.dispose()
       disposeModel()
-      environment.dispose()
+      envTexture.dispose()
       pmrem.dispose()
       renderer.dispose()
       renderer.forceContextLoss()

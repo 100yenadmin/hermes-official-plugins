@@ -680,7 +680,6 @@ export function TranscriptCard({
         <span style={V.spacer} />
         {task && !streaming && <ActionMenu rest={rest} task={task} />}
         {task && !streaming && <FormatMenu beside={path || undefined} os={os} rest={rest} task={task} />}
-        {live && <Button onClick={() => setLive(false)} size="sm" variant="ghost">Close preview</Button>}
         <Button onClick={() => openInWorkspace(source, title)} size="sm" variant="ghost">
           <Codicon name="link-external" /> Open
         </Button>
