@@ -17,7 +17,7 @@ import { host, PALETTE_AREA, STATUSBAR_AREAS, TRANSCRIPT_DIRECTIVE_AREA } from '
 import { useEffect, useState } from 'react'
 
 import { createProgressTracker, isMeshyCall, ProgressChip, type ProgressState } from './progress.tsx'
-import { creationsFrom } from './provenance.ts'
+import { createProvenanceWriter, creationsFrom } from './provenance.ts'
 import { type Balance, BalanceChip, DEFAULT_SETTINGS, Gallery, type MeshySettings, type Source, TranscriptCard } from './views.tsx'
 
 const WORKSPACE_ID = 'meshy-gallery'
@@ -123,13 +123,16 @@ const plugin: HermesPlugin = {
       return <BalanceChip balance={b} onOpen={() => openGallery()} />
     }
 
+    const provenance = createProvenanceWriter(body => ctx.rest('provenance', { method: 'POST', body }))
+    ctx.onDispose(provenance.dispose)
+
     ctx.onEvent('tool.complete', event => {
       const payload = (event.payload ?? {}) as { name?: unknown; args?: unknown; result?: unknown }
       // Meshy tools sit behind tool search: most calls arrive as `tool_call` wrapping mcp_meshy_*.
       if (isMeshyCall(payload.name, payload.args)) {
         refreshBalance()
         for (const rec of creationsFrom(payload.name, payload.args, payload.result)) {
-          void ctx.rest('provenance', { method: 'POST', body: { ...rec, session_id: event.session_id } }).catch(() => undefined)
+          provenance.record(event, { ...rec, session_id: event.session_id })
         }
       }
     })

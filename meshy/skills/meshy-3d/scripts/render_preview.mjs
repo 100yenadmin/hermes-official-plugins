@@ -391,7 +391,14 @@ async function main() {
     }
     const renderS = (Date.now() - tr) / 1000
     b.close()
-    const outDefault = path.join(hermesHome(), 'cache', 'videos', 'meshy', `${stem}-${info.clip ? pretty(info.clip).replace(/\s+/g, '_').toLowerCase() : 'turntable'}.mp4`)
+    // Clip and file names come from the GLB: reduce them to a plain slug so a name like "../../x" can't
+    // steer the default output out of the videos folder (ffmpeg runs with -y).
+    const slug = s => s.toLowerCase().replace(/[^a-z0-9._-]+/g, '_').replace(/^[._]+/, '').slice(0, 80) || 'model'
+    const videos = path.join(hermesHome(), 'cache', 'videos', 'meshy')
+    const outDefault = path.join(videos, `${slug(stem)}-${info.clip ? slug(pretty(info.clip)) : 'turntable'}.mp4`)
+    if (!a.out && path.dirname(path.resolve(outDefault)) !== path.resolve(videos)) {
+      throw new Error(`refusing to write outside ${videos}`)
+    }
     const out = path.resolve(a.out || outDefault)
     fs.mkdirSync(path.dirname(out), { recursive: true })
     if (!ffmpeg) {

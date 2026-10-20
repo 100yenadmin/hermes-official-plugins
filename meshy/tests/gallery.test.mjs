@@ -54,3 +54,8 @@ test('image actions reference the displayed view and reserve all views for an ex
  assert.equal(rows.at(-1).label,'Make 3D from all views')
  assert.ok(rows.at(-1).message.includes('input_task_id "task"'))
 })
+
+test('opening a remote gallery source retains its task ID for workspace actions',()=>{
+ const source=sourceForAsset(model)
+ assert.equal(source.task,model.task_id)
+})

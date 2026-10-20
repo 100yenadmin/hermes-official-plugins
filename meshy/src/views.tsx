@@ -662,7 +662,11 @@ export function TranscriptCard({
   const url = (attrs.url || '').trim()
   const title = attrs.title || (path ? path.split(/[\\/]/).pop() : 'Meshy model') || 'Meshy model'
   const task = (attrs.task || '').trim()
-  const source: null | Source = path ? { kind: 'file', path, ...(task ? { task } : {}) } : url ? { kind: 'remote', url, label: title } : null
+  const source: null | Source = path
+    ? { kind: 'file', path, ...(task ? { task } : {}) }
+    : url
+      ? { kind: 'remote', url, label: title, ...(task ? { task } : {}) }
+      : null
 
   if (!source) {
     return <div style={{ ...V.card, ...V.error }}>Meshy model: give a path="..." or url="..."</div>
@@ -902,7 +906,11 @@ export function Gallery({
   useEffect(() => {
     if (initial) {
       setSelected(initial)
-      setSelTask(initial.kind === 'file' && initial.task ? { task: initial.task, title: initial.path.split(/[\\/]/).pop() || '' } : null)
+      setSelTask(
+        initial.task
+          ? { task: initial.task, title: initial.kind === 'file' ? initial.path.split(/[\\/]/).pop() || '' : initial.label }
+          : null
+      )
     }
   }, [initial])
 
@@ -915,11 +923,12 @@ export function Gallery({
     if (saved) setSelected({ kind: 'file', path: saved.path, task: selTask.task,
       media: saved.kind || 'model', images: saved.images, incomplete: saved.download_incomplete, label: saved.prompt || saved.name })
     else if (asset) setSelected(sourceForAsset(asset))
+    else if (initial?.kind === 'remote' && initial.task === selTask.task) setSelected(initial)
     else if (selected?.kind === 'remote') {
       setSelected(null)
       setSelTask(null)
     }
-  }, [remote, local, selTask])
+  }, [remote, local, selTask, initial])
 
   const pickTask = (task: string) => {
     const f = local?.find(x => x.task === task)

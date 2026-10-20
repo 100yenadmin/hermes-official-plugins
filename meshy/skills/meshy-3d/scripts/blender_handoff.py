@@ -397,17 +397,25 @@ def main() -> None:
     for i, _f in enumerate(lod_fractions, 1):
         outputs.update({f"lod{i}_{k}": os.path.join(out_dir, f"{stem}_lod{i}.{k}") for k in kinds})
     for path in outputs.values():
-        if os.path.realpath(path) == src:
+        same = os.path.realpath(path) == src or (os.path.exists(path) and os.path.samefile(path, src))
+        if same:  # samefile also catches a hard link to the source
             fail(f"refusing to overwrite the source file {src}; pick another --name or --out-dir")
         if os.path.exists(path) and not a.force:
             fail(f"output exists: {path} (pass --force to replace it, or pick another --name)")
 
+    # Everything is written into a private staging folder and moved into place only once every step
+    # (LODs included) succeeded, so a refusal or error publishes nothing, and --force replaces directory
+    # entries instead of writing through an existing file.
+    os.makedirs(out_dir, exist_ok=True)
+    stage = tempfile.mkdtemp(prefix=".handoff-", dir=out_dir)
+    final = outputs
+    outputs = {k: os.path.join(stage, os.path.basename(p)) for k, p in final.items()}
     try:
         reset_scene()  # empty factory scene: no user .blend is ever opened or saved over
         import_any(src)
         source = stats(src)
         if not source["mesh_objects"]:
-            fail("the input has no mesh objects")
+            raise HandoffRefused("the input has no mesh objects")
         dec = decimate_to(a.tris, a.allow_skinned, a.allow_shape_keys)
         textures = downscale_textures(a.max_texture)
         for act in bpy.data.actions:  # keep imported clips in the .blend even while unassigned
@@ -425,12 +433,18 @@ def main() -> None:
             for k in kinds:
                 (export_glb if k == "glb" else export_fbx)(outputs[f"lod{i}_{k}"])
             lods.append({"lod": i, "fraction": frac, "triangles": lod["after"]})
+        for k, p in outputs.items():
+            os.replace(p, final[k])
     except SystemExit:
         raise
     except HandoffRefused as exc:
+        shutil.rmtree(stage, ignore_errors=True)  # fail() exits at once: no finally runs after it
         fail(f"{exc} (source untouched: {src}; nothing saved)")
     except Exception as exc:  # noqa: BLE001
-        fail(f"{type(exc).__name__}: {exc} (source untouched: {src})")
+        shutil.rmtree(stage, ignore_errors=True)
+        fail(f"{type(exc).__name__}: {exc} (source untouched: {src}; nothing saved)")
+    shutil.rmtree(stage, ignore_errors=True)
+    outputs = final
 
     outs = {k: {"path": p, "bytes": os.path.getsize(p)} for k, p in outputs.items()}
     verify = {}

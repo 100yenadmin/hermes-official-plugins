@@ -365,3 +365,13 @@ def test_formats_separates_existing_downloads_from_priced_conversions(api, monke
     assert result["is_preview"] == preview
     assert {r["format"] for r in result["conversions"]} == {"glb", "fbx", "obj", "stl", "usdz", "blend", "3mf"} - set(formats)
     assert all(r["cost"] == 1 and "meshy_convert" in r["message"] and _TASK in r["message"] for r in result["conversions"])
+
+
+def test_parallel_provenance_writes_keep_every_record_and_tasks_get_their_own_folder(api):
+    """Completions of a parallel tool_call arrive together; two tasks a millisecond apart share a prefix."""
+    from concurrent.futures import ThreadPoolExecutor
+    ids = [f"01a15976-d838-7532-99d8-{i:012x}" for i in range(24)]
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        list(pool.map(lambda i: api.provenance({"task_id": i, "tool": "meshy_remesh", "args": {}}), ids))
+    assert set(ids) <= set(api._load_prov())
+    assert api._save_target(ids[0], None)[0] != api._save_target(ids[1], None)[0]

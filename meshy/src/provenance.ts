@@ -1,3 +1,5 @@
+import { type GatewayEvent, host } from '@hermes/plugin-sdk'
+
 /**
  * Provenance: which tool call made which Meshy task. Meshy's own task record keeps a text prompt but not
  * an image task's input image, nor the task a remesh / retexture / rig / animation came from, so the
@@ -75,4 +77,43 @@ export function creationsFrom(name: unknown, args: unknown, result: unknown): Cr
     }
   })
   return out
+}
+
+/**
+ * ctx.rest always reaches the ACTIVE profile's backend, but a completion can belong to a background profile
+ * (or another connection). A record is written only while its owner is the active one; others wait in memory
+ * and flush when the user switches to that owner, so profile A's prompt never lands in profile B's gallery.
+ */
+export function createProvenanceWriter(post: (body: unknown) => Promise<unknown>) {
+  const pending = new Map<string, unknown[]>()
+  const norm = (p: null | string | undefined) => (p ?? '').trim() || 'default'  // = core's normalizeProfileKey
+  const active = () => `${host.state?.connectionId.get() ?? ''}::${norm(host.state?.profile.get())}`
+  const ownerOf = (e: GatewayEvent) =>
+    e.profile === undefined && e.connectionId === undefined ? active() : `${e.connectionId ?? host.state?.connectionId.get() ?? ''}::${norm(e.profile)}`
+  const send = (body: unknown) => void post(body).catch(() => undefined)
+  const flush = () => {
+    const key = active()
+    const rows = pending.get(key)
+    if (rows) {
+      pending.delete(key)
+      rows.forEach(send)
+    }
+  }
+  const offs = [host.state?.profile.subscribe(flush), host.state?.connectionId.subscribe(flush)]
+  return {
+    record(event: GatewayEvent, body: unknown) {
+      const owner = ownerOf(event)
+      if (owner === active()) {
+        send(body)
+        return
+      }
+      const rows = pending.get(owner) ?? []
+      rows.push(body)
+      pending.set(owner, rows.slice(-200))
+    },
+    dispose() {
+      offs.forEach(off => off?.())
+      pending.clear()
+    }
+  }
 }

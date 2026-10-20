@@ -15,7 +15,7 @@ export interface RemoteModel {
 
 export type Source =
   | { kind: 'file'; path: string; task?: string; media?: 'image' | 'model'; images?: string[]; label?: string; incomplete?: boolean }
-  | { kind: 'remote'; url: string; label: string; media?: 'image' | 'model'; images?: string[]; expired?: boolean }
+  | { kind: 'remote'; url: string; label: string; task?: string; media?: 'image' | 'model'; images?: string[]; expired?: boolean }
 
 export function sourceForAsset(asset: RemoteModel): Source | null {
   if (asset.kind === 'model' && asset.local_path) {
@@ -23,7 +23,7 @@ export function sourceForAsset(asset: RemoteModel): Source | null {
   }
   const url = asset.kind === 'image' ? asset.image_urls[0] : asset.glb_url
   return url ? {
-    kind: 'remote', url, label: asset.prompt || asset.task_type,
+    kind: 'remote', url, label: asset.prompt || asset.task_type, task: asset.task_id,
     media: asset.kind, images: asset.kind === 'image' ? asset.image_urls : undefined, expired: asset.expired
   } : null
 }
