@@ -12,6 +12,7 @@ Routes:
     GET /file?path=         bytes of one .glb/.gltf/.png/.jpg (data URL), refused outside allowed roots
     GET /formats?task=      the file types a finished task offers (glb, fbx, obj, stl, usdz ...) + any already saved
     POST /save              {task, format, beside?}: download one format next to ``beside`` (no credits)
+    GET /active             Meshy tasks still PENDING/IN_PROGRESS with their progress % (progress chip)
 """
 
 from __future__ import annotations
@@ -337,3 +338,45 @@ def remote(url: str):
     _log.debug("meshy remote asset %s: %d bytes in %.1fs", parts.path, len(data), time.monotonic() - started)
     return {"name": Path(parts.path).name, "bytes": len(data),
             "dataUrl": f"data:{_MIME[suffix]};base64,{base64.b64encode(data).decode('ascii')}"}
+
+
+# In-flight tasks for the Desktop progress chip. Meshy's list endpoints return status + progress per
+# task; the chip polls this only while a Meshy tool runs or a task is still in flight.
+_ACTIVE_STATUSES = ("PENDING", "IN_PROGRESS")
+_ACTIVE_ENDPOINTS = (*_MODEL_ENDPOINTS, ("text-to-image", "/openapi/v1/text-to-image"),
+                     ("animation", "/openapi/v1/animations"))
+# A task queued longer than this is Meshy's problem, not a progress bar's (Meshy advises 60 min max).
+_ACTIVE_MAX_AGE_MS = 60 * 60 * 1000
+
+
+def _active_rows(task_type: str, path: str, key: str) -> list[dict]:
+    try:
+        rows = _meshy_get(f"{path}?page_size=5&sort_by=-created_at", key, timeout=8.0)
+    except (urllib.error.URLError, OSError, ValueError):
+        return []  # one endpoint failing never hides the others
+    now_ms = time.time() * 1000
+    out = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or row.get("status") not in _ACTIVE_STATUSES:
+            continue
+        created = row.get("created_at") or 0
+        if isinstance(created, (int, float)) and created and now_ms - created > _ACTIVE_MAX_AGE_MS:
+            continue
+        stage = str(row.get("mode") or row.get("type") or task_type)
+        out.append({"task_id": row.get("id"), "task_type": task_type, "stage": stage,
+                    "status": row.get("status"), "progress": int(row.get("progress") or 0),
+                    "prompt": str(row.get("prompt") or "")[:120], "created_at": created})
+    return out
+
+
+@router.get("/active")
+def active():
+    """Meshy tasks still PENDING / IN_PROGRESS (newest first), with Meshy's own progress %."""
+    key = _api_key()
+    if not key:
+        return {"configured": False, "tasks": []}
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=len(_ACTIVE_ENDPOINTS)) as pool:
+        batches = list(pool.map(lambda e: _active_rows(e[0], e[1], key), _ACTIVE_ENDPOINTS))
+    tasks = sorted((t for b in batches for t in b), key=lambda t: t.get("created_at") or 0, reverse=True)
+    return {"configured": True, "tasks": tasks}

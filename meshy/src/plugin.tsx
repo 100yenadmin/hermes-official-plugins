@@ -5,7 +5,8 @@
  *   3D card in the transcript. The meshy-3d skill tells the agent to emit it after a download.
  * - "Meshy: open 3D gallery" (⌘K) opens a workspace tab listing recent generations and local
  *   downloads beside a full viewer.
- * - A status-bar chip shows remaining credits, refreshed after every Meshy tool call.
+ * - A status-bar chip shows remaining credits, refreshed after every Meshy tool call; while a Meshy
+ *   task runs it shows live progress instead ("Meshy 42% · texturing", see progress.tsx).
  *
  * Bytes and API calls go through this plugin's own backend (`dashboard/plugin_api.py`) via
  * `ctx.rest`; the renderer never reads files or holds the API key.
@@ -15,6 +16,7 @@ import type { HermesPlugin, PaletteContribution } from '@hermes/plugin-sdk'
 import { host, PALETTE_AREA, STATUSBAR_AREAS, TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 
+import { createProgressTracker, isMeshyCall, ProgressChip, type ProgressState } from './progress.tsx'
 import { type Balance, BalanceChip, DEFAULT_SETTINGS, Gallery, type MeshySettings, type Source, TranscriptCard } from './views.tsx'
 
 const WORKSPACE_ID = 'meshy-gallery'
@@ -95,15 +97,25 @@ const plugin: HermesPlugin = {
       })
     }
 
+    const progressListeners = new Set<(s: ProgressState) => void>()
+    // A finished task changes the balance (credits are charged at creation, refunded on failure).
+    const progress = createProgressTracker(ctx, s => progressListeners.forEach(fn => fn(s)), refreshBalance)
+
     function Chip() {
       const prefs = useSettings()
       const [b, setB] = useState<Balance | null>(balance)
+      const [p, setP] = useState<ProgressState>(progress.get())
       useEffect(() => {
         listeners.add(setB)
+        progressListeners.add(setP)
         return () => {
           listeners.delete(setB)
+          progressListeners.delete(setP)
         }
       }, [])
+      if (p.running || p.tasks.length > 0) {
+        return <ProgressChip onOpen={() => openGallery()} state={p} />
+      }
       if (!prefs.show_credits) {
         return null
       }
@@ -111,8 +123,9 @@ const plugin: HermesPlugin = {
     }
 
     ctx.onEvent('tool.complete', event => {
-      const name = String((event.payload as { name?: unknown } | undefined)?.name ?? '')
-      if (name.startsWith('mcp__meshy__') || name.startsWith('mcp_meshy_')) {
+      const payload = (event.payload ?? {}) as { name?: unknown; args?: unknown }
+      // Meshy tools sit behind tool search: most calls arrive as `tool_call` wrapping mcp_meshy_*.
+      if (isMeshyCall(payload.name, payload.args)) {
         refreshBalance()
       }
     })
@@ -136,6 +149,8 @@ const plugin: HermesPlugin = {
     ctx.onEvent('plugin.meshy.settings.changed', () => refreshBalance())
     ctx.onDispose(() => {
       closeWorkspace?.()
+      progress.dispose()
+      progressListeners.clear()
       listeners.clear()
       galleryListeners.clear()
       settingsListeners.clear()
