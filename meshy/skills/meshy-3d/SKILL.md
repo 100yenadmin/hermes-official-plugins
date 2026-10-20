@@ -158,7 +158,9 @@ download result gave one), and that a saved file is permanent.
 - **Messaging (Telegram, Discord, Slack, WhatsApp, Signal, Matrix ...):** never emit the
   `::meshy-model` line (it shows as raw text). Send the thumbnail as an image: `![preview](<thumbnail_url>)`
   on its own line (from `meshy_get_task_status`). Attach the file with a line that is only
-  `MEDIA:<absolute path>`; the gateway uploads it as a document. Upload caps: Telegram 20 MB on the hosted Bot API,
+  `MEDIA:<absolute path>`; the gateway uploads it as a document. Write each local path only on its
+  `MEDIA:` line: the gateway also uploads any bare absolute file path in the reply, so repeating it in
+  prose sends the file twice. Upload caps: Telegram 20 MB on the hosted Bot API,
   Discord 20 MB (more on boosted servers), others vary. A refined GLB is
   often 10-40 MB and OBJ far larger: when the file is near or over the cap, or the upload is
   reported as skipped, give the signed `model_urls` link for that format instead and say it stops
