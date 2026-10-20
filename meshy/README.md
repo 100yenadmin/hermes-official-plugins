@@ -106,6 +106,15 @@ you get, rendered with stock three.js:
   saved elsewhere (a project folder): a small per-profile index, `asset-index.json` in the plugin's
   data folder, holds path, size, sha256 and task id only (no URLs, no keys; 500 entries, vanished
   files drop out). Nothing scans your home folder.
+  Every row is labelled with the prompt that made it, and the search box filters by prompt.
+  Selecting a model shows **Made from**: the prompt (copy it, or put it back in the chat box), the
+  texture or style prompt, the source image for image models, settings, seed, credits, the chain of
+  steps it came from and what was made from it (each clickable), and **Open chat** for the
+  conversation that made it. Meshy keeps text prompts itself; for image models and later steps
+  (remesh, retexture, rig, animate, resize) the plugin records the creating tool call in
+  `provenance.json` in its data folder (prompt, settings, parent task, the image path or the image
+  URL without its query string; 2,000 entries). Models made before this or from another machine
+  show what Meshy and the download folder still know.
 - **Credit chip** in the status bar, refreshed after every Meshy tool call.
 
 The renderer never reads files or holds the key. `dashboard/plugin_api.py` (mounted at

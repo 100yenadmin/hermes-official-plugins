@@ -15,6 +15,12 @@ Routes:
     GET /formats?task=      the file types a finished task offers (glb, fbx, obj, stl, usdz ...) + any already saved
     POST /save              {task, format, beside?}: download one format next to ``beside`` (no credits)
     GET /active             Meshy tasks still PENDING/IN_PROGRESS with their progress % (progress chip)
+    GET /actions?task=      the follow-up actions a finished task supports (texture, remesh, rig ...), each with
+                            its credit cost and the chat message a card button sends; plus the live balance
+    POST /provenance        {task_id, tool, args, session_id?}: remember what made a task (Desktop records it
+                            from the tool call that created it): prompt, style, source image, settings, parent
+    GET /details?task=      "Made from" for the gallery: prompt(s), source image, settings, credits, the chain of
+                            tasks it came from and what was made from it, and the chat that made it
 """
 
 from __future__ import annotations
@@ -179,8 +185,10 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
     merged.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
     merged = merged[:limit]
     credits = _credits_by_task(key)
+    prov = _load_prov()
     for m in merged:
         m["credits"] = credits.get(m["task_id"])
+        m["prompt"] = _label_for(m["task_id"], prov) or m["prompt"]
     return {"configured": True, "models": merged}
 
 
@@ -264,7 +272,32 @@ def local(limit: int = Query(50, ge=1, le=200)):
                         "modified": max(int(st.st_mtime * 1000), int(row.get("last_opened") or 0)),
                         "task": row.get("task_id") if isinstance(row.get("task_id"), str) else None}
     files = sorted(seen.values(), key=lambda f: f["modified"], reverse=True)[:limit]
+    prov = _load_prov()
+    for f in files:
+        f["prompt"] = (_label_for(f["task"], prov) if f["task"] else None) or _project_prompt(Path(f["path"]))
     return {"dir": str(out_dir), "files": files}
+
+
+def _project_prompt(model: Path) -> str | None:
+    try:
+        name = json.loads((model.parent / "metadata.json").read_text(encoding="utf-8")).get("project_name")
+    except (OSError, ValueError, AttributeError):
+        return None
+    return name if isinstance(name, str) and name not in ("text-to-3d", "image-to-3d", "") else None
+
+
+def _label_for(task_id: str, prov: dict[str, dict]) -> str | None:
+    """A one-line "what made this": its own prompt, else the nearest recorded ancestor's, else its image."""
+    cur, hops = task_id, 0
+    while cur and hops < 12:
+        rec = prov.get(cur) or {}
+        text = rec.get("prompt") or rec.get("text_style_prompt") or rec.get("texture_prompt")
+        if text:
+            return text
+        if rec.get("image"):
+            return f"from image {Path(urllib.parse.urlsplit(rec['image']).path).name}"
+        cur, hops = rec.get("parent"), hops + 1
+    return None
 
 
 # /save writes the full task id here (its folder is named by the first 8 characters only).
@@ -571,3 +604,227 @@ def active():
         batches = list(pool.map(lambda e: _active_rows(e[0], e[1], key), _ACTIVE_ENDPOINTS))
     tasks = sorted((t for b in batches for t in b), key=lambda t: t.get("created_at") or 0, reverse=True)
     return {"configured": True, "tasks": tasks}
+
+
+# Card buttons. Each one SENDS A CHAT MESSAGE (the agent runs the tool behind Hermes' approval card); the
+# router never spends credits. Which actions a task offers follows each Meshy tool's documented input
+# ("input_task_id: a SUCCEEDED text-to-3d, image-to-3d or remesh task" ...); costs are Meshy's API prices.
+_GENERATED = ("text-to-3d-refine", "image-to-3d", "multi-image-to-3d")
+_ACTIONS = (
+    # id, label, cost (None = the task's own consumed_credits), task types it applies to, message
+    ("texture", "Texture it", 10, ("text-to-3d-preview",),
+     "texture it with meshy_text_to_3d_refine (10 credits). Ask me for a texture style only if I haven't given one."),
+    # Text only: an image task's record does not keep its input image, so it cannot be re-run from the id.
+    ("regenerate", "Regenerate", None, ("text-to-3d-preview",),
+     ("regenerate it: a NEW meshy_text_to_3d preview with the same prompt and model_type (read them with "
+      "meshy_get_task_status), new seed ({cost} credits, what the original cost). Meshy's API has no free retry.")),
+    ("remesh", "Remesh", 5, ("text-to-3d-preview", *_GENERATED, "retexture"),
+     ("remesh it with meshy_remesh (5 credits). Suggest a triangle target for what it is (player character "
+      "~15k, NPC 5-15k, weapon ~3k, small prop ~1.5k; mobile about half; close-up or print: keep detail) and ask "
+      "me the target and triangle or quad before calling.")),
+    ("retexture", "Retexture", 10, ("text-to-3d-preview", *_GENERATED, "remesh"),
+     "retexture it with meshy_retexture (10 credits). Ask me for the style in words first."),
+    ("rig", "Rig", 5, (*_GENERATED, "retexture", "remesh"),
+     ("rig it with meshy_rig (5 credits, includes walking + running clips). Only if it is a textured humanoid; "
+      "say so and stop if it is not.")),
+    ("animate", "Animate", 3, ("rig",),
+     ("animate this rig with meshy_animate (3 credits per action). Look up action ids with "
+      "meshy_list_animations (free) and ask me which ones.")),
+    ("resize", "Resize", 1, (*_GENERATED, "remesh", "retexture"),
+     "resize it to real-world size with meshy_resize (1 credit). Ask me for the height."),
+    ("printability", "Check printability", 0, ("text-to-3d-preview", *_GENERATED, "remesh", "retexture"),
+     "check it for 3D printing with meshy_analyze_printability (free) and summarise the result."),
+)
+
+
+@router.get("/actions")
+def actions(task: str):
+    if not _TASK_ID.match(task or ""):
+        raise HTTPException(status_code=400, detail="task id required")
+    key = _api_key()
+    if not key:
+        raise HTTPException(status_code=400, detail="no Meshy API key")
+    row = _task(task, key)
+    kind = str(row.get("type") or "").lower()
+    spent = row.get("consumed_credits") if isinstance(row.get("consumed_credits"), (int, float)) else None
+    try:
+        balance = _meshy_get("/openapi/v1/balance", key).get("balance")
+    except (urllib.error.URLError, OSError, ValueError):
+        balance = None
+    what = str(row.get("prompt") or "").strip()[:80]
+    subject = f'Meshy task {task}' + (f' ("{what}")' if what else "")
+    out = []
+    for aid, label, cost, kinds, message in _ACTIONS:
+        if kind not in kinds:
+            continue
+        cost = int(spent) if cost is None and spent is not None else cost
+        if cost is None:
+            continue  # unknown price: never show a button that can't state what it spends
+        out.append({"id": aid, "label": label, "cost": cost,
+                    "affordable": balance is None or cost <= balance,
+                    "covers": (int(balance // cost) if cost and isinstance(balance, (int, float)) else None),
+                    "message": f"{subject}: {message.format(cost=cost)} This button message is my confirmation "
+                               f"of the {cost}-credit cost." if cost else f"{subject}: {message}"})
+    return {"task": task, "type": kind, "model_type": row.get("model_type"), "spent": spent,
+            "balance": balance, "actions": out}
+
+
+# Provenance: what made each model. Meshy's task record keeps a text prompt but not an image task's
+# input, nor which task a remesh/rig/animation came from, so Desktop records the creating tool call here.
+_PROV_NAME = "provenance.json"
+_PROV_CAP = 2000
+_PROV_TEXT = ("prompt", "texture_prompt", "text_style_prompt", "negative_prompt", "object_prompt")
+_PROV_PARENT = ("preview_task_id", "input_task_id", "rig_task_id")
+_PROV_SETTINGS = ("ai_model", "model_type", "topology", "target_polycount", "texture_resolution", "enable_pbr",
+                  "geometry_resolution", "pose_mode", "symmetry_mode", "should_texture", "resize_height",
+                  "height_meters", "action_id", "action_ids")
+_SESSION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+
+
+def _prov_path() -> Path:
+    return _data_root() / _PROV_NAME
+
+
+def _load_prov() -> dict[str, dict]:
+    try:
+        rows = json.loads(_prov_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in rows.items() if isinstance(v, dict) and _TASK_ID.match(k)} if isinstance(rows, dict) else {}
+
+
+def _image_ref(args: dict) -> str | None:
+    """A source image worth showing again: a local path, or a URL without its query (signed tokens)."""
+    path = args.get("file_path")
+    if isinstance(path, str) and path.strip() and not path.startswith("data:"):
+        return path.strip()[:1024]
+    url = args.get("image_url")
+    if isinstance(url, str) and url.startswith(("https://", "http://")):
+        parts = urllib.parse.urlsplit(url)
+        return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))[:1024]
+    return None
+
+
+@router.post("/provenance")
+def provenance(body: dict):
+    task_id, tool = str(body.get("task_id") or ""), str(body.get("tool") or "")
+    if not _TASK_ID.match(task_id) or not re.fullmatch(r"meshy_[a-z0-9_]{1,40}", tool):
+        raise HTTPException(status_code=400, detail="task_id and a meshy_* tool required")
+    args = body.get("args") if isinstance(body.get("args"), dict) else {}
+    row: dict = {"tool": tool, "recorded_at": int(time.time() * 1000)}
+    for key in _PROV_TEXT:
+        if isinstance(args.get(key), str) and args[key].strip():
+            row[key] = args[key].strip()[:800]
+    parent = next((args[k] for k in _PROV_PARENT if isinstance(args.get(k), str) and _TASK_ID.match(args[k])), None)
+    if parent:
+        row["parent"] = parent
+    if image := _image_ref(args):
+        row["image"] = image
+    settings = {k: args[k] for k in _PROV_SETTINGS
+                if isinstance(args.get(k), (str, int, float, bool)) or (k == "action_ids" and isinstance(args.get(k), list))}
+    if settings:
+        row["settings"] = {k: (v[:10] if isinstance(v, list) else v) for k, v in settings.items()}
+    sid = body.get("session_id")
+    if isinstance(sid, str) and _SESSION_ID.match(sid):
+        row["session_id"] = sid
+    rows = _load_prov()
+    rows[task_id] = row
+    if len(rows) > _PROV_CAP:
+        rows = dict(sorted(rows.items(), key=lambda kv: kv[1].get("recorded_at") or 0)[-_PROV_CAP:])
+    target = _prov_path()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(target.name + ".part")
+    tmp.write_text(json.dumps(rows, indent=1), encoding="utf-8")
+    tmp.replace(target)
+    return {"ok": True}
+
+
+def _download_lineage(task_id: str) -> tuple[str | None, list[dict]]:
+    """The MCP server's own record for downloaded models (any surface, CLI included): the project prompt and
+    its task chain in order, from ``meshy_output/<project>/metadata.json``."""
+    out_dir = _data_root() / "meshy_output"
+    for meta_path in out_dir.glob("*/metadata.json") if out_dir.is_dir() else ():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        tasks = [t for t in meta.get("tasks") or [] if isinstance(t, dict) and _TASK_ID.match(str(t.get("task_id") or ""))]
+        if any(t["task_id"] == task_id for t in tasks):
+            seen, chain = set(), []
+            for t in tasks:
+                if t["task_id"] not in seen:
+                    seen.add(t["task_id"])
+                    chain.append({"task_id": t["task_id"], "type": str(t.get("task_type") or ""), "stage": str(t.get("stage") or "")})
+            return (meta.get("project_name") if isinstance(meta.get("project_name"), str) else None), chain
+    return None, []
+
+
+def _earlier_in(download_chain: list[dict], task: str) -> list[dict]:
+    """Tasks before ``task`` in its download project (the MCP server records them in order)."""
+    ids = [c["task_id"] for c in download_chain]
+    # The MCP server types every text-to-3d stage alike; its stage says preview vs textured.
+    def step(c: dict) -> str:
+        return "meshy_text_to_3d_refine" if c["stage"] == "refined" else c["type"]
+    return [{"task_id": c["task_id"], "tool": step(c)} for c in download_chain[:ids.index(task)]] if task in ids else []
+
+
+@router.get("/details")
+def details(task: str):
+    if not _TASK_ID.match(task or ""):
+        raise HTTPException(status_code=400, detail="task id required")
+    prov = _load_prov()
+    rec = prov.get(task, {})
+    key = _api_key()
+    row: dict = {}
+    if key:
+        try:
+            row = _task(task, key)
+        except HTTPException as exc:
+            if exc.status_code in (401, 403):
+                raise
+    # Walk recorded parents for the chain, and find what was made from this task.
+    chain, cur, hops = [], rec.get("parent"), 0
+    while cur and hops < 12 and cur not in {c["task_id"] for c in chain}:
+        chain.insert(0, {"task_id": cur, "tool": prov.get(cur, {}).get("tool")})
+        cur, hops = prov.get(cur, {}).get("parent"), hops + 1
+    children = [{"task_id": k, "tool": v.get("tool")} for k, v in prov.items() if v.get("parent") == task]
+    project_prompt, download_chain = _download_lineage(task)
+    # A remesh/rig/animation has no prompt of its own: each origin field comes from the nearest step that has
+    # one (a text model's prompt; an image model's source image and texture prompt), labelled as inherited.
+    own = {"prompt": rec.get("prompt") or (row.get("prompt") if isinstance(row.get("prompt"), str) else ""),
+           "texture_prompt": rec.get("texture_prompt") or (row.get("texture_prompt") if isinstance(row.get("texture_prompt"), str) else ""),
+           "image": rec.get("image")}
+    inherited = None
+    for field in ("prompt", "texture_prompt", "image"):
+        if own[field]:
+            continue
+        for link in reversed(chain):
+            if anc := prov.get(link["task_id"], {}).get(field):
+                own[field], inherited = anc, inherited or link["task_id"]
+                break
+    if not own["prompt"] and not own["image"] and project_prompt and project_prompt not in ("text-to-3d", "image-to-3d"):
+        own["prompt"], inherited = project_prompt, inherited or (download_chain[0]["task_id"] if download_chain else None)
+    prompt, texture, image = own["prompt"], own["texture_prompt"], own["image"]
+    image_local = bool(image) and not str(image).startswith(("http://", "https://"))
+    if image_local:
+        try:
+            _resolve_readable(str(image))
+        except HTTPException:
+            image_local = False  # moved, or outside the folders the viewer may read
+    style = rec.get("text_style_prompt") or (row.get("text_style_prompt") if isinstance(row.get("text_style_prompt"), str) else "")
+    settings = dict(rec.get("settings") or {})
+    if isinstance(row.get("model_type"), str) and row["model_type"]:
+        settings.setdefault("model_type", row["model_type"])
+    return {
+        "task": task, "type": str(row.get("type") or rec.get("tool") or ""),
+        "prompt": prompt or None, "prompt_from": inherited,
+        "texture_prompt": texture or None, "style_prompt": style or None,
+        "negative_prompt": rec.get("negative_prompt"),
+        "image": image, "image_viewable": image_local,
+        "settings": settings, "seed": row.get("seed") or None,  # 0 = a step with no seed (resize, rig, ...)
+        "credits": row.get("consumed_credits"), "created_at": row.get("created_at") or rec.get("recorded_at"),
+        "parents": chain or _earlier_in(download_chain, task),
+        "children": children,
+        "session_id": rec.get("session_id"),
+        "recorded": bool(rec),
+    }

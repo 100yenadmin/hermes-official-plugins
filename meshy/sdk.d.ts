@@ -55,6 +55,12 @@ export const PALETTE_AREA: string
 export const STATUSBAR_AREAS: { left: string; right: string }
 export const TRANSCRIPT_DIRECTIVE_AREA: string
 export const host: {
+  /** Composer bus (apps/desktop/src/sdk/composer.ts): `null` = the composer the user is typing in. */
+  composer?: {
+    submit: (sessionId: null | string, text: string) => boolean
+    insertText?: (sessionId: null | string, text: string, opts?: { mode?: 'block' | 'inline' | 'prefix' }) => Promise<boolean>
+  }
+  openSession?: (storedSessionId: string, options?: { intent?: 'in-place' | 'stack' | 'tab' | 'window' }) => Promise<void>
   navigate: (path: string) => void
   notify: (input: { kind: 'error' | 'info' | 'success' | 'warning'; message: string }) => string
   openWorkspace?: (

@@ -116,6 +116,12 @@ user's goal before the first paid call.
    card has no menu. Other clients show the line as text, so write the path in prose as well.
    To show a finished task the user has not downloaded yet, download it first (free) and use
    `path=`; a `url=` card with a signed Meshy link does not render in current Desktop builds.
+   Every result (refine, remesh, retexture, rig, animation) gets its OWN card with ITS task id, so
+   the card's **Next** menu offers what that task supports. **Next** sends a message such as
+   `Meshy task <id>: remesh it with meshy_remesh (5 credits) ...`. The cost in that message is the
+   user's confirmation of the cost. Still ask for any choice the message tells you to ask (style,
+   triangle target, height, animation ids) before the call. Regenerate is always a new paid task:
+   Meshy's free retries exist only on meshy.ai, and API-made tasks don't appear there.
 
 ## Pick the detail level
 
@@ -204,6 +210,11 @@ download result gave one), and that a saved file is permanent.
   `<HERMES_HOME>/cache/documents/`.
   For animated or rigged models (and as a quick look at any model), render a short preview video
   with [preview video](references/preview-video.md) and send it as an attachment.
+  Cards can't be clicked here, so end with the next steps as a short numbered list with credits, the
+  same set Desktop's Next menu shows for that task type, e.g. preview: "1. Texture it · 10 cr
+  2. Regenerate · <its cost> 3. Remesh · 5 cr 4. Check printability · free"; textured or image:
+  remesh 5, retexture 10, rig 5 (humanoids), resize 1, printability free; rig: animate 3 per action.
+  A reply with just a number is that choice.
 - **CLI / TUI:** plain text, no `MEDIA:` (printed literally): the absolute path, plus the signed
   link with its expiry if the user may want it elsewhere.
 - **Approvals off Desktop:** every create and download asks first. On a gateway the approval

@@ -113,3 +113,46 @@ def test_asset_index_records_only_allowed_model_paths_and_never_urls(api):
     assert "http" not in api._index_path().read_text(encoding="utf-8")
     listed = api.local(limit=50)["files"]
     assert [(Path(f["path"]), f["task"]) for f in listed] == [(project.resolve(), _TASK)]
+
+
+def test_actions_state_a_real_cost_and_only_what_the_task_supports(api, monkeypatch):
+    """Card buttons send a chat message naming the cost; a task type the tool can't take gets no button."""
+    records = {"preview": {"id": _TASK, "type": "text-to-3d-preview", "consumed_credits": 20, "prompt": "owl"},
+               "image": {"id": _TASK, "type": "image-to-3d", "consumed_credits": 15},
+               "rig": {"id": _TASK, "type": "rig", "consumed_credits": 5}}
+    for kind, row in records.items():
+        monkeypatch.setattr(api, "_task", lambda _t, _k, row=row: row)
+        monkeypatch.setattr(api, "_meshy_get", lambda *_a, **_k: {"balance": 12})
+        acts = {a["id"]: a for a in api.actions(_TASK)["actions"]}
+        assert all(isinstance(a["cost"], int) and (f"{a['cost']} credit" in a["message"] or a["cost"] == 0)
+                   for a in acts.values()), kind
+        if kind == "preview":
+            assert acts["regenerate"]["cost"] == 20 and not acts["regenerate"]["affordable"]  # 20 > balance 12
+            assert "texture" in acts and "rig" not in acts
+        if kind == "image":
+            assert "regenerate" not in acts and "texture" not in acts and "rig" in acts
+        if kind == "rig":
+            assert list(acts) == ["animate"]
+    assert _status(api.actions, "not-a-task-id") == 400
+
+
+def test_provenance_keeps_what_made_a_model_and_never_a_signed_url(api, monkeypatch):
+    """The gallery's "Made from": a child step shows its origin's prompt; tokens and junk are never stored."""
+    parent, child = _TASK, "01a15965-4a40-718b-8912-4046ede4837f"
+    api.provenance({"task_id": parent, "tool": "meshy_image_to_3d", "session_id": "sess-1",
+                    "args": {"image_url": "https://cdn.example.com/frog.png?Signature=SECRET&Expires=9",
+                             "texture_prompt": "mossy green frog", "model_type": "smart-topology", "target_polycount": 15000}})
+    api.provenance({"task_id": child, "tool": "meshy_remesh",
+                    "args": {"input_task_id": parent, "target_polycount": 8000, "topology": "triangle"}})
+    stored = api._prov_path().read_text(encoding="utf-8")
+    assert "SECRET" not in stored and "Signature" not in stored
+    for bad in ({"task_id": "x", "tool": "meshy_rig"}, {"task_id": child, "tool": "rm -rf"}):
+        assert _status(api.provenance, bad) == 400
+
+    monkeypatch.setattr(api, "_api_key", lambda: None)  # no key: details still answers from the record
+    d = api.details(child)
+    assert d["texture_prompt"] == "mossy green frog" and d["prompt_from"] == parent
+    assert d["image"] == "https://cdn.example.com/frog.png" and d["settings"]["target_polycount"] == 8000
+    assert [p["task_id"] for p in d["parents"]] == [parent]
+    assert [c["task_id"] for c in api.details(parent)["children"]] == [child]
+    assert api.details(parent)["session_id"] == "sess-1"

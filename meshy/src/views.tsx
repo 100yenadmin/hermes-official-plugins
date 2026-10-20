@@ -64,6 +64,8 @@ export interface LocalFile {
   modified: number
   /** Meshy task id when recorded (MCP metadata.json, /save, or a card that opened it); enables Download. */
   task?: null | string
+  /** What made it (its prompt, the nearest ancestor's, or its source image), when recorded. */
+  prompt?: null | string
 }
 
 export type Source = { kind: 'file'; path: string; task?: string } | { kind: 'remote'; url: string; label: string }
@@ -97,6 +99,18 @@ const V = {
   main: { flex: 1, minWidth: 0, padding: 8, display: 'flex', flexDirection: 'column', gap: 6 },
   mainHead: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--ui-text-secondary)', minHeight: 28 },
   empty: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--ui-text-tertiary)' },
+  search: { width: 'calc(100% - 8px)', margin: '0 4px 6px', padding: '4px 8px', borderRadius: 6, border: '1px solid var(--ui-stroke-secondary)', background: 'transparent', color: 'var(--ui-text)', fontSize: 12 },
+  ellipsis: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' },
+  madeFrom: { display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 10px', border: '1px solid var(--ui-stroke-secondary)', borderRadius: 8, fontSize: 12, color: 'var(--ui-text-secondary)', maxHeight: 220, overflowY: 'auto', flexShrink: 0 },
+  madeHead: { display: 'flex', alignItems: 'center', gap: 6, minHeight: 24 },
+  promptRow: { display: 'flex', alignItems: 'flex-start', gap: 4 },
+  prompt: { flex: 1, color: 'var(--ui-text)', fontSize: 13, lineHeight: 1.4, whiteSpace: 'pre-wrap', userSelect: 'text' },
+  sourceImg: { width: 56, height: 56, objectFit: 'cover', borderRadius: 6, flexShrink: 0 },
+  chips: { display: 'flex', flexWrap: 'wrap', gap: 4, alignItems: 'center' },
+  tag: { padding: '1px 6px', borderRadius: 4, fontSize: 11, background: 'var(--ui-bg-tertiary, rgba(127,127,127,.15))', color: 'var(--ui-text-secondary)' },
+  tagOn: { padding: '1px 6px', borderRadius: 4, fontSize: 11, background: 'var(--ui-accent)', color: 'var(--ui-accent-foreground, #fff)' },
+  link: { padding: '1px 6px', borderRadius: 4, fontSize: 11, border: '1px solid var(--ui-stroke-secondary)', background: 'transparent', color: 'var(--ui-text-secondary)', cursor: 'pointer' },
+  cost: { fontSize: 11, color: 'var(--ui-text-tertiary)', fontVariantNumeric: 'tabular-nums', marginLeft: 12 },
   chip: { display: 'inline-flex', alignItems: 'center', gap: 4, border: 0, background: 'transparent', color: 'inherit', font: 'inherit', cursor: 'pointer', padding: '0 4px' }
 } satisfies Record<string, CSSProperties>
 
@@ -433,6 +447,99 @@ export function FormatMenu({ rest, os, task, beside }: { rest: Rest; os: Os; tas
   )
 }
 
+interface ActionRow {
+  id: string
+  label: string
+  cost: number
+  affordable: boolean
+  covers: null | number
+  message: string
+}
+interface ActionsPayload {
+  type: string
+  spent: null | number
+  balance: null | number
+  actions: ActionRow[]
+}
+
+const ACTION_ICONS: Record<string, string> = {
+  texture: 'paintcan',
+  regenerate: 'refresh',
+  remesh: 'type-hierarchy',
+  retexture: 'symbol-color',
+  rig: 'person',
+  animate: 'play',
+  resize: 'screen-full',
+  printability: 'check-all'
+}
+
+/** "Next ▾": the follow-ups Meshy supports for this task, each labelled with its real credit cost. A pick
+ *  SENDS a chat message: the agent runs the tool behind Hermes' approval card, so nothing here spends. */
+export function ActionMenu({ rest, task }: { rest: Rest; task: string }) {
+  const [data, setData] = useState<ActionsPayload | null>(null)
+  const [error, setError] = useState<null | string>(null)
+
+  const load = useCallback(() => {
+    setError(null)
+    rest<ActionsPayload>(`actions?task=${encodeURIComponent(task)}`, { timeoutMs: 30_000 })
+      .then(setData)
+      .catch((err: unknown) => setError(errorText(err)))
+  }, [rest, task])
+
+  const run = (row: ActionRow) => {
+    if (!host.composer?.submit(null, row.message)) {
+      host.notify({ kind: 'warning', message: `Open a chat to ${row.label.toLowerCase()} this model` })
+    }
+  }
+
+  return (
+    <DropdownMenu onOpenChange={open => open && load()}>
+      <DropdownMenuTrigger asChild>
+        <Button data-meshy-actions size="sm" variant="ghost">
+          <Codicon name="sparkle" /> Next
+          <Codicon name="chevron-down" size={12} />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" style={{ minWidth: 290 }}>
+        {error ? (
+          <DropdownMenuItem disabled>{error}</DropdownMenuItem>
+        ) : data === null ? (
+          <DropdownMenuItem disabled>
+            <Codicon name="loading" spinning /> Checking what this model supports…
+          </DropdownMenuItem>
+        ) : (
+          <>
+            {data.actions.map(row => (
+              <DropdownMenuItem
+                data-meshy-action={row.id}
+                disabled={!row.affordable}
+                key={row.id}
+                onSelect={() => run(row)}
+                title={row.affordable ? row.message : `Needs ${row.cost} credits`}
+              >
+                <Codicon name={ACTION_ICONS[row.id] ?? 'circle-small'} />
+                <span style={{ flex: 1 }}>{row.label}</span>
+                <span style={V.cost}>{row.cost ? `${row.cost} cr` : 'free'}</span>
+              </DropdownMenuItem>
+            ))}
+            {data.actions.length === 0 && <DropdownMenuItem disabled>No follow-ups for this kind of task</DropdownMenuItem>}
+            <DropdownMenuSeparator />
+            <DropdownMenuItem disabled>
+              {[
+                typeof data.spent === 'number' ? `This model cost ${data.spent} cr` : null,
+                typeof data.balance === 'number' ? `balance ${data.balance.toLocaleString()} cr` : null
+              ]
+                .filter(Boolean)
+                .join(' · ') || 'Credits unavailable'}
+            </DropdownMenuItem>
+            <DropdownMenuItem disabled>Sends a message; Hermes asks before any credits are spent</DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  )
+}
+
 /** Transcript directive card: `::meshy-model{path="/abs/model.glb"}` or `{url="https://assets.meshy.ai/..."}`.
  *  Shows a click-to-load poster first so a long transcript never opens N WebGL contexts at once. */
 export function TranscriptCard({
@@ -465,6 +572,7 @@ export function TranscriptCard({
         <Codicon name="symbol-misc" />
         <span style={V.cardTitle}>{title}</span>
         <span style={V.spacer} />
+        {task && !streaming && <ActionMenu rest={rest} task={task} />}
         {task && !streaming && <FormatMenu beside={path || undefined} os={os} rest={rest} task={task} />}
         <Button onClick={() => openInWorkspace(source, title)} size="sm" variant="ghost">
           <Codicon name="link-external" /> Open
@@ -482,6 +590,162 @@ export function TranscriptCard({
           <Codicon name="play-circle" size={28} />
           <span>{streaming ? 'Waiting for the reply to finish…' : 'View in 3D'}</span>
         </button>
+      )}
+    </div>
+  )
+}
+
+interface Details {
+  task: string
+  type: string
+  prompt: null | string
+  prompt_from: null | string
+  texture_prompt: null | string
+  style_prompt: null | string
+  negative_prompt?: null | string
+  image: null | string
+  image_viewable: boolean
+  settings: Record<string, unknown>
+  seed?: null | number
+  credits: null | number
+  created_at: null | number
+  parents: Array<{ task_id: string; tool: null | string }>
+  children: Array<{ task_id: string; tool: null | string }>
+  session_id: null | string
+  recorded: boolean
+}
+
+const STEP: Record<string, string> = {
+  meshy_text_to_3d: 'preview', 'text-to-3d': 'preview', meshy_text_to_3d_refine: 'textured', meshy_image_to_3d: 'from image',
+  meshy_multi_image_to_3d: 'from images', meshy_remesh: 'remesh', remesh: 'remesh', meshy_retexture: 'retexture',
+  meshy_rig: 'rig', meshy_animate: 'animation', meshy_resize: 'resize'
+}
+const shortId = (id: string) => id.slice(0, 8)
+
+/** "Made from": the prompt, style, source image, settings and lineage behind the selected model. */
+export function MadeFrom({ rest, task, onPick }: { rest: Rest; task: string; onPick: (task: string) => void }) {
+  const [d, setD] = useState<Details | null>(null)
+  const [img, setImg] = useState<null | string>(null)
+  const [error, setError] = useState<null | string>(null)
+
+  useEffect(() => {
+    let live = true
+    setD(null)
+    setImg(null)
+    setError(null)
+    rest<Details>(`details?task=${encodeURIComponent(task)}`, { timeoutMs: 30_000 })
+      .then(r => {
+        if (!live) {
+          return
+        }
+        setD(r)
+        if (r.image && r.image_viewable) {
+          rest<FilePayload>(`file?path=${encodeURIComponent(r.image)}`, { timeoutMs: 30_000 })
+            .then(f => live && setImg(f.dataUrl))
+            .catch(() => undefined)
+        }
+      })
+      .catch((e: unknown) => live && setError(errorText(e)))
+    return () => {
+      live = false
+    }
+  }, [rest, task])
+
+  if (error) {
+    return <div style={{ ...V.madeFrom, ...V.itemSub }}>Couldn't load what made this model: {error}</div>
+  }
+  if (!d) {
+    return <div style={{ ...V.madeFrom, ...V.itemSub }}>Loading what made this model…</div>
+  }
+  const copy = (text: string) => {
+    void navigator.clipboard?.writeText(text).then(
+      () => host.notify({ kind: 'success', message: 'Prompt copied' }),
+      () => host.notify({ kind: 'error', message: 'Could not copy the prompt' })
+    )
+  }
+  const reuse = (text: string) => {
+    void host.composer?.insertText?.(null, text, { mode: 'block' }).then(ok => {
+      if (!ok) {
+        host.notify({ kind: 'warning', message: 'Open a chat to reuse this prompt' })
+      }
+    })
+  }
+  const settings = Object.entries(d.settings).filter(([, v]) => v !== '' && v !== null && v !== undefined)
+  // The headline is whatever text described it: the prompt, else (image models) the texture prompt.
+  const main = d.prompt || d.texture_prompt
+  const lines: Array<[string, string]> = [
+    ...(d.style_prompt ? [['Style', d.style_prompt] as [string, string]] : []),
+    ...(d.prompt && d.texture_prompt && d.texture_prompt !== d.prompt ? [['Texture', d.texture_prompt] as [string, string]] : []),
+    ...(d.negative_prompt ? [['Avoid', d.negative_prompt] as [string, string]] : [])
+  ]
+
+  return (
+    <div data-meshy-made-from style={V.madeFrom}>
+      <div style={V.madeHead}>
+        <span style={{ fontWeight: 600, color: 'var(--ui-text)' }}>Made from</span>
+        <span style={V.spacer} />
+        {d.session_id && (
+          <Button data-meshy-open-chat onClick={() => void host.openSession?.(d.session_id as string)} size="sm" variant="ghost">
+            <Codicon name="comment-discussion" /> Open chat
+          </Button>
+        )}
+      </div>
+      {main ? (
+        <div style={V.promptRow}>
+          <div data-meshy-prompt style={V.prompt}>
+            {main}
+            {d.prompt_from && <span style={V.itemSub}> (from the original {shortId(d.prompt_from)})</span>}
+          </div>
+          <Button aria-label="Copy prompt" onClick={() => copy(main)} size="icon" title="Copy prompt" variant="ghost">
+            <Codicon name="copy" />
+          </Button>
+          <Button aria-label="Reuse prompt" onClick={() => reuse(main)} size="icon" title="Put this prompt in the chat box" variant="ghost">
+            <Codicon name="reply" />
+          </Button>
+        </div>
+      ) : !d.image ? (
+        <div style={V.itemSub}>
+          {d.recorded ? 'No prompt for this step.' : 'Made outside this Desktop (or before v0.4), so its prompt was not recorded.'}
+        </div>
+      ) : null}
+      {d.image && (
+        <div style={V.promptRow}>
+          {img ? <img alt="Source image" data-meshy-source-image src={img} style={V.sourceImg} /> : <Codicon name="file-media" />}
+          <span style={{ ...V.itemSub, overflow: 'hidden', textOverflow: 'ellipsis' }} title={d.image}>
+            Source image: {d.image.split(/[\\/]/).pop()}
+          </span>
+        </div>
+      )}
+      {lines.map(([k, t]) => (
+        <div key={k} style={V.itemSub}>
+          <b>{k}:</b> {t}
+        </div>
+      ))}
+      <div style={V.chips}>
+        {d.type && <span style={V.tag}>{STEP[d.type] ?? d.type}</span>}
+        {settings.map(([k, val]) => (
+          <span key={k} style={V.tag}>
+            {k.replace(/_/g, ' ')}: {Array.isArray(val) ? val.join(', ') : String(val)}
+          </span>
+        ))}
+        {typeof d.seed === 'number' && <span style={V.tag}>seed {d.seed}</span>}
+        {typeof d.credits === 'number' && <span style={V.tag}>{d.credits} cr</span>}
+        {d.created_at && <span style={V.tag}>{new Date(d.created_at).toLocaleString()}</span>}
+      </div>
+      {(d.parents.length > 0 || d.children.length > 0) && (
+        <div data-meshy-lineage style={V.chips}>
+          {d.parents.map(p => (
+            <button key={p.task_id} onClick={() => onPick(p.task_id)} style={V.link} title={p.task_id} type="button">
+              {STEP[p.tool ?? ''] ?? p.tool ?? 'task'} {shortId(p.task_id)}
+            </button>
+          ))}
+          <span style={V.tagOn}>this model</span>
+          {d.children.map(c => (
+            <button key={c.task_id} onClick={() => onPick(c.task_id)} style={V.link} title={c.task_id} type="button">
+              → {STEP[c.tool ?? ''] ?? c.tool ?? 'task'} {shortId(c.task_id)}
+            </button>
+          ))}
+        </div>
       )}
     </div>
   )
@@ -508,6 +772,9 @@ export function Gallery({
   const [local, setLocal] = useState<LocalFile[] | null>(null)
   const [error, setError] = useState<null | string>(null)
   const [configured, setConfigured] = useState(true)
+  const [query, setQuery] = useState('')
+  const q = query.trim().toLowerCase()
+  const matches = (...texts: Array<null | string | undefined>) => !q || texts.some(t => (t ?? '').toLowerCase().includes(q))
 
   const refresh = useCallback(() => {
     setError(null)
@@ -530,6 +797,22 @@ export function Gallery({
     }
   }, [initial])
 
+  const pickTask = (task: string) => {
+    const r = remote?.find(m => m.task_id === task && m.glb_url)
+    if (r?.glb_url) {
+      setSelected({ kind: 'remote', url: r.glb_url, label: r.prompt || r.task_type })
+      setSelTask({ task, title: r.prompt || r.task_type })
+      return
+    }
+    const f = local?.find(x => x.task === task)
+    if (f) {
+      setSelected({ kind: 'file', path: f.path, task })
+      setSelTask({ task, title: f.name })
+      return
+    }
+    host.notify({ kind: 'info', message: `Task ${task.slice(0, 8)} isn't in the gallery list (older than the list, or never downloaded)` })
+  }
+
   const isSel = (s: Source) =>
     selected && selected.kind === s.kind && (s.kind === 'file' ? selected.kind === 'file' && selected.path === s.path : selected.kind === 'remote' && selected.url === s.url)
 
@@ -547,6 +830,15 @@ export function Gallery({
             </Button>
           </span>
         </div>
+        <input
+          aria-label="Search prompts"
+          data-meshy-search
+          onChange={e => setQuery(e.target.value)}
+          placeholder="Search prompts…"
+          style={V.search}
+          type="search"
+          value={query}
+        />
         {!configured && (
           <div style={V.hint}>
             Add your Meshy API key to list your generations.{' '}
@@ -557,7 +849,7 @@ export function Gallery({
         )}
         {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
         {local && local.length > 0 && <div style={V.section}>On this machine</div>}
-        {local?.map(f => {
+        {local?.filter(f => matches(f.prompt, f.name, f.project)).map(f => {
           const s: Source = { kind: 'file', path: f.path, ...(f.task ? { task: f.task } : {}) }
           const pickLocal = () => {
             setSelected(s)
@@ -567,8 +859,9 @@ export function Gallery({
             <button data-meshy-item style={isSel(s) ? { ...V.item, ...V.itemOn } : V.item} key={f.path} onClick={pickLocal} title={f.path} type="button">
               <Codicon name="file-binary" />
               <span style={V.itemText}>
-                <span>{f.name}</span>
-                <small style={V.itemSub}>
+                <span style={V.ellipsis}>{f.prompt || f.name}</span>
+                <small style={{ ...V.itemSub, ...V.ellipsis }}>
+                  {f.prompt ? `${f.name} · ` : ''}
                   {f.project} · {fmtBytes(f.bytes)}
                 </small>
               </span>
@@ -577,7 +870,7 @@ export function Gallery({
         })}
         {remote && remote.length > 0 && <div style={V.section}>Recent generations</div>}
         {remote === null && configured && !error && <div style={V.hint}>Loading…</div>}
-        {remote?.map(m => {
+        {remote?.filter(m => matches(m.prompt, m.task_type)).map(m => {
           const s: null | Source = m.glb_url ? { kind: 'remote', url: m.glb_url, label: m.prompt || m.task_type } : null
           return (
             <button
@@ -590,12 +883,12 @@ export function Gallery({
                   setSelTask({ task: m.task_id, title: m.prompt || m.task_type })
                 }
               }}
-              title={m.task_id}
+              title={m.prompt ? `${m.prompt}\n${m.task_id}` : m.task_id}
               type="button"
             >
               {m.thumbnail_url ? <img alt="" style={V.thumb} src={m.thumbnail_url} /> : <Codicon name="symbol-misc" />}
               <span style={V.itemText}>
-                <span>{m.prompt || m.task_type}</span>
+                <span style={V.ellipsis}>{m.prompt || m.task_type}</span>
                 <small style={V.itemSub}>
                   {m.task_type}
                   {typeof m.credits === 'number' ? ` · ${m.credits} credits` : ''} · {new Date(m.created_at).toLocaleDateString()}
@@ -610,6 +903,7 @@ export function Gallery({
           <div data-meshy-gallery-head style={V.mainHead}>
             <span style={V.cardTitle}>{selected.kind === 'file' ? selected.path.split(/[\\/]/).pop() : selected.label}</span>
             <span style={V.spacer} />
+            {selTask && <ActionMenu key={`a:${selTask.task}`} rest={rest} task={selTask.task} />}
             {selTask && (
               <FormatMenu
                 beside={selected.kind === 'file' ? selected.path : undefined}
@@ -625,7 +919,9 @@ export function Gallery({
           <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
             <ModelViewer autoRotate={autoRotate} height="100%" key={String(autoRotate)} os={os} rest={rest} source={selected} />
           </div>
-        ) : (
+        ) : null}
+        {selected && selTask && <MadeFrom key={`m:${selTask.task}`} onPick={pickTask} rest={rest} task={selTask.task} />}
+        {selected ? null : (
           <div style={V.empty}>
             <Codicon name="symbol-misc" size={32} />
             <span>Pick a model to view it in 3D.</span>
