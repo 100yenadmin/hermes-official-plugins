@@ -18,6 +18,8 @@ import {
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 
 import { createStage, dataUrlToBuffer, type ModelStats, type Stage } from './stage.ts'
+import { matchesKind, sourceForAsset, type RemoteModel, type Source } from './gallery.ts'
+export type { RemoteModel, Source } from './gallery.ts'
 
 export type Rest = PluginContext['rest']
 export type Os = PluginContext['os']
@@ -46,16 +48,6 @@ export interface Balance {
   settings?: Partial<MeshySettings>
 }
 
-export interface RemoteModel {
-  task_id: string
-  task_type: string
-  prompt: string
-  created_at: number
-  thumbnail_url: null | string
-  glb_url: null | string
-  credits?: null | number
-}
-
 export interface LocalFile {
   path: string
   name: string
@@ -67,8 +59,6 @@ export interface LocalFile {
   /** What made it (its prompt, the nearest ancestor's, or its source image), when recorded. */
   prompt?: null | string
 }
-
-export type Source = { kind: 'file'; path: string; task?: string } | { kind: 'remote'; url: string; label: string }
 
 // Inline styles with theme variables: no injected <style> tag (nothing global to leak or clean up),
 // and every surface reskins with the active theme.
@@ -135,6 +125,57 @@ export function fetchSource(rest: Rest, source: Source): Promise<FilePayload> {
   return source.kind === 'file'
     ? rest<FilePayload>(`file?path=${encodeURIComponent(source.path)}${source.task ? `&task=${encodeURIComponent(source.task)}` : ''}`, { timeoutMs: 120_000 })
     : rest<FilePayload>(`remote?url=${encodeURIComponent(source.url)}`, { timeoutMs: 180_000 })
+}
+
+function ImageViewer({ rest, source }: { rest: Rest; source: Extract<Source, { kind: 'remote' }> }) {
+  const images = source.images?.length ? source.images : [source.url]
+  const [index, setIndex] = useState(0)
+  const [data, setData] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const url = images[index]
+  useEffect(() => {
+    let live = true
+    setData(null)
+    setError(null)
+    fetchSource(rest, { ...source, url }).then(result => {
+      if (live) setData(result.dataUrl)
+    }).catch((err: unknown) => {
+      if (live) setError(errorText(err))
+    })
+    return () => { live = false }
+  }, [rest, url])
+  return (
+    <div data-meshy-image style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+      {error ? <div role="alert" style={V.error}>{error}</div> : data ? (
+        <img alt={source.label} src={data} onError={() => setError('This image could not be decoded.')} style={{ maxWidth: '100%', maxHeight: 'calc(100% - 48px)', objectFit: 'contain' }} />
+      ) : <span role="status">Loading image…</span>}
+      {images.length > 1 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <Button disabled={index === 0} onClick={() => setIndex(index - 1)} size="sm" variant="outline">Previous image</Button>
+          <span>{index + 1} / {images.length}</span>
+          <Button disabled={index === images.length - 1} onClick={() => setIndex(index + 1)} size="sm" variant="outline">Next image</Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AssetViewer(props: Parameters<typeof ModelViewer>[0]) {
+  const { source, rest } = props
+  if (source.kind === 'remote' && source.expired) {
+    return <div role="status" style={V.empty}>This asset’s download link has expired. Open a locally saved copy if you have one.</div>
+  }
+  return source.kind === 'remote' && source.media === 'image'
+    ? <ImageViewer key={source.url} rest={rest} source={source} />
+    : <ModelViewer {...props} />
+}
+
+function AssetThumbnail({ asset }: { asset: RemoteModel }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [asset.thumbnail_url])
+  return asset.thumbnail_url && !asset.expired && !failed
+    ? <img alt="" style={V.thumb} src={asset.thumbnail_url} onError={() => setFailed(true)} />
+    : <Codicon name={asset.kind === 'image' ? 'file-media' : 'symbol-misc'} />
 }
 
 /** One live viewport. Mounting creates a WebGL context; unmounting frees it. */
@@ -773,6 +814,7 @@ export function Gallery({
   const [error, setError] = useState<null | string>(null)
   const [configured, setConfigured] = useState(true)
   const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<'all' | 'image' | 'model'>('all')
   const q = query.trim().toLowerCase()
   const matches = (...texts: Array<null | string | undefined>) => !q || texts.some(t => (t ?? '').toLowerCase().includes(q))
 
@@ -797,10 +839,17 @@ export function Gallery({
     }
   }, [initial])
 
+  useEffect(() => {
+    if (!selTask || !remote) return
+    const asset = remote.find(row => row.task_id === selTask.task)
+    if (asset) setSelected(sourceForAsset(asset))
+  }, [remote, selTask])
+
   const pickTask = (task: string) => {
-    const r = remote?.find(m => m.task_id === task && m.glb_url)
-    if (r?.glb_url) {
-      setSelected({ kind: 'remote', url: r.glb_url, label: r.prompt || r.task_type })
+    const r = remote?.find(m => m.task_id === task)
+    const source = r && sourceForAsset(r)
+    if (source) {
+      setSelected(source)
       setSelTask({ task, title: r.prompt || r.task_type })
       return
     }
@@ -820,7 +869,7 @@ export function Gallery({
     <div data-meshy-gallery style={V.gallery}>
       <aside style={V.list}>
         <div style={V.listHead}>
-          <span>Meshy models</span>
+          <span>Meshy assets</span>
           <span>
             <Button aria-label="Meshy settings" onClick={onOpenSettings} size="icon" title="Meshy settings" variant="ghost">
               <Codicon name="settings-gear" />
@@ -839,6 +888,13 @@ export function Gallery({
           type="search"
           value={query}
         />
+        <div role="group" aria-label="Asset type" style={{ display: 'flex', gap: 4, padding: '6px 0' }}>
+          {(['all', 'image', 'model'] as const).map(kind => (
+            <Button key={kind} aria-pressed={filter === kind} onClick={() => setFilter(kind)} size="sm" variant={filter === kind ? 'outline' : 'ghost'}>
+              {kind === 'all' ? 'All' : kind === 'image' ? 'Images' : 'Models'}
+            </Button>
+          ))}
+        </div>
         {!configured && (
           <div style={V.hint}>
             Add your Meshy API key to list your generations.{' '}
@@ -848,8 +904,8 @@ export function Gallery({
           </div>
         )}
         {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
-        {local && local.length > 0 && <div style={V.section}>On this machine</div>}
-        {local?.filter(f => matches(f.prompt, f.name, f.project)).map(f => {
+        {filter !== 'image' && local && local.length > 0 && <div style={V.section}>On this machine</div>}
+        {local?.filter(f => matchesKind(filter, 'model') && matches(f.prompt, f.name, f.project)).map(f => {
           const s: Source = { kind: 'file', path: f.path, ...(f.task ? { task: f.task } : {}) }
           const pickLocal = () => {
             setSelected(s)
@@ -870,8 +926,8 @@ export function Gallery({
         })}
         {remote && remote.length > 0 && <div style={V.section}>Recent generations</div>}
         {remote === null && configured && !error && <div style={V.hint}>Loading…</div>}
-        {remote?.filter(m => matches(m.prompt, m.task_type)).map(m => {
-          const s: null | Source = m.glb_url ? { kind: 'remote', url: m.glb_url, label: m.prompt || m.task_type } : null
+        {remote?.filter(m => matchesKind(filter, m.kind) && matches(m.prompt, m.task_type)).map(m => {
+          const s = sourceForAsset(m)
           return (
             <button
               data-meshy-item style={s && isSel(s) ? { ...V.item, ...V.itemOn } : V.item}
@@ -886,12 +942,13 @@ export function Gallery({
               title={m.prompt ? `${m.prompt}\n${m.task_id}` : m.task_id}
               type="button"
             >
-              {m.thumbnail_url ? <img alt="" style={V.thumb} src={m.thumbnail_url} /> : <Codicon name="symbol-misc" />}
+              <AssetThumbnail asset={m} />
               <span style={V.itemText}>
                 <span style={V.ellipsis}>{m.prompt || m.task_type}</span>
                 <small style={V.itemSub}>
                   {m.task_type}
                   {typeof m.credits === 'number' ? ` · ${m.credits} credits` : ''} · {new Date(m.created_at).toLocaleDateString()}
+                  {m.expired ? m.local_path ? ' · Local copy' : ' · Expired' : ''}
                 </small>
               </span>
             </button>
@@ -903,8 +960,8 @@ export function Gallery({
           <div data-meshy-gallery-head style={V.mainHead}>
             <span style={V.cardTitle}>{selected.kind === 'file' ? selected.path.split(/[\\/]/).pop() : selected.label}</span>
             <span style={V.spacer} />
-            {selTask && <ActionMenu key={`a:${selTask.task}`} rest={rest} task={selTask.task} />}
-            {selTask && (
+            {selTask && !(selected.kind === 'remote' && (selected.media === 'image' || selected.expired)) && <ActionMenu key={`a:${selTask.task}`} rest={rest} task={selTask.task} />}
+            {selTask && !(selected.kind === 'remote' && (selected.media === 'image' || selected.expired)) && (
               <FormatMenu
                 beside={selected.kind === 'file' ? selected.path : undefined}
                 key={`${selTask.task}:${selected.kind === 'file' ? selected.path : ''}`}
@@ -917,14 +974,14 @@ export function Gallery({
         )}
         {selected ? (
           <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-            <ModelViewer autoRotate={autoRotate} height="100%" key={String(autoRotate)} os={os} rest={rest} source={selected} />
+            <AssetViewer autoRotate={autoRotate} height="100%" key={String(autoRotate)} os={os} rest={rest} source={selected} />
           </div>
         ) : null}
         {selected && selTask && <MadeFrom key={`m:${selTask.task}`} onPick={pickTask} rest={rest} task={selTask.task} />}
         {selected ? null : (
           <div style={V.empty}>
             <Codicon name="symbol-misc" size={32} />
-            <span>Pick a model to view it in 3D.</span>
+            <span>Pick an image or a model to preview.</span>
           </div>
         )}
       </section>

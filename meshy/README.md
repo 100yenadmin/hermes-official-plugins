@@ -117,6 +117,18 @@ you get, rendered with stock three.js:
   show what Meshy and the download folder still know.
 - **Credit chip** in the status bar, refreshed after every Meshy tool call.
 
+The gallery includes generated images as well as 3D models. Use **All / Images / Models** to
+filter the list; image tasks open a 2D preview with navigation between generated views, while
+3D tasks retain the interactive model viewer. `image-to-3d` denotes a 3D model, not an image.
+Expired remote assets are labelled explicitly and do not load broken thumbnails or report an
+invalid API key. An indexed local model copy is preferred when available. CDN downloads can
+also become unavailable before the gallery refreshes; those errors explain that the asset or
+signed link is unavailable instead of suggesting that credentials should be replaced.
+
+Offline regression checks: `python -m pytest tests/test_plugin_api.py -q`, and (Node 22.6+)
+`npm ci && npm run test:gallery && npm run typecheck`. Rebuild the committed Desktop bundle
+with `npm run build` after changing the renderer.
+
 The renderer never reads files or holds the key. `dashboard/plugin_api.py` (mounted at
 `/api/plugins/meshy/` once the plugin is enabled) answers the viewer: the balance and recent tasks
 from Meshy's API, `.glb`/`.gltf`/image bytes from your home directory or the plugin's output folder

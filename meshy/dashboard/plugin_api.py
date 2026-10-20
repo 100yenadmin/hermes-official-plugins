@@ -53,6 +53,8 @@ _MODEL_ENDPOINTS = (("text-to-3d", "/openapi/v2/text-to-3d"), ("image-to-3d", "/
                     ("multi-image-to-3d", "/openapi/v1/multi-image-to-3d"), ("remesh", "/openapi/v1/remesh"),
                     ("retexture", "/openapi/v1/retexture"), ("rigging", "/openapi/v1/rigging"),
                     ("animation", "/openapi/v1/animations"))
+_IMAGE_ENDPOINTS = (("text-to-image", "/openapi/v1/text-to-image"),
+                    ("image-to-image", "/openapi/v1/image-to-image"))
 
 
 # Defaults mirror plugin.json ``extensions.com.nousresearch.hermes.config_schema``; Settings ▸ Plugins
@@ -91,6 +93,16 @@ def _meshy_error(exc: Exception) -> HTTPException:
         detail = "Meshy rejected the API key" if exc.code in (401, 403) else f"Meshy API error {exc.code}"
         return HTTPException(status_code=502, detail=detail)
     return HTTPException(status_code=502, detail="Meshy API unreachable")
+
+
+def _asset_error(exc: Exception) -> HTTPException:
+    """CDN requests do not carry the API key: a denied signed URL is not an auth failure."""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (401, 403, 404, 410):
+            return HTTPException(status_code=410, detail="This asset is unavailable or its download link has expired. "
+                                 "Open a locally saved copy if you have one.")
+        return HTTPException(status_code=502, detail=f"Meshy asset download failed (HTTP {exc.code})")
+    return HTTPException(status_code=502, detail="Meshy asset download unreachable")
 
 
 def _data_root() -> Path:
@@ -163,7 +175,7 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
     if not key:
         return {"configured": False, "models": []}
     merged: list[dict] = []
-    for task_type, path in _MODEL_ENDPOINTS:
+    for task_type, path in (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS):
         try:
             rows = _meshy_get(f"{path}?page_size={limit}&sort_by=-created_at", key)
         except urllib.error.HTTPError as exc:
@@ -179,15 +191,23 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
             # A rig's bind-pose character sits still; its walking clip shows what the rig is for.
             clips = [u for k, u in sorted(urls.items()) if k.startswith("glb:")]
             glb = (clips[-1] if clips and task_type == "rigging" else None) or urls.get("glb") or next(iter(clips), None)
+            images = [u for u in (row.get("image_urls") or []) if isinstance(u, str) and u]
+            expires = row.get("expires_at")
             merged.append({"task_id": row.get("id"), "task_type": task_type, "prompt": row.get("prompt") or _clip_label(urls),
                            "created_at": row.get("created_at"), "thumbnail_url": row.get("thumbnail_url"),
-                           "glb_url": glb})
+                           "glb_url": glb, "kind": "image" if task_type in {t for t, _ in _IMAGE_ENDPOINTS} else "model",
+                           "image_urls": images, "expires_at": expires,
+                           "expired": isinstance(expires, (int, float)) and 0 < expires <= time.time() * 1000,
+                           "credits": row.get("consumed_credits")})
     merged.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
     merged = merged[:limit]
     credits = _credits_by_task(key)
     prov = _load_prov()
+    saved = {f["task"]: f["path"] for f in local(limit=200)["files"] if f.get("task")}
     for m in merged:
-        m["credits"] = credits.get(m["task_id"])
+        if m["credits"] is None:
+            m["credits"] = credits.get(m["task_id"])
+        m["local_path"] = saved.get(m["task_id"]) if m["kind"] == "model" else None
         m["prompt"] = _label_for(m["task_id"], prov) or m["prompt"]
     return {"configured": True, "models": merged}
 
@@ -414,11 +434,11 @@ def _format_sort_key(key: str) -> tuple[int, str]:
     return (_FORMAT_ORDER.index(base) if base in _FORMAT_ORDER else 99, clip or "")
 
 
-def _task(task_id: str, key: str) -> dict:
+def _task(task_id: str, key: str, *, include_images: bool = False) -> dict:
     """The task record (with signed ``model_urls``), found on whichever generation endpoint owns it."""
     if not _TASK_ID.match(task_id or ""):
         raise HTTPException(status_code=400, detail="task id required")
-    for _task_type, path in _MODEL_ENDPOINTS:
+    for _task_type, path in (*_MODEL_ENDPOINTS, *(_IMAGE_ENDPOINTS if include_images else ())):
         try:
             row = _meshy_get(f"{path}/{task_id}", key)
         except urllib.error.HTTPError as exc:
@@ -462,7 +482,7 @@ def _download(url: str, dest: Path) -> None:
                 out.write(chunk)
         part.replace(dest)
     except (urllib.error.URLError, OSError) as exc:
-        raise _meshy_error(exc) from exc
+        raise _asset_error(exc) from exc
     finally:
         part.unlink(missing_ok=True)
 
@@ -556,7 +576,7 @@ def remote(url: str):
         with urllib.request.urlopen(url, timeout=60) as resp:
             data = resp.read(_MAX_FILE_BYTES + 1)
     except (urllib.error.URLError, OSError) as exc:
-        raise _meshy_error(exc) from exc
+        raise _asset_error(exc) from exc
     if len(data) > _MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail="asset too large for the viewer")
     _log.debug("meshy remote asset %s: %d bytes in %.1fs", parts.path, len(data), time.monotonic() - started)
@@ -778,7 +798,7 @@ def details(task: str):
     row: dict = {}
     if key:
         try:
-            row = _task(task, key)
+            row = _task(task, key, include_images=True)
         except HTTPException as exc:
             if exc.status_code in (401, 403):
                 raise

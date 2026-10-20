@@ -10,6 +10,7 @@ import importlib.util
 import json
 import os
 import urllib.request
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -95,6 +96,57 @@ def test_remote_fetches_only_https_assets_meshy_ai(api):
     assert _status(api.remote, "https://assets.meshy.ai/x/secrets.env") == 415
 
 
+@pytest.mark.parametrize("status", [401, 403, 404, 410, 429, 503])
+@pytest.mark.parametrize("operation", ["preview", "download"])
+def test_asset_failures_never_claim_the_api_key_was_rejected(api, monkeypatch, status, operation):
+    url = "https://assets.meshy.ai/model.glb"
+
+    def fail(*_args, **_kwargs):
+        raise urllib.error.HTTPError(url, status, "asset error", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail)
+    with pytest.raises(HTTPException) as err:
+        if operation == "preview":
+            api.remote(url)
+        else:
+            api._download(url, api.data / "model.glb")
+    assert "key" not in err.value.detail.lower()
+    assert err.value.status_code == (410 if status in (401, 403, 404, 410) else 502)
+    if status == 403:
+        # API authentication remains a different failure from a denied CDN signature.
+        assert "API key" in api._meshy_error(urllib.error.HTTPError(url, status, "", {}, None)).detail
+
+
+def test_gallery_includes_image_sets_expiry_and_local_fallback(api, monkeypatch):
+    image_id = "01a15965-4a40-718b-8912-4046ede4837f"
+    image2_id = "01a15965-4a40-718b-8912-4046ede48380"
+    local = api.data / "ship.glb"
+    local.write_bytes(b"local copy")
+    api.file(str(local), task=_TASK)
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api.time, "time", lambda: 1000)
+    records = {
+        "/openapi/v1/image-to-3d": [{"id": _TASK, "status": "SUCCEEDED", "created_at": 100,
+                                    "expires_at": 999000, "consumed_credits": 15,
+                                    "model_urls": {"glb": "https://assets.meshy.ai/ship.glb"}}],
+        "/openapi/v1/text-to-image": [{"id": image_id, "status": "SUCCEEDED", "created_at": 200,
+                                      "expires_at": 1100000, "consumed_credits": 3,
+                                      "image_urls": ["https://assets.meshy.ai/front.png", "https://assets.meshy.ai/back.png"]}],
+        "/openapi/v1/image-to-image": [{"id": image2_id, "status": "SUCCEEDED", "created_at": 300,
+                                       "expires_at": 0, "image_urls": ["https://assets.meshy.ai/edit.png"]}],
+    }
+    monkeypatch.setattr(api, "_meshy_get", lambda path, *_a, **_k: records.get(path.split("?")[0], []))
+    result = api.models(limit=10)["models"]
+    assert [r["task_id"] for r in result] == [image2_id, image_id, _TASK]
+    model, image, edited = result[2], result[1], result[0]
+    assert model["kind"] == "model" and model["expired"]
+    assert Path(model["local_path"]) == local.resolve()
+    assert model["credits"] == 15  # available without the team-only Usage API
+    assert image["kind"] == "image" and not image["expired"]
+    assert len(image["image_urls"]) == 2 and image["glb_url"] is None
+    assert not edited["expired"]  # zero/absent expiry is not evidence of expiration
+
+
 def test_asset_index_records_only_allowed_model_paths_and_never_urls(api):
     project = Path.home() / "projects" / "demo" / "ship.glb"
     project.parent.mkdir(parents=True)
@@ -156,3 +208,13 @@ def test_provenance_keeps_what_made_a_model_and_never_a_signed_url(api, monkeypa
     assert [p["task_id"] for p in d["parents"]] == [parent]
     assert [c["task_id"] for c in api.details(parent)["children"]] == [child]
     assert api.details(parent)["session_id"] == "sess-1"
+
+
+def test_image_details_recovers_provider_prompt_without_local_provenance(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    def get(path, *_a, **_k):
+        if path == f"/openapi/v1/text-to-image/{_TASK}":
+            return {"id": _TASK, "type": "text-to-image", "prompt": "low poly mech concept"}
+        raise urllib.error.HTTPError(path, 404, "missing", {}, None)
+    monkeypatch.setattr(api, "_meshy_get", get)
+    assert api.details(_TASK)["prompt"] == "low poly mech concept"
