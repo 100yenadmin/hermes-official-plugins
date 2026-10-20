@@ -53,7 +53,9 @@ MEDIA:/home/me/.hermes/cache/videos/meshy/knight_walking-walking_man.mp4
 ```
 
 The gateway strips the `MEDIA:` line and uploads the file natively (`.mp4` goes to the
-platform's video send). Use the exact `out` path from the JSON; never invent one.
+platform's video send). Use the exact `out` path from the JSON; never invent one. Put the
+path ONLY on the `MEDIA:` line: the gateway also uploads any bare absolute file path it finds
+in a reply, so repeating it ("The file is at /...mp4") sends the video twice.
 
 Upload limits: Discord 10 MB without Nitro (the 8 MB default leaves headroom), Telegram
 bots 50 MB, Slack 1 GB, WhatsApp 16 MB, Signal 100 MB. For long clips or `--size 1080`, keep
