@@ -73,8 +73,9 @@ user's goal before the first paid call.
 
 ## Procedure
 
-1. **Pick the scenario** from [workflows](references/workflows.md) and the format from
-   [Pick the right format](#pick-the-right-format) before generating: `target_formats` is
+1. **Pick the scenario** from [workflows](references/workflows.md), the format from
+   [Pick the right format](#pick-the-right-format) and the detail level from
+   [Pick the detail level](#pick-the-detail-level) before generating: `target_formats` is
    fixed at creation, and `3mf` exists only when requested (or via `meshy_convert`).
 2. **Confirm cost before every credit-spending call.** Name the tool, the `ai_model` where
    there is a choice, the credit cost from [tools](references/tools.md) and any surcharge (8K
@@ -91,8 +92,9 @@ user's goal before the first paid call.
    `formats`), the one the use case needs, not always GLB. Pass `save_to` as an ABSOLUTE path in
    the user's project or wherever they asked. Without it, files land under the plugin's data
    directory (`meshy_output/`), not the current project. Report every saved path and the file size.
-7. **Report** the result: files and paths, formats, credits spent, and the `task_id` for
-   follow-ups (refine, rig, convert reuse it instead of regenerating).
+7. **Report** the result: files and paths, formats, credits spent, the ACTUAL triangle count
+   (see [Pick the detail level](#pick-the-detail-level)) and the `task_id` for follow-ups
+   (refine, rig, convert reuse it instead of regenerating).
 7b. **Offer the optional Blender copy, before step 8** (local, no additional Meshy credits) after a `.glb` download or
    when showing a local Meshy model. First run `hermes config get plugins.entries.meshy.settings.blender_handoff`
    ("not set" means `ask`). Unless it is `never`, find Blender: `hermes config get plugins.entries.meshy.settings.blender_path` first, then PATH and the per-OS folders in [blender](references/blender.md) §2.
@@ -114,6 +116,26 @@ user's goal before the first paid call.
    card has no menu. Other clients show the line as text, so write the path in prose as well.
    To show a finished task the user has not downloaded yet, download it first (free) and use
    `path=`; a `url=` card with a signed Meshy link does not render in current Desktop builds.
+
+## Pick the detail level
+
+Unless the user already said, ask where the model is going, not for a triangle number. First run
+`hermes config get plugins.entries.meshy.settings.default_detail` ("not set" means `ask`; `game` or
+`detailed` picks that route without asking, but the user's own words win).
+
+| Where it goes | Route |
+|---|---|
+| Game asset, prop, character, mobile, background | Smart Topology: `model_type: "smart-topology"`, `ai_model: "meshy-t2.5"`, `target_polycount` 15000 (lower for mobile/background). Text: 5 preview (+10 refine for textures); image: 15 textured |
+| Hero, close-up, renders, cinematics, 3D printing | Standard full detail (`latest`, no remesh) |
+| Detail AND a triangle budget | Standard, then reduce: `meshy_remesh` (5 credits) or the Blender optimized copy (no additional Meshy credits) |
+
+Put the choice in one line inside the cost confirmation, e.g. "Smart Topology at 15k triangles,
+5 credits for the untextured preview; say if you want full detail instead." Ask for a number only if the user cares or the use
+is unclear. Polycount never changes the price. Smart Topology is triangle-only (no quads), keeps
+textured characters and props close to Standard at game distance, but smooths away engraving,
+filigree and crisp bevels, can drop thin hanging parts (cloth tails) and returns several separate,
+partly open parts. After generation, report the ACTUAL triangle count (it differs from the target),
+never the requested one: details in [workflows](references/workflows.md) Scenario K.
 
 ## Pick the right format
 
