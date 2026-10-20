@@ -36,11 +36,10 @@ export interface MeshySettings {
   inline_viewer: boolean
   auto_rotate: boolean
   gallery_limit: number
-  auto_save: boolean
 }
 
 /** Mirrors plugin.json's config_schema defaults until the backend answers. */
-export const DEFAULT_SETTINGS: MeshySettings = { show_credits: true, inline_viewer: true, auto_rotate: true, gallery_limit: 24, auto_save: true }
+export const DEFAULT_SETTINGS: MeshySettings = { show_credits: true, inline_viewer: true, auto_rotate: true, gallery_limit: 24 }
 
 export interface Balance {
   configured: boolean
@@ -81,7 +80,7 @@ const V = {
   spacer: { flex: 1 },
   poster: { width: '100%', height: 160, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6, borderRadius: 8, border: '1px dashed var(--ui-stroke-secondary)', background: 'transparent', color: 'var(--ui-text-secondary)', cursor: 'pointer', fontSize: 13 },
   gallery: { display: 'flex', height: '100%', minHeight: 0 },
-  list: { width: 280, flexShrink: 0, overflowY: 'auto', borderRight: '1px solid var(--ui-stroke-secondary)', padding: 6 },
+  list: { width: 280, flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRight: '1px solid var(--ui-stroke-secondary)', padding: 6 },
   listHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 4px 6px', fontWeight: 600, fontSize: 13 },
   section: { padding: '8px 6px 4px', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4, color: 'var(--ui-text-quaternary)' },
   hint: { padding: '6px', fontSize: 12, color: 'var(--ui-text-tertiary)' },
@@ -423,7 +422,7 @@ interface FormatRow {
 
 /** "Download ▾": one row per file type Meshy produced for this task. Picking one saves it beside the
  *  model on screen (no credits: Meshy made every listed format at generation time) and reveals it. */
-export function FormatMenu({ rest, os, task, beside }: { rest: Rest; os: Os; task: string; beside?: string }) {
+export function FormatMenu({ rest, os, task, beside, onSaved }: { rest: Rest; os: Os; task: string; beside?: string; onSaved?: () => void }) {
   const [rows, setRows] = useState<FormatRow[] | null>(null)
   const [error, setError] = useState<null | string>(null)
   const [busy, setBusy] = useState<null | string>(null)
@@ -447,6 +446,7 @@ export function FormatMenu({ rest, os, task, beside }: { rest: Rest; os: Os; tas
         setRows(prev => prev?.map(row => (row.format === fmt ? { ...row, saved: r.path } : row)) ?? prev)
         host.notify({ kind: 'success', message: `Saved ${r.path.split(/[\\/]/).pop()}` })
         void os.revealPath(r.path)
+        onSaved?.()
       })
       .catch((err: unknown) => host.notify({ kind: 'error', message: `Meshy ${fmt.toUpperCase()}: ${errorText(err)}` }))
       .finally(() => setBusy(null))
@@ -803,22 +803,19 @@ export function Gallery({
   initial,
   autoRotate,
   onOpenSettings,
-  storage,
-  onRetrySave
 }: {
   rest: Rest
   os: Os
   initial: null | Source
   autoRotate: boolean
   onOpenSettings: () => void
-  storage?: StorageStatus | null
-  onRetrySave?: () => void
 }) {
   const [selected, setSelected] = useState<null | Source>(initial)
   // The Meshy task behind the selection (a generation's id, or a local file's recorded id): drives Download.
   const [selTask, setSelTask] = useState<null | { task: string; title: string }>(null)
   const [remote, setRemote] = useState<RemoteModel[] | null>(null)
   const [local, setLocal] = useState<LocalFile[] | null>(null)
+  const [storage, setStorage] = useState<StorageStatus | null>(null)
   const [error, setError] = useState<null | string>(null)
   const [configured, setConfigured] = useState(true)
   const [query, setQuery] = useState('')
@@ -834,12 +831,13 @@ export function Gallery({
         setRemote(r.models)
       })
       .catch((e: unknown) => setError(errorText(e)))
+    rest<StorageStatus>('storage').then(setStorage).catch(() => setStorage(null))
     rest<{ files: LocalFile[] }>('local')
       .then(r => setLocal(r.files))
       .catch(() => setLocal([]))
   }, [rest])
 
-  useEffect(refresh, [refresh, storage])
+  useEffect(refresh, [refresh])
   useEffect(() => {
     if (initial) {
       setSelected(initial)
@@ -885,6 +883,7 @@ export function Gallery({
   return (
     <div data-meshy-gallery style={V.gallery}>
       <aside style={V.list}>
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         <div style={V.listHead}>
           <span>Meshy assets</span>
           <span>
@@ -921,14 +920,6 @@ export function Gallery({
           </div>
         )}
         {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
-        <div role="note" style={V.hint}>
-          <div>{storage ? `Auto-save ${storage.enabled ? 'on' : 'off'}` : 'Checking auto-save…'} · <Button onClick={onOpenSettings} size="sm" variant="ghost">Settings</Button></div>
-          {storage && <div>{fmtBytes(storage.bytes)} in {storage.files} known local files · <Button onClick={() => void os.revealPath(storage.directory)} size="sm" variant="ghost">Show folder</Button></div>}
-          <div>New assets are saved while Desktop is running when auto-save is on. Remote assets normally expire after 3 days; expired unsaved entries are hidden.</div>
-          {storage?.error && <div role="alert" style={V.error}>{storage.error}</div>}
-          {!!storage?.failures.length && <div role="alert" style={V.error}>{storage.failures.length} asset save(s) failed. {storage.failures[0].error}</div>}
-          {(storage?.error || !!storage?.failures.length) && <Button onClick={onRetrySave} size="sm" variant="outline">Retry saving</Button>}
-        </div>
         {local && local.some(f => matchesKind(filter, f.kind || 'model')) && <div style={V.section}>On this machine</div>}
         {local?.filter(f => matchesKind(filter, f.kind || 'model') && matches(f.prompt, f.name, f.project)).map(f => {
           const s: Source = { kind: 'file', path: f.path, media: f.kind || 'model', images: f.images, label: f.prompt || f.name, ...(f.task ? { task: f.task } : {}) }
@@ -979,6 +970,14 @@ export function Gallery({
             </button>
           )
         })}
+        </div>
+        <div role="note" style={{ ...V.hint, borderTop: '1px solid var(--ui-stroke-secondary)', marginTop: 6 }}>
+          {storage && <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span title="Includes Meshy downloads and known project copies">{fmtBytes(storage.bytes)} · {storage.files} local files</span>
+            <Button onClick={() => void os.revealPath(storage.directory)} size="sm" variant="ghost">Show folder</Button>
+          </div>}
+          <div title="Viewing does not save an asset. Use Download or ask Hermes to save it. Expired entries without local copies are hidden.">Download to keep assets · API links normally expire after 3 days.</div>
+        </div>
       </aside>
       <section style={V.main}>
         {selected && (
@@ -988,6 +987,7 @@ export function Gallery({
             {selTask && !(selected.media === 'image' || (selected.kind === 'remote' && selected.expired)) && <ActionMenu key={`a:${selTask.task}`} rest={rest} task={selTask.task} />}
             {selTask && !(selected.media === 'image' || (selected.kind === 'remote' && selected.expired)) && (
               <FormatMenu
+                onSaved={refresh}
                 beside={selected.kind === 'file' ? selected.path : undefined}
                 key={`${selTask.task}:${selected.kind === 'file' ? selected.path : ''}`}
                 os={os}

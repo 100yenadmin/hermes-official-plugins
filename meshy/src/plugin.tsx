@@ -1,4 +1,3 @@
-import type { StorageStatus } from './gallery.ts'
 /**
  * Meshy for Hermes Desktop: view what the Meshy MCP server makes without leaving the app.
  *
@@ -30,28 +29,6 @@ const plugin: HermesPlugin = {
   name: 'Meshy 3D',
   description: 'View Meshy 3D models inline in chat and in a gallery tab, with your credit balance in the status bar.',
   register(ctx) {
-    let archive: StorageStatus | null = null
-    const archiveListeners = new Set<(s: StorageStatus | null) => void>()
-    let saving = false
-    let queuedSync = false
-    let disposed = false
-    const syncAssets = async () => {
-      if (disposed) return
-      if (saving) { queuedSync = true; return }
-      saving = true
-      try {
-        archive = await ctx.rest<StorageStatus>('autosave', { method: 'POST', body: {}, timeoutMs: 600_000 })
-      } catch {
-        const current = await ctx.rest<StorageStatus>('storage').catch(() => null)
-        archive = current ? { ...current, error: 'Auto-save could not finish. Retry to keep new assets locally.' } : null
-      } finally {
-        saving = false
-        if (!disposed) archiveListeners.forEach(fn => fn(archive))
-        if (queuedSync && !disposed) { queuedSync = false; void syncAssets() }
-      }
-    }
-    const archiveTimer = setInterval(() => void syncAssets(), 60_000)
-    void syncAssets()
     let balance: Balance | null = null
     let settings: MeshySettings = DEFAULT_SETTINGS
     const listeners = new Set<(b: Balance | null) => void>()
@@ -85,11 +62,6 @@ const plugin: HermesPlugin = {
     }
 
     function GalleryHost() {
-      const [stored, setStored] = useState<StorageStatus | null>(archive)
-      useEffect(() => {
-        archiveListeners.add(setStored)
-        return () => { archiveListeners.delete(setStored) }
-      }, [])
       const [source, setSource] = useState<null | Source>(pendingSource)
       useEffect(() => {
         galleryListeners.add(setSource)
@@ -100,8 +72,6 @@ const plugin: HermesPlugin = {
       const prefs = useSettings()
       return (
         <Gallery
-          storage={stored}
-          onRetrySave={() => void syncAssets()}
           autoRotate={prefs.auto_rotate}
           initial={source}
           onOpenSettings={() => host.navigate(SETTINGS_HREF)}
@@ -130,7 +100,7 @@ const plugin: HermesPlugin = {
 
     const progressListeners = new Set<(s: ProgressState) => void>()
     // A finished task changes the balance (credits are charged at creation, refunded on failure).
-    const progress = createProgressTracker(ctx, s => progressListeners.forEach(fn => fn(s)), () => { refreshBalance(); void syncAssets() })
+    const progress = createProgressTracker(ctx, s => progressListeners.forEach(fn => fn(s)), refreshBalance)
 
     function Chip() {
       const prefs = useSettings()
@@ -180,11 +150,8 @@ const plugin: HermesPlugin = {
     }
 
     // Saved from Settings ▸ Plugins ▸ Meshy (a new API key, a toggle): re-read and apply live.
-    ctx.onEvent('plugin.meshy.settings.changed', () => { refreshBalance(); void syncAssets() })
+    ctx.onEvent('plugin.meshy.settings.changed', () => refreshBalance())
     ctx.onDispose(() => {
-      disposed = true
-      clearInterval(archiveTimer)
-      archiveListeners.clear()
       closeWorkspace?.()
       progress.dispose()
       progressListeners.clear()

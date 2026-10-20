@@ -33,10 +33,7 @@ export function matchesKind(filter: 'all' | 'image' | 'model', kind: 'image' | '
 }
 
 export interface StorageStatus {
-  enabled: boolean
   bytes: number
   files: number
   directory: string
-  failures: { task: string; error: string }[]
-  error?: string
 }

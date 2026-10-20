@@ -33,7 +33,7 @@
           "type": "secret",
           "env": "MESHY_API_KEY",
           "label": "Meshy API key",
-          "description": "From meshy.ai \u2192 API. Saving it restarts the Meshy tools with the new key."
+          "description": "From meshy.ai → API. Saving it restarts the Meshy tools with the new key."
         },
         "show_credits": {
           "type": "bool",
@@ -61,23 +61,14 @@
         },
         "blender_handoff": {
           "type": "str",
-          "choices": [
-            "ask",
-            "always",
-            "never"
-          ],
+          "choices": ["ask", "always", "never"],
           "default": "ask",
           "label": "Blender optimized copy",
           "description": "When Blender is installed, offer an optimized copy for game testing after a download (packed textures, optional triangle budget, new .blend + GLB/FBX). Runs locally, no additional Meshy credits. Ask offers it once."
         },
         "default_detail": {
           "type": "str",
-          "choices": [
-            "ask",
-            "game",
-            "mobile",
-            "detailed"
-          ],
+          "choices": ["ask", "game", "mobile", "detailed"],
           "default": "ask",
           "label": "Default detail level",
           "description": "How the Meshy skill picks mesh detail when you do not say. Ask asks what the asset is and where it goes; game uses Smart Topology sized per asset (characters ~15k, weapons ~3k, props ~1.5k triangles); mobile halves those; detailed uses Standard full detail (renders, close-ups, printing)."
@@ -87,12 +78,6 @@
           "default": "",
           "label": "Blender executable",
           "description": "Full path to Blender 4.2 or newer. Empty finds it on PATH or in the usual install folders."
-        },
-        "auto_save": {
-          "type": "bool",
-          "default": true,
-          "label": "Automatically save new assets",
-          "description": "Desktop: save new completed images and GLB models (embedded textures and animation clips) while Desktop is running. Keeps local copies after API links expire. Does not download historical generations. Turning off keeps existing files. Storage usage and folder are shown in the Meshy gallery."
         }
       }
     }

@@ -180,26 +180,13 @@ The MCP server and the workflow rules the skill carries are by Meshy AI
 Copyright (c) 2026 Meshy AI). Meshy is a product of Meshy AI. Packaging and skill: Nous
 Research, MIT.
 
-Remote API assets normally expire after three days. Auto-save preserves new supported assets while Desktop is running; the Desktop Download menu and agent download workflow can also save models. Expired remote entries without a local copy are hidden. The gallery deduplicates tasks returned by multiple API endpoints.
+Remote API assets normally expire after three days. Viewing does not save an asset:
+use the Desktop Download menu to choose the model format, or ask Hermes to save assets into your
+project. Expired remote entries without local copies are hidden. The gallery deduplicates tasks
+returned by multiple API endpoints.
 
-### Auto-save and local storage
-
-Settings → Plugins → Meshy → **Automatically save new assets** is on by default.
-While the Meshy Desktop plugin is loaded, it checks once a minute and after observed tasks finish.
-It saves newly completed images (all views) and GLB models (embedded textures and every GLB animation
-variant). Other formats remain available through Download. No generation credits are spent.
-
-The first sync establishes the starting time; it does not download your historical gallery.
-Turning auto-save off preserves saved files. Re-enabling starts a new window. Recent tasks finished
-while Desktop was closed can be saved on reopening, if they finished after that starting time and
-are still available. Discovery checks the newest 60 tasks per endpoint and saves up to three tasks
-per pass. Keep Desktop open while a large backlog is being saved. This is not a background archival
-service, and files that expired while Desktop was closed cannot be recovered by this feature.
-
-The gallery shows the current setting, a link to settings, known local file count and size, the
-managed folder, and failed saves with Retry. Local files are on the machine running the Hermes
-backend. Storage totals include `saved-assets/`, MCP `meshy_output/` files (including companions),
-and indexed project models, deduplicated by resolved path; they do not discover arbitrary copies
-elsewhere on disk. Saved image sets remain available from the local gallery without an API key.
-Files live under the profile's plugin-data directory; turning off or updating the plugin does not
-delete them. Auto-save stores GLB rather than every redundant export format to limit disk use.
+The compact gallery footer shows known local file count and storage size, plus a folder link.
+Totals include plugin-managed files, MCP downloads (including companions), and indexed project
+models, deduplicated by resolved path. Arbitrary copies elsewhere on disk are not discovered.
+Previously saved image sets and model variants remain accessible locally, including files saved by
+the earlier development build. There are no automatic asset downloads or auto-save settings.
