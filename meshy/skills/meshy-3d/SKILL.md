@@ -48,8 +48,11 @@ The server is marked untrusted, so Hermes asks the user before every call that i
 read-only (every create, download, cancel). Read-only calls (balance, status, lists, slicer
 detection) run without a prompt. When a call comes back "The user did not approve", stop:
 the user declined, or the run is unattended (cron, `chat -q`, a gateway with no approver)
-and cannot approve. Do not retry, inspect config or look for a workaround; tell the user the
-exact call you would make and its cost, and that an interactive session can approve it.
+and cannot approve. Do not retry, inspect config or look for a workaround, and never suggest
+changing the server's trust, editing config or "always allow" as the fix; tell the user the
+exact call you would make and its cost, and that an interactive session (Desktop, CLI, or a
+chat gateway that shows approval buttons) can approve it. For a finished task, the signed link
+from `meshy_get_task_status` (read-only, no prompt) is the way to hand over the file meanwhile.
 
 ## Quick Reference
 
@@ -107,7 +110,8 @@ Every finished model task already holds signed links to ALL its formats:
 `meshy_get_task_status` returns them in `structuredContent.model_urls` (a refined or textured
 model: `glb, fbx, obj` + `mtl`, `usdz, stl`; a text-to-3d preview: often `glb` only) plus
 `thumbnail_url`; Hermes passes that JSON to you. Links expire 3 days after the task finished
-(`expires_at`); saved files are permanent. Ask what the file is for, then:
+(the CDN `Expires=` in the URL is not the real limit); saved files are permanent. Ask what
+the file is for, then:
 
 | Use case | Format | Notes |
 |---|---|---|
@@ -127,11 +131,16 @@ model: `glb, fbx, obj` + `mtl`, `usdz, stl`; a text-to-3d preview: often `glb` o
   (rig: character + free walk/run clips; animation: GLB, FBX, sometimes USDZ). To keep one, fetch
   the link into the target folder (for example `curl -L -o <abs path>.fbx '<url>'`).
 - **More than one type** (engine FBX plus a GLB to preview): one download call per type.
+- **Never call a download "game-ready" or "Unity-ready":** it has no LODs, collision mesh or
+  hand retopology, and scale/pivot may need fixing; say so when handing it to a game project
+  (game workflow: Scenario C in [workflows](references/workflows.md)).
 
 ## Delivery by platform
 
 Your system prompt says which surface you are on. Always state the task_id, format and why,
-credits spent, and each saved path with its size.
+credits spent, and each saved path with its size. Whenever you hand out a signed Meshy link,
+write next to it: "works for 3 days after the task finished" (or the exact `expires_at` when a
+download result gave one), and that a saved file is permanent.
 
 - **Hermes Desktop:** the `::meshy-model` card (step 9) for a GLB; `MEDIA:<abs path>` for any
   other file becomes a download card.
