@@ -48,8 +48,11 @@ The server is marked untrusted, so Hermes asks the user before every call that i
 read-only (every create, download, cancel). Read-only calls (balance, status, lists, slicer
 detection) run without a prompt. When a call comes back "The user did not approve", stop:
 the user declined, or the run is unattended (cron, `chat -q`, a gateway with no approver)
-and cannot approve. Do not retry, inspect config or look for a workaround; tell the user the
-exact call you would make and its cost, and that an interactive session can approve it.
+and cannot approve. Do not retry, inspect config or look for a workaround, and never suggest
+changing the server's trust, editing config or "always allow" as the fix; tell the user the
+exact call you would make and its cost, and that an interactive session (Desktop, CLI, or a
+chat gateway that shows approval buttons) can approve it. For a finished task, the signed link
+from `meshy_get_task_status` (read-only, no prompt) is the way to hand over the file meanwhile.
 
 ## Quick Reference
 
@@ -65,13 +68,14 @@ user's goal before the first paid call.
 | Concept first | `meshy_text_to_image` → user approves → `meshy_image_to_3d` with `input_task_id` |
 | Rigged + animated character | generate with `pose_mode: "t-pose"`, textured → `meshy_rig` → `meshy_list_animations` → `meshy_animate` |
 | Print | `meshy_send_to_slicer` (detect, free) → generate with `target_formats: ["obj"]` → `meshy_analyze_printability` (free) → download with `print_ready: true` |
+| A file type for a finished task | `meshy_get_task_status` (`model_urls`) → `meshy_download_model` `format: X` (free), else `meshy_convert` (1 credit) |
 | Balance / spend | `meshy_check_balance`, `meshy_list_usage` (free) |
 
 ## Procedure
 
-1. **Pick the scenario** from [workflows](references/workflows.md) and settle the output
-   format before generating: `target_formats` is fixed at creation (`fbx` for engines,
-   `usdz` for AR, `obj`/`3mf` for printing, `glb` by default).
+1. **Pick the scenario** from [workflows](references/workflows.md) and the format from
+   [Pick the right format](#pick-the-right-format) before generating: `target_formats` is
+   fixed at creation, and `3mf` exists only when requested (or via `meshy_convert`).
 2. **Confirm cost before every credit-spending call.** Name the tool, the `ai_model` where
    there is a choice, the credit cost from [tools](references/tools.md) and any surcharge (8K
    textures, Ultra geometry), and wait for the user's yes. Hermes' approval prompt is the
@@ -83,13 +87,15 @@ user's goal before the first paid call.
    `task_id` again.
 5. **Never re-create on doubt.** If a create fails with a timeout, network error or 5xx, the
    task may exist and be billed: check `meshy_list_tasks` with that `task_type` first.
-6. **Download** with `meshy_download_model` (`format: "glb"`, singular; there is no `formats`).
-   Pass `save_to` as an ABSOLUTE path in the user's
-   project or wherever they asked. Without it, files land under the plugin's data directory
-   (`meshy_output/`), not the current project. Report every saved path and the file size.
+6. **Download** with `meshy_download_model`, one `format` per call (singular; there is no
+   `formats`), the one the use case needs, not always GLB. Pass `save_to` as an ABSOLUTE path in
+   the user's project or wherever they asked. Without it, files land under the plugin's data
+   directory (`meshy_output/`), not the current project. Report every saved path and the file size.
 7. **Report** the result: files and paths, formats, credits spent, and the `task_id` for
    follow-ups (refine, rig, convert reuse it instead of regenerating).
-8. **Show it in Hermes Desktop.** After a `.glb` download, end the reply with a paragraph that is
+8. **Deliver it for the surface you are on** (your system prompt names the platform): see
+   [Delivery by platform](#delivery-by-platform). The card below is Desktop-only.
+9. **Show it in Hermes Desktop (Desktop only).** After a `.glb` download, end the reply with a paragraph that is
    only the directive `::meshy-model{path="<absolute path of the .glb>" task="<task_id>"}` (one per
    model, each on its own line). Desktop renders it as an interactive 3D card whose **Download**
    menu lists every file type Meshy produced for that task (a refined model: GLB, FBX, OBJ, STL,
@@ -97,6 +103,65 @@ user's goal before the first paid call.
    card has no menu. Other clients show the line as text, so write the path in prose as well.
    To show a finished task the user has not downloaded yet, download it first (free) and use
    `path=`; a `url=` card with a signed Meshy link does not render in current Desktop builds.
+
+## Pick the right format
+
+Every finished model task already holds signed links to ALL its formats:
+`meshy_get_task_status` returns them in `structuredContent.model_urls` (a refined or textured
+model: `glb, fbx, obj` + `mtl`, `usdz, stl`; a text-to-3d preview: often `glb` only) plus
+`thumbnail_url`; Hermes passes that JSON to you. Links expire 3 days after the task finished
+(the CDN `Expires=` in the URL is not the real limit); saved files are permanent. Ask what
+the file is for, then:
+
+| Use case | Format | Notes |
+|---|---|---|
+| Unity | FBX | GLB also works through the glTFast package |
+| Unreal Engine | FBX | |
+| Godot | GLB | glTF is Godot's native import |
+| Web, three.js, Babylon, `<model-viewer>`, sharing a viewable file | GLB | one self-contained file |
+| Apple AR (Quick Look, Vision Pro, iOS) | USDZ | |
+| 3D print, single colour | STL (or OBJ with `print_ready: true`) | |
+| 3D print, multicolour | 3MF | via `meshy_process_multicolor`, or `target_formats: ["3mf"]` at creation |
+| Other DCC tools (Maya, 3ds Max, C4D) | FBX, or OBJ for a static mesh | |
+
+- **Get it:** `meshy_download_model` with `format` = that type (free). If the task lacks it, the
+  error lists what it has: `meshy_convert` with `target_formats: [type]` (1 credit), wait, then
+  download from the convert task.
+- **Rigging / animation tasks are not saved:** `meshy_download_model` returns signed GLB/FBX links
+  (rig: character + free walk/run clips; animation: GLB, FBX, sometimes USDZ). To keep one, fetch
+  the link into the target folder (for example `curl -L -o <abs path>.fbx '<url>'`).
+- **More than one type** (engine FBX plus a GLB to preview): one download call per type.
+- **Never call a download "game-ready" or "Unity-ready":** it has no LODs, collision mesh or
+  hand retopology, and scale/pivot may need fixing; say so when handing it to a game project
+  (game workflow: Scenario C in [workflows](references/workflows.md)).
+
+## Delivery by platform
+
+Your system prompt says which surface you are on. Always state the task_id, format and why,
+credits spent, and each saved path with its size. Whenever you hand out a signed Meshy link,
+write next to it: "works for 3 days after the task finished" (or the exact `expires_at` when a
+download result gave one), and that a saved file is permanent.
+
+- **Hermes Desktop:** the `::meshy-model` card (step 9) for a GLB; `MEDIA:<abs path>` for any
+  other file becomes a download card.
+- **Messaging (Telegram, Discord, Slack, WhatsApp, Signal, Matrix ...):** never emit the
+  `::meshy-model` line (it shows as raw text). Send the thumbnail as an image: `![preview](<thumbnail_url>)`
+  on its own line (from `meshy_get_task_status`). Attach the file with a line that is only
+  `MEDIA:<absolute path>`; the gateway uploads it as a document. Upload caps: Telegram bots 50 MB,
+  Discord 20 MB (more on boosted servers), others vary. A refined GLB is
+  often 10-40 MB and OBJ far larger: when the file is near or over the cap, or the upload is
+  reported as skipped, give the signed `model_urls` link for that format instead and say it stops
+  working at `expires_at`. Gateways in strict media mode deliver only files under Hermes' cache
+  folders or created in the last 10 minutes: download right before you reply, or `save_to` under
+  `<HERMES_HOME>/cache/documents/`.
+  For animated or rigged models (and as a quick look at any model), render a short preview video
+  with [preview video](references/preview-video.md) and send it as an attachment.
+- **CLI / TUI:** plain text, no `MEDIA:` (printed literally): the absolute path, plus the signed
+  link with its expiry if the user may want it elsewhere.
+- **Approvals off Desktop:** every create and download asks first. On a gateway the approval
+  arrives as buttons (Telegram, Discord, Slack, Matrix, Teams ...) or as a text `/approve` prompt
+  in the chat. Cron jobs, `hermes chat -q` and API runs without an approver cannot approve: stop
+  and say which call, format and cost you would run; never look for a way around the gate.
 
 ## Pitfalls
 

@@ -1,4 +1,4 @@
-<!-- Adapted for Hermes Agent from the server instructions of meshy-mcp-server 0.6.4 (https://github.com/meshy-dev/meshy-mcp-server, src/instructions.ts, MIT, Copyright (c) 2026 Meshy AI). Hermes does not forward MCP server instructions to the model, so the skill carries them. Change: title only. -->
+<!-- Adapted for Hermes Agent from the server instructions of meshy-mcp-server 0.6.4 (https://github.com/meshy-dev/meshy-mcp-server, src/instructions.ts, MIT, Copyright (c) 2026 Meshy AI). Hermes does not forward MCP server instructions to the model, so the skill carries them. Changes: title; Scenario C picks the format per engine and adds approval checkpoints. -->
 
 # Meshy workflow guide (from the server)
 
@@ -64,11 +64,15 @@ Suggested flow:
 
 ## Scenario C: Game Engine (Unity/Unreal/Godot)
 Trigger: user mentions game, Unity, Unreal, Godot, game-ready.
+Format by engine (Hermes change: the server text picks FBX for every engine): Unity → FBX (GLB also works through glTFast); Unreal → FBX; Godot → GLB (glTF is Godot's native import); a Blender step in between → GLB; web engines → GLB.
 Suggested flow:
-1. Generate model with target_formats:["fbx"]
-2. Textures: image-to-3d / multi-image output is already textured (unless should_texture:false); a text-to-3d preview needs meshy_text_to_3d_refine
-3. Inspect topology and face count. Smart Topology may already meet the budget; remesh only if needed and separately approved
-4. Download FBX
+1. Before any paid call, ask: which engine; triangle budget per asset; units and forward/up axis the project expects (Meshy exports are metres, Y-up; scale with meshy_resize or in the engine); whether it needs textures, and whether it needs a rig or animation.
+2. Generate with target_formats for that engine (["fbx"] for Unity/Unreal, ["glb"] for Godot); Smart Topology (model_type "smart-topology", target_polycount) when there is a budget.
+3. Checkpoint: show the preview geometry (thumbnail / viewer card) and get approval BEFORE paid texturing, remeshing or rigging.
+4. Textures: image-to-3d / multi-image output is already textured (unless should_texture:false); a text-to-3d preview needs meshy_text_to_3d_refine
+5. Inspect topology and face count. Smart Topology may already meet the budget; remesh only if needed and separately approved
+6. Checkpoint: get the user's approval of the final model (and animation) BEFORE writing into an existing game project; then download that engine's format with save_to inside the project's asset folder (one download per format).
+7. Say plainly that a downloaded model is not game-ready yet: no LODs, no collision mesh, no hand retopology, and pivot/scale may need fixing in the engine.
 
 ## Scenario D: Character Animation
 Trigger: user mentions rig, animate, walking, running, character animation.
