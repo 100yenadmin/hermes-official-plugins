@@ -62,9 +62,11 @@ export interface LocalFile {
   project: string
   bytes: number
   modified: number
+  /** Meshy task id when recorded (MCP metadata.json, /save, or a card that opened it); enables Download. */
+  task?: null | string
 }
 
-export type Source = { kind: 'file'; path: string } | { kind: 'remote'; url: string; label: string }
+export type Source = { kind: 'file'; path: string; task?: string } | { kind: 'remote'; url: string; label: string }
 
 // Inline styles with theme variables: no injected <style> tag (nothing global to leak or clean up),
 // and every surface reskins with the active theme.
@@ -91,7 +93,8 @@ const V = {
   itemText: { display: 'flex', flexDirection: 'column', minWidth: 0, gap: 1 },
   itemSub: { fontSize: 11, color: 'var(--ui-text-tertiary)' },
   thumb: { width: 40, height: 40, objectFit: 'cover', borderRadius: 4, flexShrink: 0, background: 'var(--ui-bg-secondary)' },
-  main: { flex: 1, minWidth: 0, padding: 8, display: 'flex' },
+  main: { flex: 1, minWidth: 0, padding: 8, display: 'flex', flexDirection: 'column', gap: 6 },
+  mainHead: { display: 'flex', alignItems: 'center', gap: 6, fontSize: 13, color: 'var(--ui-text-secondary)', minHeight: 28 },
   empty: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--ui-text-tertiary)' },
   chip: { display: 'inline-flex', alignItems: 'center', gap: 4, border: 0, background: 'transparent', color: 'inherit', font: 'inherit', cursor: 'pointer', padding: '0 4px' }
 } satisfies Record<string, CSSProperties>
@@ -108,7 +111,7 @@ export function errorText(err: unknown): string {
 
 export function fetchSource(rest: Rest, source: Source): Promise<FilePayload> {
   return source.kind === 'file'
-    ? rest<FilePayload>(`file?path=${encodeURIComponent(source.path)}`, { timeoutMs: 120_000 })
+    ? rest<FilePayload>(`file?path=${encodeURIComponent(source.path)}${source.task ? `&task=${encodeURIComponent(source.task)}` : ''}`, { timeoutMs: 120_000 })
     : rest<FilePayload>(`remote?url=${encodeURIComponent(source.url)}`, { timeoutMs: 180_000 })
 }
 
@@ -343,7 +346,7 @@ export function TranscriptCard({
   const url = (attrs.url || '').trim()
   const title = attrs.title || (path ? path.split(/[\\/]/).pop() : 'Meshy model') || 'Meshy model'
   const task = (attrs.task || '').trim()
-  const source: null | Source = path ? { kind: 'file', path } : url ? { kind: 'remote', url, label: title } : null
+  const source: null | Source = path ? { kind: 'file', path, ...(task ? { task } : {}) } : url ? { kind: 'remote', url, label: title } : null
 
   if (!source) {
     return <div style={{ ...V.card, ...V.error }}>Meshy model: give a path="..." or url="..."</div>
@@ -392,6 +395,8 @@ export function Gallery({
   onOpenSettings: () => void
 }) {
   const [selected, setSelected] = useState<null | Source>(initial)
+  // The Meshy task behind the selection (a generation's id, or a local file's recorded id): drives Download.
+  const [selTask, setSelTask] = useState<null | { task: string; title: string }>(null)
   const [remote, setRemote] = useState<RemoteModel[] | null>(null)
   const [local, setLocal] = useState<LocalFile[] | null>(null)
   const [error, setError] = useState<null | string>(null)
@@ -414,6 +419,7 @@ export function Gallery({
   useEffect(() => {
     if (initial) {
       setSelected(initial)
+      setSelTask(initial.kind === 'file' && initial.task ? { task: initial.task, title: initial.path.split(/[\\/]/).pop() || '' } : null)
     }
   }, [initial])
 
@@ -445,9 +451,13 @@ export function Gallery({
         {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
         {local && local.length > 0 && <div style={V.section}>On this machine</div>}
         {local?.map(f => {
-          const s: Source = { kind: 'file', path: f.path }
+          const s: Source = { kind: 'file', path: f.path, ...(f.task ? { task: f.task } : {}) }
+          const pickLocal = () => {
+            setSelected(s)
+            setSelTask(f.task ? { task: f.task, title: f.name } : null)
+          }
           return (
-            <button data-meshy-item style={isSel(s) ? { ...V.item, ...V.itemOn } : V.item} key={f.path} onClick={() => setSelected(s)} type="button">
+            <button data-meshy-item style={isSel(s) ? { ...V.item, ...V.itemOn } : V.item} key={f.path} onClick={pickLocal} title={f.path} type="button">
               <Codicon name="file-binary" />
               <span style={V.itemText}>
                 <span>{f.name}</span>
@@ -467,7 +477,12 @@ export function Gallery({
               data-meshy-item style={s && isSel(s) ? { ...V.item, ...V.itemOn } : V.item}
               disabled={!s}
               key={m.task_id}
-              onClick={() => s && setSelected(s)}
+              onClick={() => {
+                if (s) {
+                  setSelected(s)
+                  setSelTask({ task: m.task_id, title: m.prompt || m.task_type })
+                }
+              }}
               title={m.task_id}
               type="button"
             >
@@ -484,8 +499,25 @@ export function Gallery({
         })}
       </aside>
       <section style={V.main}>
+        {selected && (
+          <div data-meshy-gallery-head style={V.mainHead}>
+            <span style={V.cardTitle}>{selected.kind === 'file' ? selected.path.split(/[\\/]/).pop() : selected.label}</span>
+            <span style={V.spacer} />
+            {selTask && (
+              <FormatMenu
+                beside={selected.kind === 'file' ? selected.path : undefined}
+                key={`${selTask.task}:${selected.kind === 'file' ? selected.path : ''}`}
+                os={os}
+                rest={rest}
+                task={selTask.task}
+              />
+            )}
+          </div>
+        )}
         {selected ? (
-          <ModelViewer autoRotate={autoRotate} height="100%" key={String(autoRotate)} os={os} rest={rest} source={selected} />
+          <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
+            <ModelViewer autoRotate={autoRotate} height="100%" key={String(autoRotate)} os={os} rest={rest} source={selected} />
+          </div>
         ) : (
           <div style={V.empty}>
             <Codicon name="symbol-misc" size={32} />

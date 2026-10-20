@@ -100,8 +100,12 @@ you get, rendered with stock three.js:
   you pick next to the .glb, then opens its folder. No credits: Meshy made them all at generation
   time. A tick marks formats already on disk.
 - **Meshy 3D gallery** (status-bar chip or ⌘K → "Meshy: open 3D gallery"): your recent
-  generations and local downloads next to a full viewer. "Meshy: view a .glb file…" opens any
-  model on disk.
+  generations and the models on this machine next to a full viewer, with the same Download menu
+  for any model whose Meshy task is known. "Meshy: view a .glb file…" opens any model on disk.
+  "On this machine" lists the plugin's `meshy_output/` plus every model the viewer has opened or
+  saved elsewhere (a project folder): a small per-profile index, `asset-index.json` in the plugin's
+  data folder, holds path, size, sha256 and task id only (no URLs, no keys; 500 entries, vanished
+  files drop out). Nothing scans your home folder.
 - **Credit chip** in the status bar, refreshed after every Meshy tool call.
 
 The renderer never reads files or holds the key. `dashboard/plugin_api.py` (mounted at

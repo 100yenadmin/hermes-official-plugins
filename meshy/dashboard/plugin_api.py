@@ -8,8 +8,10 @@ Routes:
     GET /status             key configured? + balance (no key → configured: false, never an error)
                             + the user's Settings ▸ Plugins ▸ Meshy preferences
     GET /models?limit=      recent finished Meshy generations: task id, type, prompt, thumbnail, credits
-    GET /local?limit=       .glb files under the plugin's meshy_output/ (the server's default download dir)
-    GET /file?path=         bytes of one .glb/.gltf/.png/.jpg (data URL), refused outside allowed roots
+    GET /local?limit=       .glb files under the plugin's meshy_output/ (the server's default download dir),
+                            plus models in the asset index (project folders), each with its Meshy task id when known
+    GET /file?path=&task=   bytes of one .glb/.gltf/.png/.jpg (data URL), refused outside allowed roots;
+                            a served model is recorded in the profile's asset index (path, size, sha256, task)
     GET /formats?task=      the file types a finished task offers (glb, fbx, obj, stl, usdz ...) + any already saved
     POST /save              {task, format, beside?}: download one format next to ``beside`` (no credits)
 """
@@ -71,7 +73,7 @@ def _api_key() -> str | None:
 
 def _meshy_get(path: str, key: str, timeout: float = 15.0):
     req = urllib.request.Request(_API + path, headers={
-        "Authorization": f"Bearer {key}", "User-Agent": "hermes-meshy-plugin/0.2"})
+        "Authorization": f"Bearer {key}", "User-Agent": "hermes-meshy-plugin/0.3"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
@@ -177,21 +179,116 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
     return {"configured": True, "models": merged}
 
 
+# Profile-scoped index of models this plugin served or saved, so files the agent wrote into a project
+# (``save_to``) reach the gallery without scanning the home folder. Paths, sizes and hashes only: never
+# a provider URL or a key. Capped; vanished files drop out on read.
+_INDEX_NAME = "asset-index.json"
+_INDEX_CAP = 500
+_INDEXED = (".glb", ".gltf")
+
+
+def _index_path() -> Path:
+    return _data_root() / _INDEX_NAME
+
+
+def _load_index() -> list[dict]:
+    try:
+        rows = json.loads(_index_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [r for r in rows if isinstance(r, dict) and isinstance(r.get("path"), str)] if isinstance(rows, list) else []
+
+
+def _sha256(path: Path) -> str:
+    import hashlib
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        while chunk := fh.read(1 << 20):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _record_asset(path: Path, task_id: str | None = None) -> None:
+    """Upsert one model into the index. Only a resolved .glb/.gltf inside the allowed roots is recorded
+    (the same gate /file applies), and a task id only when it is a well-formed Meshy id."""
+    try:
+        resolved = path.resolve(strict=True)
+        if resolved.suffix.lower() not in _INDEXED or not resolved.is_file():
+            return
+        if not any(resolved.is_relative_to(root) for root in _allowed_roots()):
+            return
+        st = resolved.stat()
+        task = task_id if isinstance(task_id, str) and _TASK_ID.match(task_id) else None
+        now = int(time.time() * 1000)
+        rows = _load_index()
+        key = str(resolved)
+        row = next((r for r in rows if r.get("path") == key), None)
+        if row is None:
+            row = {"path": key, "first_seen": now}
+            rows.append(row)
+        if row.get("bytes") != st.st_size or row.get("mtime") != int(st.st_mtime * 1000) or not row.get("sha256"):
+            row.update(bytes=st.st_size, mtime=int(st.st_mtime * 1000), sha256=_sha256(resolved))
+        row.update(name=resolved.name, last_opened=now, task_id=task or row.get("task_id"))
+        rows.sort(key=lambda r: r.get("last_opened") or 0, reverse=True)
+        target = _index_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        tmp = target.with_name(target.name + ".part")
+        tmp.write_text(json.dumps(rows[:_INDEX_CAP], indent=1), encoding="utf-8")
+        tmp.replace(target)
+    except OSError as exc:  # the index is a convenience; serving the file never fails on it
+        _log.debug("meshy asset index: %s", exc)
+
+
 @router.get("/local")
 def local(limit: int = Query(50, ge=1, le=200)):
+    """meshy_output/ downloads plus indexed models that still exist, deduped by resolved path."""
     out_dir = _data_root() / "meshy_output"
-    if not out_dir.is_dir():
-        return {"dir": str(out_dir), "files": []}
-    files = sorted(out_dir.rglob("*.glb"), key=lambda p: p.stat().st_mtime, reverse=True)[:limit]
-    return {"dir": str(out_dir), "files": [
-        {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": p.stat().st_size,
-         "modified": int(p.stat().st_mtime * 1000)} for p in files]}
+    seen: dict[str, dict] = {}
+    for p in out_dir.rglob("*.glb") if out_dir.is_dir() else ():
+        st = p.stat()
+        seen[str(p.resolve())] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
+                                  "modified": int(st.st_mtime * 1000), "task": _local_task(p)}
+    for row in _load_index():
+        p = Path(row["path"])
+        if str(p) in seen or not p.is_file():
+            if str(p) in seen and not seen[str(p)]["task"] and row.get("task_id"):
+                seen[str(p)]["task"] = row["task_id"]
+            continue
+        st = p.stat()
+        seen[str(p)] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
+                        "modified": max(int(st.st_mtime * 1000), int(row.get("last_opened") or 0)),
+                        "task": row.get("task_id") if isinstance(row.get("task_id"), str) else None}
+    files = sorted(seen.values(), key=lambda f: f["modified"], reverse=True)[:limit]
+    return {"dir": str(out_dir), "files": files}
+
+
+# /save writes the full task id here (its folder is named by the first 8 characters only).
+_TASK_SIDECAR = ".meshy-task"
+
+
+def _local_task(model: Path) -> str | None:
+    """The Meshy task a downloaded file came from: the MCP server's project ``metadata.json`` (the task
+    whose ``files`` list it, else the project's root task), or the sidecar /save leaves; else None."""
+    found = None
+    try:
+        meta = json.loads((model.parent / "metadata.json").read_text(encoding="utf-8"))
+        tasks = [t for t in meta.get("tasks") or [] if isinstance(t, dict)]
+        found = next((t.get("task_id") for t in tasks if model.name in (t.get("files") or [])), None)
+        found = found or meta.get("root_task_id")
+    except (OSError, ValueError, AttributeError):
+        try:
+            found = (model.parent / _TASK_SIDECAR).read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+    return found if isinstance(found, str) and _TASK_ID.match(found) else None
 
 
 @router.get("/file")
-def file(path: str):
+def file(path: str, task: str | None = None):
     target = _resolve_readable(path)
     data = target.read_bytes()
+    if target.suffix.lower() in _INDEXED:
+        _record_asset(target, task)
     return {"name": target.name, "bytes": len(data), "mtime": int(target.stat().st_mtime * 1000),
             "dataUrl": f"data:{_MIME[target.suffix.lower()]};base64,{base64.b64encode(data).decode('ascii')}"}
 
@@ -229,7 +326,10 @@ def _asset_url(url: object) -> str:
 
 
 def _save_target(task_id: str, beside: str | None) -> tuple[Path, str]:
-    """Folder + file stem for a saved format: next to the model the card shows, else meshy_output/<task>."""
+    """Folder + file stem for a saved format: next to the model the card shows, else meshy_output/<task>.
+    Validates both inputs, so callers run it BEFORE spending a Meshy API call on a bad request."""
+    if not _TASK_ID.match(task_id or ""):
+        raise HTTPException(status_code=400, detail="task id required")
     if beside:
         anchor = _resolve_readable(beside)
         return anchor.parent, anchor.stem
@@ -255,11 +355,11 @@ def _download(url: str, dest: Path) -> None:
 
 @router.get("/formats")
 def formats(task: str, beside: str | None = None):
+    folder, stem = _save_target(task, beside)
     key = _api_key()
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
     urls = _task(task, key).get("model_urls") or {}
-    folder, stem = _save_target(task, beside)
     out = []
     for fmt in _FORMAT_ORDER:
         if isinstance(urls, dict) and urls.get(fmt):
@@ -275,6 +375,8 @@ def save(body: dict):
     task_id, fmt = str(body.get("task") or ""), str(body.get("format") or "").lower()
     if fmt not in _FORMAT_ORDER:
         raise HTTPException(status_code=400, detail="unknown format")
+    beside = body.get("beside") or None
+    folder, stem = _save_target(task_id, beside)
     key = _api_key()
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
@@ -282,13 +384,16 @@ def save(body: dict):
     urls = row.get("model_urls") or {}
     if not isinstance(urls, dict) or not urls.get(fmt):
         raise HTTPException(status_code=404, detail=f"this model has no {fmt.upper()} file")
-    folder, stem = _save_target(task_id, body.get("beside") or None)
     folder.mkdir(parents=True, exist_ok=True)
+    if not beside:
+        (folder / _TASK_SIDECAR).write_text(task_id, encoding="utf-8")
     dest = folder / f"{stem}.{fmt}"
     if not dest.is_file():
         _download(urls[fmt], dest)
         if fmt == "obj" and urls.get("mtl"):
             _save_obj_material(row, urls["mtl"], folder, stem)
+    if fmt in ("glb", "gltf"):
+        _record_asset(dest, task_id)
     return {"path": str(dest), "bytes": dest.stat().st_size}
 
 
