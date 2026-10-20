@@ -74,7 +74,8 @@ tell the user the version and stop.
 - Format by engine: Godot / Blender / web: GLB. Unity / Unreal: FBX (or both).
 - Wording: decimation reduces triangles; it is not retopology. If the user wants clean topology,
   Meshy remesh (5 credits) changes polygon count/topology; check the result, it is not
-  guaranteed artist-clean retopology. Animation or deformation work belongs to
+  guaranteed artist-clean retopology. Never promise remesh gives "clean quads" or a
+  "retopologized base". Animation or deformation work belongs to
   [blender-animation-handoff](blender-animation-handoff.md).
 
 ## 4. Run
@@ -123,6 +124,8 @@ source is untouched.
   If skinned, check deformation in a few poses before calling it usable.
 - Report: path of each output with size, source -> output triangles, materials, image count and
   resolution, packed state after reopen, preserved/lost, warnings, Blender version.
+- Call it an "optimized copy for game testing". Never "game-ready", "ready for Godot/Unity" or
+  "drop it in": nobody has tested it in the engine yet; say so and suggest importing it there.
 - Report states separately: downloaded / reopened-validated / visually reviewed / artist-approved /
   tested in the target engine. None implies the next; this script reaches reopened-validated.
 
