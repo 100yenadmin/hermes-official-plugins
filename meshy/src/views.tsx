@@ -51,6 +51,7 @@ export interface Balance {
 
 export interface LocalFile {
   kind?: 'image' | 'model'
+  download_incomplete?: boolean
   images?: string[]
   path: string
   name: string
@@ -179,6 +180,39 @@ function AssetThumbnail({ asset }: { asset: RemoteModel }) {
   return asset.thumbnail_url && !asset.expired && !failed
     ? <img alt="" style={V.thumb} src={asset.thumbnail_url} onError={() => setFailed(true)} />
     : <Codicon name={asset.kind === 'image' ? 'file-media' : 'symbol-misc'} />
+}
+
+async function copyTaskId(task: string) {
+  try {
+    if (!navigator.clipboard) throw new Error('Clipboard unavailable')
+    await navigator.clipboard.writeText(task)
+    host.notify({ kind: 'success', message: 'Task ID copied' })
+  } catch {
+    host.notify({ kind: 'error', message: 'Could not copy. Select the task ID and copy it manually.' })
+  }
+}
+
+function ImageDownload({ rest, os, task, source, onSaved }: { rest: Rest; os: Os; task: string; source: Source; onSaved: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const count = source.images?.length || 1
+  const download = async () => {
+    if (source.kind === 'file' && !source.incomplete) { void os.revealPath(source.path); return }
+    setBusy(true)
+    try {
+      const saved = await rest<{ paths: string[]; directory: string }>('save-images', { method: 'POST', body: { task }, timeoutMs: 600_000 })
+      host.notify({ kind: 'success', message: `Saved ${saved.paths.length} image${saved.paths.length === 1 ? '' : 's'}` })
+      void os.revealPath(saved.paths.length === 1 ? saved.paths[0] : saved.directory)
+    } catch (err) {
+      host.notify({ kind: 'error', message: `Image download: ${errorText(err)}` })
+    } finally {
+      setBusy(false)
+      onSaved()
+    }
+  }
+  return <Button disabled={busy || (source.kind === 'remote' && source.expired)} onClick={() => void download()} size="sm" variant="outline">
+    <Codicon name={busy ? 'loading' : source.kind === 'file' ? 'folder-opened' : 'cloud-download'} spinning={busy} />
+    {busy ? 'Saving images…' : source.kind === 'file' ? source.incomplete ? 'Retry image download' : 'Show saved images' : count > 1 ? `Download all ${count} images` : 'Download image'}
+  </Button>
 }
 
 /** One live viewport. Mounting creates a WebGL context; unmounting frees it. */
@@ -852,7 +886,7 @@ export function Gallery({
     const saved = local?.find(row => row.task === selTask.task && selected?.kind === 'file' && row.path === selected.path)
       || local?.find(row => row.task === selTask.task)
     if (saved) setSelected({ kind: 'file', path: saved.path, task: selTask.task,
-      media: saved.kind || 'model', images: saved.images, label: saved.prompt || saved.name })
+      media: saved.kind || 'model', images: saved.images, incomplete: saved.download_incomplete, label: saved.prompt || saved.name })
     else if (asset) setSelected(sourceForAsset(asset))
     else if (selected?.kind === 'remote') {
       setSelected(null)
@@ -863,7 +897,7 @@ export function Gallery({
   const pickTask = (task: string) => {
     const f = local?.find(x => x.task === task)
     if (f) {
-      setSelected({ kind: 'file', path: f.path, task, media: f.kind || 'model', images: f.images, label: f.prompt || f.name })
+      setSelected({ kind: 'file', path: f.path, task, media: f.kind || 'model', images: f.images, incomplete: f.download_incomplete, label: f.prompt || f.name })
       setSelTask({ task, title: f.name })
       return
     }
@@ -922,7 +956,7 @@ export function Gallery({
         {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
         {local && local.some(f => matchesKind(filter, f.kind || 'model')) && <div style={V.section}>On this machine</div>}
         {local?.filter(f => matchesKind(filter, f.kind || 'model') && matches(f.prompt, f.name, f.project)).map(f => {
-          const s: Source = { kind: 'file', path: f.path, media: f.kind || 'model', images: f.images, label: f.prompt || f.name, ...(f.task ? { task: f.task } : {}) }
+          const s: Source = { kind: 'file', path: f.path, media: f.kind || 'model', images: f.images, incomplete: f.download_incomplete, label: f.prompt || f.name, ...(f.task ? { task: f.task } : {}) }
           const pickLocal = () => {
             setSelected(s)
             setSelTask(f.task ? { task: f.task, title: f.name } : null)
@@ -984,6 +1018,7 @@ export function Gallery({
           <div data-meshy-gallery-head style={V.mainHead}>
             <span style={V.cardTitle}>{selected.kind === 'file' ? selected.path.split(/[\\/]/).pop() : selected.label}</span>
             <span style={V.spacer} />
+            {selTask && selected.media === 'image' && <ImageDownload key={`images:${selTask.task}`} rest={rest} os={os} task={selTask.task} source={selected} onSaved={refresh} />}
             {selTask && !(selected.media === 'image' || (selected.kind === 'remote' && selected.expired)) && <ActionMenu key={`a:${selTask.task}`} rest={rest} task={selTask.task} />}
             {selTask && !(selected.media === 'image' || (selected.kind === 'remote' && selected.expired)) && (
               <FormatMenu
@@ -997,6 +1032,10 @@ export function Gallery({
             )}
           </div>
         )}
+        {selected && selTask && <div data-meshy-task-id style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, padding: '0 12px 8px', fontSize: 12, color: 'var(--ui-text-tertiary)' }}>
+          <span>Task ID</span><code style={{ userSelect: 'text', overflowWrap: 'anywhere' }}>{selTask.task}</code>
+          <Button aria-label="Copy task ID" onClick={() => void copyTaskId(selTask.task)} size="sm" variant="ghost"><Codicon name="copy" /> Copy ID</Button>
+        </div>}
         {selected ? (
           <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
             <AssetViewer autoRotate={autoRotate} height="100%" key={String(autoRotate)} os={os} rest={rest} source={selected} />

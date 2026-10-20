@@ -32,6 +32,8 @@ import os
 import re
 import shutil
 import time
+import threading
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -291,7 +293,7 @@ def local(limit: int = Query(50, ge=1, le=200)):
         st = p.stat()
         seen[str(p.resolve())] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
                                   "modified": int(st.st_mtime * 1000), "task": _local_task(p)}
-    for item in _archived_files():
+    for item in [*_archived_files(), *_saved_images()]:
         seen[item["path"]] = item
     for row in _load_index():
         p = Path(row["path"])
@@ -446,11 +448,12 @@ def _format_sort_key(key: str) -> tuple[int, str]:
     return (_FORMAT_ORDER.index(base) if base in _FORMAT_ORDER else 99, clip or "")
 
 
-def _task(task_id: str, key: str, *, include_images: bool = False) -> dict:
+def _task(task_id: str, key: str, *, include_images: bool = False, images_only: bool = False) -> dict:
     """The task record (with signed ``model_urls``), found on whichever generation endpoint owns it."""
     if not _TASK_ID.match(task_id or ""):
         raise HTTPException(status_code=400, detail="task id required")
-    for _task_type, path in (*_MODEL_ENDPOINTS, *(_IMAGE_ENDPOINTS if include_images else ())):
+    endpoints = _IMAGE_ENDPOINTS if images_only else (*_MODEL_ENDPOINTS, *(_IMAGE_ENDPOINTS if include_images else ()))
+    for _task_type, path in endpoints:
         try:
             row = _meshy_get(f"{path}/{task_id}", key)
         except urllib.error.HTTPError as exc:
@@ -483,9 +486,11 @@ def _save_target(task_id: str, beside: str | None) -> tuple[Path, str]:
 
 
 def _download(url: str, dest: Path) -> None:
-    part = dest.with_name(dest.name + ".part")
+    part = None
     try:
-        with urllib.request.urlopen(_asset_url(url), timeout=120) as resp, open(part, "wb") as out:
+        with urllib.request.urlopen(_asset_url(url), timeout=120) as resp, tempfile.NamedTemporaryFile(
+                mode="wb", dir=dest.parent, prefix=f".{dest.name}.", suffix=".part", delete=False) as out:
+            part = Path(out.name)
             copied = 0
             while chunk := resp.read(1 << 20):
                 copied += len(chunk)
@@ -496,7 +501,8 @@ def _download(url: str, dest: Path) -> None:
     except (urllib.error.URLError, OSError) as exc:
         raise _asset_error(exc) from exc
     finally:
-        part.unlink(missing_ok=True)
+        if part is not None:
+            part.unlink(missing_ok=True)
 
 
 @router.get("/formats")
@@ -921,3 +927,82 @@ def storage():
         except OSError:
             continue
     return {"bytes": sum(sizes), "files": len(sizes), "directory": str(_data_root())}
+
+
+_IMAGE_SAVE_LOCK = threading.Lock()
+
+
+@router.post("/save-images")
+def save_images(body: dict):
+    """Explicitly download every image in a finished image task; never generate or convert."""
+    task = str(body.get("task") or "")
+    if not _TASK_ID.match(task):
+        raise HTTPException(status_code=400, detail="task id required")
+    key = _api_key()
+    if not key:
+        raise HTTPException(status_code=400, detail="no Meshy API key")
+    with _IMAGE_SAVE_LOCK:
+        row = _task(task, key, images_only=True)
+        urls = row.get("image_urls")
+        if not isinstance(urls, list) or not urls:
+            raise HTTPException(status_code=404, detail="this task has no generated images")
+        urls = [_asset_url(url) for url in urls]
+        folder = _archive_root() / task
+        folder.mkdir(parents=True, exist_ok=True)
+        if folder.resolve() != _archive_root().resolve() / task:
+            raise HTTPException(status_code=403, detail="image folder must not be a symlink")
+        outputs = []
+        for index, url in enumerate(urls):
+            ext = Path(urllib.parse.urlsplit(url).path).suffix.lower()
+            if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+                ext = ".png"
+            outputs.append((folder / f"image-{index + 1}{ext}", url))
+        for path, url in outputs:
+            if path.is_symlink():
+                raise HTTPException(status_code=403, detail="image file must not be a symlink")
+            if not path.is_file():
+                _download(url, path)
+            # Record partial successes too: a retry resumes, and already saved views stay usable.
+            names = [p.name for p, _ in outputs if p.is_file() and not p.is_symlink()]
+            record = {"task": task, "prompt": row.get("prompt"), "files": names, "complete": len(names) == len(outputs)}
+            target = folder / "images.json"
+            part = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder,
+                                                 prefix=".images.", suffix=".part", delete=False) as out:
+                    part = Path(out.name)
+                    json.dump(record, out)
+                part.replace(target)
+            finally:
+                if part is not None:
+                    part.unlink(missing_ok=True)
+        paths = [str(path) for path, _ in outputs]
+        return {"paths": paths, "directory": str(folder), "bytes": sum(path.stat().st_size for path, _ in outputs)}
+
+
+def _saved_images() -> list[dict]:
+    out = []
+    for manifest in _archive_root().glob("*/images.json"):
+        try:
+            row = json.loads(manifest.read_text(encoding="utf-8"))
+            task = row.get("task")
+            if not isinstance(task, str) or not _TASK_ID.match(task):
+                continue
+            paths = []
+            for name in row.get("files", []):
+                if not isinstance(name, str) or Path(name).name != name:
+                    continue
+                try:
+                    path = _resolve_readable(str(manifest.parent / name))
+                except HTTPException:
+                    continue
+                if path.is_relative_to(_archive_root().resolve()) and path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                    paths.append(path)
+            if paths:
+                out.append({"path": str(paths[0]), "images": [str(p) for p in paths], "name": paths[0].name,
+                            "task": task, "kind": "image", "prompt": row.get("prompt"), "project": "Saved images",
+                            "download_incomplete": not row.get("complete", True) or len(paths) != len(row.get("files", [])),
+                            "bytes": sum(p.stat().st_size for p in paths), "modified": max(int(p.stat().st_mtime * 1000) for p in paths)})
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue
+    return out

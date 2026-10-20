@@ -190,3 +190,9 @@ Totals include plugin-managed files, MCP downloads (including companions), and i
 models, deduplicated by resolved path. Arbitrary copies elsewhere on disk are not discovered.
 Previously saved image sets and model variants remain accessible locally, including files saved by
 the earlier development build. There are no automatic asset downloads or auto-save settings.
+
+Select an image in the gallery and choose **Download image** or **Download all N images**.
+Images are saved under the profile's plugin-data `saved-assets/<task-id>/` directory and stay
+available locally after API links expire. Saved sets have **Show saved images**; incomplete sets
+have **Retry image download**. Downloads are explicit and spend no generation credits.
+The selected asset's full **Task ID** is shown with **Copy ID** for use in follow-up agent requests.

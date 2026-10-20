@@ -14,7 +14,7 @@ export interface RemoteModel {
 }
 
 export type Source =
-  | { kind: 'file'; path: string; task?: string; media?: 'image' | 'model'; images?: string[]; label?: string }
+  | { kind: 'file'; path: string; task?: string; media?: 'image' | 'model'; images?: string[]; label?: string; incomplete?: boolean }
   | { kind: 'remote'; url: string; label: string; media?: 'image' | 'model'; images?: string[]; expired?: boolean }
 
 export function sourceForAsset(asset: RemoteModel): Source | null {

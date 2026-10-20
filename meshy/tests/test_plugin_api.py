@@ -265,3 +265,87 @@ def test_previous_saved_image_sets_survive_without_auto_save_or_api_key(api, mon
     assert local[0]["images"] == [str(p) for p in paths]
     assert api.storage()["bytes"] == 10
     assert api.file(local[0]["path"])["bytes"] == 5
+
+
+@pytest.mark.parametrize("task", ["", "../outside", "https://assets.meshy.ai/x.png"])
+def test_image_download_validates_task_before_network(api, task):
+    assert _status(api.save_images, {"task": task}) == 400
+
+
+def test_image_download_saves_all_views_and_reuses_files_offline(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    urls = ["https://assets.meshy.ai/front.png?Signature=SECRET", "https://assets.meshy.ai/back.webp"]
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"prompt": "Mech", "image_urls": urls})
+    calls = []
+    def download(url, dest):
+        calls.append(url)
+        dest.write_bytes(b"image")
+    monkeypatch.setattr(api, "_download", download)
+    result = api.save_images({"task": _TASK})
+    assert result["bytes"] == 10 and len(result["paths"]) == 2
+    api.save_images({"task": _TASK})
+    assert len(calls) == 2
+    record = Path(result["directory"]) / "images.json"
+    assert "SECRET" not in record.read_text() and "https://" not in record.read_text()
+    monkeypatch.setattr(api, "_api_key", lambda: None)
+    local = api.local(limit=200)["files"]
+    assert len(local) == 1 and local[0]["task"] == _TASK
+    assert local[0]["images"] == result["paths"]
+    assert api.file(local[0]["path"])["bytes"] == 5
+
+
+def test_image_download_partial_success_is_preserved_and_retry_resumes(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": ["https://assets.meshy.ai/a.png", "https://assets.meshy.ai/b.png"]})
+    def download(url, dest):
+        if url.endswith("b.png"):
+            raise HTTPException(status_code=502, detail="Temporary failure")
+        dest.write_bytes(b"first")
+    monkeypatch.setattr(api, "_download", download)
+    assert _status(api.save_images, {"task": _TASK}) == 502
+    assert len(api.local(limit=200)["files"][0]["images"]) == 1
+    assert api.local(limit=200)["files"][0]["download_incomplete"]
+    monkeypatch.setattr(api, "_download", lambda _url, dest: dest.write_bytes(b"second"))
+    saved = api.save_images({"task": _TASK})
+    assert len(api.local(limit=200)["files"][0]["images"]) == 2
+    assert not api.local(limit=200)["files"][0]["download_incomplete"]
+    assert Path(saved["paths"][0]).read_bytes() == b"first"
+
+
+@pytest.mark.parametrize("urls,expected", [([], 404), (["https://example.com/image.png"], 502)])
+def test_image_download_rejects_missing_outputs_and_foreign_hosts_before_writing(api, monkeypatch, urls, expected):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": urls})
+    assert _status(api.save_images, {"task": _TASK}) == expected
+    assert not api._archive_root().exists()
+
+
+def test_image_lookup_uses_image_endpoint_response(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    def get(path, *_a, **_k):
+        assert path.startswith("/openapi/v1/text-to-image/")
+        return {"id": _TASK, "image_urls": ["https://assets.meshy.ai/a.png"]}
+    monkeypatch.setattr(api, "_meshy_get", get)
+    monkeypatch.setattr(api, "_download", lambda _url, dest: dest.write_bytes(b"image"))
+    assert len(api.save_images({"task": _TASK})["paths"]) == 1
+
+
+
+def test_image_download_ignores_preexisting_temporary_symlinks(api, monkeypatch):
+    import io
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": ["https://assets.meshy.ai/a.png"]})
+    folder = api._archive_root() / _TASK
+    folder.mkdir(parents=True)
+    victim = api.tmp / "outside" / "keep.txt"
+    victim.write_text("unchanged")
+    try:
+        (folder / "image-1.png.part").symlink_to(victim)
+        (folder / "images.json.part").symlink_to(victim)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: io.BytesIO(b"image"))
+    saved = api.save_images({"task": _TASK})
+    assert victim.read_text() == "unchanged"
+    assert Path(saved["paths"][0]).read_bytes() == b"image"
+    assert json.loads((folder / "images.json").read_text())["complete"]
