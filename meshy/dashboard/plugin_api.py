@@ -29,9 +29,9 @@ import base64
 import json
 import logging
 import os
-import threading
 import re
 import shutil
+import threading
 import time
 import urllib.error
 import urllib.parse
