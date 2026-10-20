@@ -1,6 +1,6 @@
 ---
 name: meshy-3d
-description: "Create 3D models with Meshy AI from text or images, then texture, remesh, rig, animate, convert, resize, or prepare them for 3D printing (printability repair, multicolor 3MF, split into parts, slicer handoff). Use when the user asks for a 3D model, game asset, rigged character, animation, AR/USDZ file or 3D print."
+description: "Create 3D models with Meshy AI from text or images, then texture, remesh, rig, animate, convert, resize, or prepare them for 3D printing (printability repair, multicolor 3MF, split into parts, slicer handoff). Use when the user asks for a 3D model, game asset, rigged character, animation, AR/USDZ file or 3D print, or wants to view, convert, download another format of, or optimize (Blender) a Meshy model they already have."
 version: 1.0.0
 author: Nous Research
 license: MIT
@@ -93,6 +93,17 @@ user's goal before the first paid call.
    directory (`meshy_output/`), not the current project. Report every saved path and the file size.
 7. **Report** the result: files and paths, formats, credits spent, and the `task_id` for
    follow-ups (refine, rig, convert reuse it instead of regenerating).
+7b. **Offer the optional Blender copy, before step 8** (local, no additional Meshy credits) after a `.glb` download or
+   when showing a local Meshy model. First run `hermes config get plugins.entries.meshy.settings.blender_handoff`
+   ("not set" means `ask`). Unless it is `never`, find Blender: `hermes config get plugins.entries.meshy.settings.blender_path` first, then PATH and the per-OS folders in [blender](references/blender.md) §2.
+   If Blender is found and the setting is `ask`, put this offer, word for word, just above the `::meshy-model` line:
+   "Blender is installed: want an optimized copy for game testing (packed textures, optional triangle budget)
+   plus a .blend? Runs locally, no additional Meshy credits." Persist an always/never answer with
+   `hermes config set`. Never decimate without the user's triangle budget. Rigs and clips:
+   [blender-animation-handoff](references/blender-animation-handoff.md); rendered shots:
+   [cinematic-preflight](references/cinematic-preflight.md). Report **downloaded**, **reopened/import-validated**,
+   **visually reviewed**, **artist-approved** and **tested in the target engine/render** as different states;
+   none implies the next.
 8. **Deliver it for the surface you are on** (your system prompt names the platform): see
    [Delivery by platform](#delivery-by-platform). The card below is Desktop-only.
 9. **Show it in Hermes Desktop (Desktop only).** After a `.glb` download, end the reply with a paragraph that is
@@ -147,7 +158,7 @@ download result gave one), and that a saved file is permanent.
 - **Messaging (Telegram, Discord, Slack, WhatsApp, Signal, Matrix ...):** never emit the
   `::meshy-model` line (it shows as raw text). Send the thumbnail as an image: `![preview](<thumbnail_url>)`
   on its own line (from `meshy_get_task_status`). Attach the file with a line that is only
-  `MEDIA:<absolute path>`; the gateway uploads it as a document. Upload caps: Telegram bots 50 MB,
+  `MEDIA:<absolute path>`; the gateway uploads it as a document. Upload caps: Telegram 20 MB on the hosted Bot API,
   Discord 20 MB (more on boosted servers), others vary. A refined GLB is
   often 10-40 MB and OBJ far larger: when the file is near or over the cap, or the upload is
   reported as skipped, give the signed `model_urls` link for that format instead and say it stops
