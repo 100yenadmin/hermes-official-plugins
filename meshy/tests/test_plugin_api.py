@@ -236,3 +236,211 @@ def test_gallery_hides_expired_unsaved_assets_and_deduplicates_tasks(api, monkey
     assert len(result) == 1  # expired rows must not consume the visible limit
     assert result[0]["task_id"] == _TASK
     assert result[0]["task_type"] == "image-to-image"
+
+
+@pytest.fixture
+def archive(api, monkeypatch):
+    clock = [1000]
+    prefs = {**api._SETTING_DEFAULTS, "auto_save": True}
+    assets, downloaded = [], []
+    monkeypatch.setattr(api, "_settings", lambda: prefs)
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api.time, "time", lambda: clock[0])
+    monkeypatch.setattr(api, "_list_models", lambda *_a, **_k: {"models": assets})
+    def download(url, dest):
+        downloaded.append(url)
+        dest.write_bytes(b"asset")
+    monkeypatch.setattr(api, "_download", download)
+    api.autosave()  # establish the opt-in boundary before any new tasks exist
+    api.archive_clock, api.archive_prefs = clock, prefs
+    api.archive_assets, api.archive_downloads = assets, downloaded
+    return api
+
+
+@pytest.mark.parametrize("kind", ["image", "model"])
+def test_autosave_preserves_new_outputs_once_and_lists_them_offline(archive, monkeypatch, kind):
+    api = archive
+    api.archive_clock[0] = 1001
+    api.archive_assets.append({"task_id": _TASK, "kind": kind, "created_at": 1001000,
+                               "prompt": "Mech", "local_path": None})
+    row = {"image_urls": ["https://assets.meshy.ai/a.png?Signature=SECRET", "https://assets.meshy.ai/b.png"],
+           "model_urls": {"glb": "https://assets.meshy.ai/a.glb"}}
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: row)
+    first = api.autosave()
+    expected = 2 if kind == "image" else 1
+    assert first["files"] == expected and first["bytes"] == expected * 5
+    api.autosave()
+    assert len(api.archive_downloads) == expected
+    assert "SECRET" not in (api.data / "autosave.json").read_text()
+    assert "https://" not in (api.data / "autosave.json").read_text()
+    monkeypatch.setattr(api, "_api_key", lambda: None)
+    files = api.local(limit=200)["files"]
+    assert len(files) == 1 and files[0]["kind"] == kind
+    assert files[0]["task"] == _TASK and files[0]["prompt"] == "Mech"
+    assert api.file(files[0]["path"])["bytes"] == 5
+    if kind == "image":
+        assert len(files[0]["images"]) == 2
+
+
+def test_autosave_skips_history_and_off_period_but_uses_completion_time(archive, monkeypatch):
+    api = archive
+    def asset(created, finished=None):
+        return {"task_id": _TASK, "kind": "image", "created_at": created, "finished_at": finished, "prompt": "Mech"}
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": ["https://assets.meshy.ai/a.png"]})
+    api.archive_assets[:] = [asset(999000)]
+    api.autosave()
+    assert not api.archive_downloads
+    api.archive_prefs["auto_save"] = False
+    api.archive_assets[:] = [asset(1001000)]
+    api.autosave()
+    assert not api.archive_downloads
+    api.archive_clock[0] = 1002
+    api.archive_prefs["auto_save"] = True
+    api.autosave()
+    assert not api.archive_downloads  # enabling does not backfill tasks completed while off
+    api.archive_assets[:] = [asset(999000, 1003000)]
+    api.autosave()
+    assert len(api.archive_downloads) == 1  # an older task that finishes after enabling is new
+    api.archive_prefs["auto_save"] = False
+    api.autosave()
+    assert api.storage()["files"] == 1  # disabling never deletes files
+
+
+def test_autosave_reports_failure_retries_and_does_not_count_partial_files_as_saved(archive, monkeypatch):
+    api = archive
+    api.archive_assets.append({"task_id": _TASK, "kind": "image", "created_at": 1001000, "prompt": "Mech"})
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": ["https://assets.meshy.ai/a.png"]})
+    def fail(*_a):
+        raise HTTPException(status_code=502, detail="Asset download failed")
+    monkeypatch.setattr(api, "_download", fail)
+    assert api.autosave()["failures"][0]["task"] == _TASK
+    assert api.local(limit=200)["files"] == []
+    monkeypatch.setattr(api, "_download", lambda _url, dest: dest.write_bytes(b"saved"))
+    assert api.autosave()["failures"] == []
+    assert len(api.local(limit=200)["files"]) == 1
+
+
+def test_storage_counts_companions_and_indexed_files_once_and_is_profile_scoped(api, monkeypatch):
+    folder = api.data / "meshy_output" / "project"
+    folder.mkdir(parents=True)
+    model = folder / "model.glb"
+    model.write_bytes(b"model")
+    (folder / "texture.png").write_bytes(b"texture")
+    (folder / "interrupted.part").write_bytes(b"partial")
+    api._record_asset(model, _TASK)
+    summary = api.storage()
+    assert summary["files"] == 2 and summary["bytes"] == 12
+    other = api.data.parent / "other-profile"
+    other.mkdir()
+    monkeypatch.setattr(api, "_data_root", lambda: other)
+    assert api.storage()["files"] == 0
+    assert api.local(limit=200)["files"] == []
+
+
+def test_autosave_skips_existing_model_copies_without_starving_new_images(archive, monkeypatch):
+    api = archive
+    api.archive_assets[:] = [{"task_id": _TASK, "kind": "model", "created_at": 1001000,
+                             "local_path": "/saved/model.glb"}] * 4
+    api.archive_assets.append({"task_id": _TASK, "kind": "image", "created_at": 1001000, "prompt": "Mech"})
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": ["https://assets.meshy.ai/a.png"]})
+    api.autosave()
+    assert len(api.archive_downloads) == 1
+
+
+def test_autosave_keeps_partial_images_and_repairs_missing_glb_variants(archive, monkeypatch):
+    api = archive
+    api.archive_assets.append({"task_id": _TASK, "kind": "image", "created_at": 1001000, "prompt": "Mech"})
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": ["https://assets.meshy.ai/a.png", "https://assets.meshy.ai/b.png"]})
+    def partial(url, dest):
+        if url.endswith("b.png"):
+            raise HTTPException(status_code=502, detail="Temporary failure")
+        dest.write_bytes(b"first")
+    monkeypatch.setattr(api, "_download", partial)
+    assert api.autosave()["failures"]
+    assert len(api.local(limit=200)["files"][0]["images"]) == 1
+    monkeypatch.setattr(api, "_download", lambda _url, dest: dest.write_bytes(b"second"))
+    assert api.autosave()["failures"] == []
+    assert len(api.local(limit=200)["files"][0]["images"]) == 2
+    assert (api._archive_root() / _TASK / "image-1.png").read_bytes() == b"first"
+    # A different model task has several self-contained GLBs; deleting one must be repairable.
+    model_id = "01a15965-4a40-718b-8912-4046ede4837f"
+    asset = {"task_id": model_id, "kind": "model", "created_at": 1001000, "prompt": "Rig", "local_path": None}
+    api.archive_assets[:] = [asset]
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"result": {
+        "rigged_character_glb_url": "https://assets.meshy.ai/rig.glb",
+        "basic_animations": {"walking_glb_url": "https://assets.meshy.ai/walk.glb"}}})
+    api.autosave()
+    paths = api._archive_state()["tasks"][model_id]["paths"]
+    assert len(paths) == 2
+    Path(paths[1]).unlink()
+    asset["local_path"] = paths[0]
+    api.autosave()
+    assert Path(paths[1]).is_file()
+
+
+def test_autosave_rotates_failed_attempts_and_bounds_each_pass(archive, monkeypatch):
+    api = archive
+    seen = []
+    for i in range(5):
+        api.archive_assets.append({"task_id": f"01a15965-4a40-718b-8912-4046ede4837{i}",
+                                   "kind": "image", "created_at": 1001000, "prompt": "Mech"})
+    def fail(task, *_a, **_k):
+        seen.append(task)
+        raise HTTPException(status_code=502, detail="Failed")
+    monkeypatch.setattr(api, "_task", fail)
+    api.autosave()
+    assert len(seen) == 3
+    api.autosave()
+    assert len(seen) == 6 and len(set(seen)) == 5
+
+
+def test_autosave_persists_disable_during_download_and_resets_on_reenable(archive, monkeypatch):
+    api = archive
+    api.archive_assets.append({"task_id": _TASK, "kind": "image", "created_at": 1001000, "prompt": "Mech"})
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": ["https://assets.meshy.ai/a.png"]})
+    def disable(_url, dest):
+        dest.write_bytes(b"saved")
+        api.archive_prefs["auto_save"] = False
+    monkeypatch.setattr(api, "_download", disable)
+    api.autosave()
+    assert not api._archive_state()["enabled"]
+    api.archive_clock[0] = 1010
+    api.archive_prefs["auto_save"] = True
+    api.autosave()
+    assert api._archive_state()["since"] == 1010000
+
+
+def test_autosave_discovery_keeps_endpoint_results_beyond_gallery_limit(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    def get(path, *_a, **_k):
+        base = path.split("?")[0]
+        if base in {"/openapi/v1/text-to-image", "/openapi/v1/image-to-image"}:
+            offset = 0 if base.endswith("text-to-image") else 60
+            return [{"id": f"01a15965-4a40-718b-8912-{i + offset:012x}", "status": "SUCCEEDED",
+                     "created_at": i + offset, "image_urls": ["https://assets.meshy.ai/a.png"]} for i in range(60)]
+        return []
+    monkeypatch.setattr(api, "_meshy_get", get)
+    assert len(api.models(limit=60)["models"]) == 60
+    assert len(api._list_models(60, truncate=False)["models"]) == 120
+
+
+
+def test_autosave_reenable_retries_tracked_tasks_and_keeps_survivors_after_failed_repair(archive, monkeypatch):
+    api = archive
+    api.archive_assets.append({"task_id": _TASK, "kind": "image", "created_at": 1001000, "prompt": "Mech"})
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": [f"https://assets.meshy.ai/{i}.png" for i in range(3)]})
+    api.autosave()
+    paths = api._archive_state()["tasks"][_TASK]["paths"]
+    Path(paths[1]).unlink()
+    def fail(*_a):
+        raise HTTPException(status_code=502, detail="Failed to repair")
+    monkeypatch.setattr(api, "_download", fail)
+    assert api.autosave()["failures"]
+    assert api.local(limit=200)["files"][0]["images"] == [paths[0], paths[2]]
+    api.archive_prefs["auto_save"] = False
+    api.autosave()
+    api.archive_clock[0] = 1010
+    api.archive_prefs["auto_save"] = True
+    monkeypatch.setattr(api, "_download", lambda _url, dest: dest.write_bytes(b"repaired"))
+    assert api.autosave()["failures"] == []
+    assert api.local(limit=200)["files"][0]["images"] == paths

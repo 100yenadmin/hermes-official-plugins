@@ -1,3 +1,4 @@
+import type { StorageStatus } from './gallery.ts'
 /**
  * React surfaces over the three.js stage: an inline transcript card, the workspace gallery, and the
  * status-bar credit chip. Every byte comes from the plugin's own backend (`ctx.rest`) because the
@@ -35,10 +36,11 @@ export interface MeshySettings {
   inline_viewer: boolean
   auto_rotate: boolean
   gallery_limit: number
+  auto_save: boolean
 }
 
 /** Mirrors plugin.json's config_schema defaults until the backend answers. */
-export const DEFAULT_SETTINGS: MeshySettings = { show_credits: true, inline_viewer: true, auto_rotate: true, gallery_limit: 24 }
+export const DEFAULT_SETTINGS: MeshySettings = { show_credits: true, inline_viewer: true, auto_rotate: true, gallery_limit: 24, auto_save: true }
 
 export interface Balance {
   configured: boolean
@@ -49,6 +51,8 @@ export interface Balance {
 }
 
 export interface LocalFile {
+  kind?: 'image' | 'model'
+  images?: string[]
   path: string
   name: string
   project: string
@@ -127,8 +131,8 @@ export function fetchSource(rest: Rest, source: Source): Promise<FilePayload> {
     : rest<FilePayload>(`remote?url=${encodeURIComponent(source.url)}`, { timeoutMs: 180_000 })
 }
 
-function ImageViewer({ rest, source }: { rest: Rest; source: Extract<Source, { kind: 'remote' }> }) {
-  const images = source.images?.length ? source.images : [source.url]
+function ImageViewer({ rest, source }: { rest: Rest; source: Source }) {
+  const images = source.images?.length ? source.images : [source.kind === 'file' ? source.path : source.url]
   const [index, setIndex] = useState(0)
   const [data, setData] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -137,7 +141,7 @@ function ImageViewer({ rest, source }: { rest: Rest; source: Extract<Source, { k
     let live = true
     setData(null)
     setError(null)
-    fetchSource(rest, { ...source, url }).then(result => {
+    fetchSource(rest, source.kind === 'file' ? { ...source, path: url } : { ...source, url }).then(result => {
       if (live) setData(result.dataUrl)
     }).catch((err: unknown) => {
       if (live) setError(errorText(err))
@@ -147,7 +151,7 @@ function ImageViewer({ rest, source }: { rest: Rest; source: Extract<Source, { k
   return (
     <div data-meshy-image style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
       {error ? <div role="alert" style={V.error}>{error}</div> : data ? (
-        <img alt={source.label} src={data} onError={() => setError('This image could not be decoded.')} style={{ maxWidth: '100%', maxHeight: 'calc(100% - 48px)', objectFit: 'contain' }} />
+        <img alt={source.label || 'Saved image'} src={data} onError={() => setError('This image could not be decoded.')} style={{ maxWidth: '100%', maxHeight: 'calc(100% - 48px)', objectFit: 'contain' }} />
       ) : <span role="status">Loading image…</span>}
       {images.length > 1 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -165,8 +169,8 @@ function AssetViewer(props: Parameters<typeof ModelViewer>[0]) {
   if (source.kind === 'remote' && source.expired) {
     return <div role="status" style={V.empty}>This asset’s download link has expired. Open a locally saved copy if you have one.</div>
   }
-  return source.kind === 'remote' && source.media === 'image'
-    ? <ImageViewer key={source.url} rest={rest} source={source} />
+  return source.media === 'image'
+    ? <ImageViewer key={source.kind === 'file' ? source.path : source.url} rest={rest} source={source} />
     : <ModelViewer {...props} />
 }
 
@@ -798,13 +802,17 @@ export function Gallery({
   os,
   initial,
   autoRotate,
-  onOpenSettings
+  onOpenSettings,
+  storage,
+  onRetrySave
 }: {
   rest: Rest
   os: Os
   initial: null | Source
   autoRotate: boolean
   onOpenSettings: () => void
+  storage?: StorageStatus | null
+  onRetrySave?: () => void
 }) {
   const [selected, setSelected] = useState<null | Source>(initial)
   // The Meshy task behind the selection (a generation's id, or a local file's recorded id): drives Download.
@@ -831,7 +839,7 @@ export function Gallery({
       .catch(() => setLocal([]))
   }, [rest])
 
-  useEffect(refresh, [refresh])
+  useEffect(refresh, [refresh, storage])
   useEffect(() => {
     if (initial) {
       setSelected(initial)
@@ -842,25 +850,30 @@ export function Gallery({
   useEffect(() => {
     if (!selTask || !remote) return
     const asset = remote.find(row => row.task_id === selTask.task)
-    if (asset) setSelected(sourceForAsset(asset))
+    // Preserve the specific clip the user picked when several saved variants share a task.
+    const saved = local?.find(row => row.task === selTask.task && selected?.kind === 'file' && row.path === selected.path)
+      || local?.find(row => row.task === selTask.task)
+    if (saved) setSelected({ kind: 'file', path: saved.path, task: selTask.task,
+      media: saved.kind || 'model', images: saved.images, label: saved.prompt || saved.name })
+    else if (asset) setSelected(sourceForAsset(asset))
     else if (selected?.kind === 'remote') {
       setSelected(null)
       setSelTask(null)
     }
-  }, [remote, selTask])
+  }, [remote, local, selTask])
 
   const pickTask = (task: string) => {
+    const f = local?.find(x => x.task === task)
+    if (f) {
+      setSelected({ kind: 'file', path: f.path, task, media: f.kind || 'model', images: f.images, label: f.prompt || f.name })
+      setSelTask({ task, title: f.name })
+      return
+    }
     const r = remote?.find(m => m.task_id === task)
     const source = r && sourceForAsset(r)
     if (source) {
       setSelected(source)
       setSelTask({ task, title: r.prompt || r.task_type })
-      return
-    }
-    const f = local?.find(x => x.task === task)
-    if (f) {
-      setSelected({ kind: 'file', path: f.path, task })
-      setSelTask({ task, title: f.name })
       return
     }
     host.notify({ kind: 'info', message: `Task ${task.slice(0, 8)} isn't in the gallery list (older than the list, or never downloaded)` })
@@ -909,13 +922,16 @@ export function Gallery({
         )}
         {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
         <div role="note" style={V.hint}>
-          Remote API assets normally expire after 3 days. Viewing does not save a copy:
-          use Download for models, or ask Hermes to save images to your project.
-          Expired assets without a local copy are hidden.
+          <div>{storage ? `Auto-save ${storage.enabled ? 'on' : 'off'}` : 'Checking auto-save…'} · <Button onClick={onOpenSettings} size="sm" variant="ghost">Settings</Button></div>
+          {storage && <div>{fmtBytes(storage.bytes)} in {storage.files} known local files · <Button onClick={() => void os.revealPath(storage.directory)} size="sm" variant="ghost">Show folder</Button></div>}
+          <div>New assets are saved while Desktop is running when auto-save is on. Remote assets normally expire after 3 days; expired unsaved entries are hidden.</div>
+          {storage?.error && <div role="alert" style={V.error}>{storage.error}</div>}
+          {!!storage?.failures.length && <div role="alert" style={V.error}>{storage.failures.length} asset save(s) failed. {storage.failures[0].error}</div>}
+          {(storage?.error || !!storage?.failures.length) && <Button onClick={onRetrySave} size="sm" variant="outline">Retry saving</Button>}
         </div>
-        {filter !== 'image' && local && local.length > 0 && <div style={V.section}>On this machine</div>}
-        {local?.filter(f => matchesKind(filter, 'model') && matches(f.prompt, f.name, f.project)).map(f => {
-          const s: Source = { kind: 'file', path: f.path, ...(f.task ? { task: f.task } : {}) }
+        {local && local.some(f => matchesKind(filter, f.kind || 'model')) && <div style={V.section}>On this machine</div>}
+        {local?.filter(f => matchesKind(filter, f.kind || 'model') && matches(f.prompt, f.name, f.project)).map(f => {
+          const s: Source = { kind: 'file', path: f.path, media: f.kind || 'model', images: f.images, label: f.prompt || f.name, ...(f.task ? { task: f.task } : {}) }
           const pickLocal = () => {
             setSelected(s)
             setSelTask(f.task ? { task: f.task, title: f.name } : null)
@@ -935,7 +951,7 @@ export function Gallery({
         })}
         {remote && remote.length > 0 && <div style={V.section}>Recent generations</div>}
         {remote === null && configured && !error && <div style={V.hint}>Loading…</div>}
-        {remote?.filter(m => matchesKind(filter, m.kind) && matches(m.prompt, m.task_type)).map(m => {
+        {remote?.filter(m => !local?.some(f => f.task === m.task_id) && matchesKind(filter, m.kind) && matches(m.prompt, m.task_type)).map(m => {
           const s = sourceForAsset(m)
           return (
             <button
@@ -969,8 +985,8 @@ export function Gallery({
           <div data-meshy-gallery-head style={V.mainHead}>
             <span style={V.cardTitle}>{selected.kind === 'file' ? selected.path.split(/[\\/]/).pop() : selected.label}</span>
             <span style={V.spacer} />
-            {selTask && !(selected.kind === 'remote' && (selected.media === 'image' || selected.expired)) && <ActionMenu key={`a:${selTask.task}`} rest={rest} task={selTask.task} />}
-            {selTask && !(selected.kind === 'remote' && (selected.media === 'image' || selected.expired)) && (
+            {selTask && !(selected.media === 'image' || (selected.kind === 'remote' && selected.expired)) && <ActionMenu key={`a:${selTask.task}`} rest={rest} task={selTask.task} />}
+            {selTask && !(selected.media === 'image' || (selected.kind === 'remote' && selected.expired)) && (
               <FormatMenu
                 beside={selected.kind === 'file' ? selected.path : undefined}
                 key={`${selTask.task}:${selected.kind === 'file' ? selected.path : ''}`}

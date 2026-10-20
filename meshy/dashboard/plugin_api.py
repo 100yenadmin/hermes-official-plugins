@@ -32,6 +32,7 @@ import os
 import re
 import shutil
 import time
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -59,7 +60,7 @@ _IMAGE_ENDPOINTS = (("text-to-image", "/openapi/v1/text-to-image"),
 
 # Defaults mirror plugin.json ``extensions.com.nousresearch.hermes.config_schema``; Settings ▸ Plugins
 # writes the user's choices to ``plugins.entries.meshy.settings``.
-_SETTING_DEFAULTS = {"show_credits": True, "inline_viewer": True, "auto_rotate": True, "gallery_limit": 24}
+_SETTING_DEFAULTS = {"show_credits": True, "inline_viewer": True, "auto_rotate": True, "gallery_limit": 24, "auto_save": True}
 
 
 def _settings() -> dict:
@@ -171,6 +172,10 @@ def _credits_by_task(key: str) -> dict[str, int]:
 @router.get("/models")
 def models(limit: int | None = Query(None, ge=1, le=60)):
     limit = limit or _settings()["gallery_limit"]
+    return _list_models(limit)
+
+
+def _list_models(limit: int, *, truncate: bool = True):
     key = _api_key()
     if not key:
         return {"configured": False, "models": []}
@@ -201,7 +206,7 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
             images = [u for u in (row.get("image_urls") or []) if isinstance(u, str) and u]
             expires = row.get("expires_at")
             merged.append({"task_id": row.get("id"), "task_type": label_type, "prompt": row.get("prompt") or _clip_label(urls),
-                           "created_at": row.get("created_at"), "thumbnail_url": row.get("thumbnail_url"),
+                           "created_at": row.get("created_at"), "finished_at": row.get("finished_at"), "thumbnail_url": row.get("thumbnail_url"),
                            "glb_url": glb, "kind": "image" if task_type in {t for t, _ in _IMAGE_ENDPOINTS} else "model",
                            "image_urls": images, "expires_at": expires,
                            "expired": isinstance(expires, (int, float)) and 0 < expires <= time.time() * 1000,
@@ -209,14 +214,17 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
     merged.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
     credits = _credits_by_task(key)
     prov = _load_prov()
-    saved = {f["task"]: f["path"] for f in local(limit=200)["files"] if f.get("task")}
+    saved = {}
+    for f in local(limit=200)["files"]:
+        if f.get("task") and f.get("kind", "model") == "model":
+            saved.setdefault(f["task"], f["path"])
     for m in merged:
         if m["credits"] is None:
             m["credits"] = credits.get(m["task_id"])
         m["local_path"] = saved.get(m["task_id"]) if m["kind"] == "model" else None
         m["prompt"] = _label_for(m["task_id"], prov) or m["prompt"]
     visible = [m for m in merged if not m["expired"] or m["local_path"]]
-    return {"configured": True, "models": visible[:limit]}
+    return {"configured": True, "models": visible[:limit] if truncate else visible}
 
 
 # Profile-scoped index of models this plugin served or saved, so files the agent wrote into a project
@@ -288,6 +296,8 @@ def local(limit: int = Query(50, ge=1, le=200)):
         st = p.stat()
         seen[str(p.resolve())] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
                                   "modified": int(st.st_mtime * 1000), "task": _local_task(p)}
+    for item in _archived_files():
+        seen[item["path"]] = item
     for row in _load_index():
         p = Path(row["path"])
         if str(p) in seen or not p.is_file():
@@ -301,7 +311,7 @@ def local(limit: int = Query(50, ge=1, le=200)):
     files = sorted(seen.values(), key=lambda f: f["modified"], reverse=True)[:limit]
     prov = _load_prov()
     for f in files:
-        f["prompt"] = (_label_for(f["task"], prov) if f["task"] else None) or _project_prompt(Path(f["path"]))
+        f["prompt"] = f.get("prompt") or (_label_for(f["task"], prov) if f["task"] else None) or _project_prompt(Path(f["path"]))
     return {"dir": str(out_dir), "files": files}
 
 
@@ -855,3 +865,158 @@ def details(task: str):
         "session_id": rec.get("session_id"),
         "recorded": bool(rec),
     }
+
+
+# Desktop drives a bounded sync while loaded; files and preferences stay in the request's profile.
+_ARCHIVE_LOCK = threading.Lock()
+
+
+def _archive_root() -> Path:
+    return _data_root() / "saved-assets"
+
+
+def _archive_state() -> dict:
+    try:
+        return json.loads((_data_root() / "autosave.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"since": int(time.time() * 1000), "enabled": False, "tasks": {}}
+
+
+def _write_archive_state(state: dict) -> None:
+    target = _data_root() / "autosave.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    part = target.with_suffix(".part")
+    part.write_text(json.dumps(state), encoding="utf-8")
+    part.replace(target)
+
+
+def _archived_files() -> list[dict]:
+    files = []
+    for task, row in _archive_state().get("tasks", {}).items():
+        for raw in row.get("paths", []):
+            try:
+                path = _resolve_readable(raw)
+            except HTTPException:
+                continue
+            if not path.is_relative_to(_archive_root().resolve()):
+                continue
+            files.append({"path": str(path), "name": path.name, "task": task,
+                          "project": "Auto-saved", "kind": row["kind"], "prompt": row.get("prompt"),
+                          "bytes": path.stat().st_size, "modified": int(path.stat().st_mtime * 1000)})
+    grouped = []
+    for item in files:
+        if item["kind"] == "image":
+            existing = next((f for f in grouped if f["task"] == item["task"]), None)
+            if existing:
+                existing["images"].append(item["path"])
+                existing["bytes"] += item["bytes"]
+                continue
+            item["images"] = [item["path"]]
+        grouped.append(item)
+    return grouped
+
+
+@router.get("/storage")
+def storage():
+    # Count known files once, including companion textures and copies saved by the MCP server.
+    paths = set()
+    for folder in (_archive_root(), _data_root() / "meshy_output"):
+        for path in folder.rglob("*") if folder.is_dir() else ():
+            if path.is_file() and not path.is_symlink() and path.suffix != ".part":
+                paths.add(path.resolve())
+    for row in _load_index():
+        try:
+            paths.add(_resolve_readable(row["path"]))
+        except HTTPException:
+            continue
+    sizes = []
+    for path in paths:
+        try:
+            sizes.append(path.stat().st_size)
+        except OSError:
+            continue
+    state = _archive_state()
+    return {"enabled": _settings()["auto_save"], "bytes": sum(sizes), "files": len(sizes),
+            "directory": str(_archive_root()),
+            "failures": [{"task": task, "error": row["error"]} for task, row in state.get("tasks", {}).items() if row.get("error")]}
+
+
+@router.post("/autosave")
+def autosave():
+    """Save newly completed tasks, never backfill the account's historical gallery.
+
+    GLB embeds textures and supports animation. Save each GLB variant (rig clips included),
+    or every generated image. Other export formats remain available through Download.
+    Persist only local paths/metadata, never signed URLs. Partial failures retry next sync.
+    """
+    if not _ARCHIVE_LOCK.acquire(blocking=False):
+        return storage()
+    try:
+        enabled = _settings()["auto_save"]
+        state = _archive_state()
+        if enabled and not state["enabled"]:
+            state["since"] = int(time.time() * 1000)
+        state["enabled"] = enabled
+        _write_archive_state(state)
+        _archive_root().mkdir(parents=True, exist_ok=True)
+        if not enabled or not _api_key():
+            return storage()
+        attempted = 0
+        candidates = _list_models(60, truncate=False)["models"]
+        candidates.sort(key=lambda asset: state["tasks"].get(asset["task_id"], {}).get("attempt", 0))
+        for asset in candidates:
+            task = asset["task_id"]
+            previous = state["tasks"].get(task, {})
+            if not previous and (asset.get("finished_at") or asset["created_at"] or 0) < state["since"]:
+                continue
+            if previous.get("complete") and previous.get("paths") and all(Path(p).is_file() for p in previous["paths"]) and not previous.get("error"):
+                continue
+            if not _settings()["auto_save"]:
+                state["enabled"] = False
+                _write_archive_state(state)
+                break
+            # A separately downloaded model is already durable; do not spend the batch on it.
+            if (asset["kind"] == "model" and asset.get("local_path")
+                    and not Path(asset["local_path"]).resolve().is_relative_to(_archive_root().resolve())):
+                continue
+            if attempted >= 3:
+                break  # bound each request; the next Desktop sync continues the remaining tasks
+            attempted += 1
+            state["attempt"] = state.get("attempt", 0) + 1
+            folder = _archive_root() / task
+            paths = []
+            try:
+                row = _task(task, _api_key(), include_images=True)
+                if asset["kind"] == "image":
+                    outputs = []
+                    for index, url in enumerate(row.get("image_urls") or []):
+                        ext = Path(urllib.parse.urlsplit(url).path).suffix.lower()
+                        if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+                            ext = ".png"
+                        outputs.append((f"image-{index + 1}{ext}", url))
+                else:
+                    urls = _result_urls(row)
+                    outputs = [(f"model-{index + 1}.glb", url) for index, (fmt, url) in enumerate(sorted(urls.items()))
+                               if fmt == "glb" or fmt.startswith("glb:")]
+                if not outputs:
+                    raise HTTPException(status_code=404, detail="No supported image or GLB output available to save")
+                folder.mkdir(parents=True, exist_ok=True)
+                if folder.resolve() != _archive_root().resolve() / task:
+                    raise HTTPException(status_code=403, detail="Auto-save folder must not be a symlink")
+                for name, url in outputs:
+                    dest = folder / name
+                    if not dest.is_file():
+                        _download(url, dest)
+                    paths = [str(folder / name) for name, _ in outputs if (folder / name).is_file()]
+                    state["tasks"][task] = {"paths": paths, "kind": asset["kind"], "prompt": asset["prompt"], "attempt": state["attempt"], "complete": False}
+                    _write_archive_state(state)
+                state["tasks"][task]["complete"] = True
+            except (HTTPException, OSError, ValueError) as exc:
+                state["tasks"][task] = {**state["tasks"].get(task, previous), "complete": False, "attempt": state["attempt"], "error": exc.detail if isinstance(exc, HTTPException) else "Could not save asset locally"}
+            _write_archive_state(state)
+        if not _settings()["auto_save"]:
+            state["enabled"] = False
+            _write_archive_state(state)
+        return storage()
+    finally:
+        _ARCHIVE_LOCK.release()

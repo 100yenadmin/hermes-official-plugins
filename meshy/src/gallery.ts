@@ -14,7 +14,7 @@ export interface RemoteModel {
 }
 
 export type Source =
-  | { kind: 'file'; path: string; task?: string }
+  | { kind: 'file'; path: string; task?: string; media?: 'image' | 'model'; images?: string[]; label?: string }
   | { kind: 'remote'; url: string; label: string; media?: 'image' | 'model'; images?: string[]; expired?: boolean }
 
 export function sourceForAsset(asset: RemoteModel): Source | null {
@@ -30,4 +30,13 @@ export function sourceForAsset(asset: RemoteModel): Source | null {
 
 export function matchesKind(filter: 'all' | 'image' | 'model', kind: 'image' | 'model'): boolean {
   return filter === 'all' || filter === kind
+}
+
+export interface StorageStatus {
+  enabled: boolean
+  bytes: number
+  files: number
+  directory: string
+  failures: { task: string; error: string }[]
+  error?: string
 }
