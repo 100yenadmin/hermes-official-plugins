@@ -67,7 +67,7 @@ Trigger: user mentions game, Unity, Unreal, Godot, game-ready.
 Format by engine (Hermes change: the server text picks FBX for every engine): Unity → FBX (GLB also works through glTFast); Unreal → FBX; Godot → GLB (glTF is Godot's native import); a Blender step in between → GLB; web engines → GLB.
 Suggested flow:
 1. Before any paid call, ask: which engine; triangle budget per asset; units and forward/up axis the project expects (Meshy exports are metres, Y-up; scale with meshy_resize or in the engine); whether it needs textures, and whether it needs a rig or animation.
-2. Generate with target_formats for that engine (["fbx"] for Unity/Unreal, ["glb"] for Godot); Smart Topology by default (model_type "smart-topology", ai_model "meshy-t2.5", target_polycount = the budget, else 15000; Scenario K), Standard for hero / close-up assets.
+2. Generate with target_formats for that engine (["fbx"] for Unity/Unreal, ["glb"] for Godot); Smart Topology by default (model_type "smart-topology", ai_model "meshy-t2.5", target_polycount = the budget, else per asset from "Pick the detail level" in SKILL.md: ~15000 characters, ~3000 weapons, ~1500 props; Scenario K), Standard for hero / close-up assets.
 3. Checkpoint: show the preview geometry (thumbnail / viewer card) and get approval BEFORE paid texturing, remeshing or rigging.
 4. Textures: image-to-3d / multi-image output is already textured (unless should_texture:false); a text-to-3d preview needs meshy_text_to_3d_refine
 5. Inspect topology and face count. Smart Topology may already meet the budget; remesh only if needed and separately approved

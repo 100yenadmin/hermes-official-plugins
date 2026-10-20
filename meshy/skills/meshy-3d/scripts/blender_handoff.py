@@ -22,8 +22,10 @@ import argparse
 import json
 import math
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 
 import bpy
 
@@ -52,6 +54,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out-dir", help="directory for the new .blend and exports")
     p.add_argument("--tris", type=int, default=0, help="user-approved triangle budget (0 = no decimation)")
     p.add_argument("--export", choices=["glb", "fbx", "both", "none"], default="glb")
+    p.add_argument("--lods", default="", help="also export lower-detail copies, as fractions of the result's "
+                   "triangles (e.g. 0.5,0.25,0.1 -> <stem>_lod1..3.<ext>); same skinned/shape-key rules")
+    p.add_argument("--max-texture", type=int, default=0,
+                   help="downscale textures whose longer side exceeds N pixels (e.g. 2048); 0 = keep")
     p.add_argument("--name", help="output stem (default: input stem)")
     p.add_argument("--force", action="store_true", help="overwrite existing OUTPUT files (never the source)")
     p.add_argument("--allow-skinned", action="store_true",
@@ -188,6 +194,40 @@ def decimate_to(budget: int, allow_skinned: bool = False, allow_shape_keys: bool
     after = sum(tri_count(o) for o in meshes)
     return {"applied": True, "method": "Decimate modifier (collapse), applied; not quad retopology",
             "budget": budget, "before": before, "after": after, "ratio": round(ratio, 6)}
+
+
+def downscale_textures(max_px: int) -> list:
+    """Shrink every image whose longer side exceeds max_px, keeping the aspect ratio."""
+    changed = []
+    if max_px <= 0:
+        return changed
+    for img in bpy.data.images:
+        w, h = img.size[:2]
+        if img.has_data and max(w, h) > max_px:
+            k = max_px / max(w, h)
+            img.scale(max(1, round(w * k)), max(1, round(h * k)))
+            if img.packed_file:  # GLB textures arrive packed: re-pack the new pixels or the .blend keeps the original
+                fmt = img.file_format  # keep JPEG as JPEG: a plain pack() re-encodes as PNG, several times larger
+                tmp = os.path.join(tempfile.mkdtemp(prefix="meshy-tex-"), f"t.{'jpg' if fmt == 'JPEG' else 'png'}")
+                img.filepath_raw, img.file_format = tmp, fmt
+                img.save()
+                img.unpack(method="REMOVE")
+                img.filepath_raw = tmp
+                img.reload()
+                img.pack()
+                shutil.rmtree(os.path.dirname(tmp), ignore_errors=True)
+            changed.append({"name": img.name, "from": f"{w}x{h}", "to": f"{img.size[0]}x{img.size[1]}"})
+    return changed
+
+
+def parse_lods(spec: str) -> list:
+    try:
+        fr = [float(x) for x in spec.split(",") if x.strip()]
+    except ValueError:
+        fail(f"--lods must be comma-separated fractions, got {spec!r}")
+    if any(not 0 < f < 1 for f in fr) or fr != sorted(fr, reverse=True):
+        fail("--lods fractions must be between 0 and 1, largest first (e.g. 0.5,0.25,0.1)")
+    return fr
 
 
 # ---------------------------------------------------------------- exports
@@ -342,6 +382,9 @@ def main() -> None:
         fail("input must be a .glb or .gltf downloaded from Meshy")
     if a.tris < 0:
         fail("--tris must be >= 0")
+    lod_fractions = parse_lods(a.lods) if a.lods else []
+    if lod_fractions and a.export == "none":
+        fail("--lods needs --export glb, fbx or both")
     out_dir = os.path.realpath(a.out_dir)
     os.makedirs(out_dir, exist_ok=True)
     stem = a.name or os.path.splitext(os.path.basename(src))[0]
@@ -351,6 +394,8 @@ def main() -> None:
     kinds = {"glb": ["glb"], "fbx": ["fbx"], "both": ["glb", "fbx"], "none": []}[a.export]
     outputs = {"blend": os.path.join(out_dir, f"{stem}.blend")}
     outputs.update({k: os.path.join(out_dir, f"{stem}.{k}") for k in kinds})
+    for i, _f in enumerate(lod_fractions, 1):
+        outputs.update({f"lod{i}_{k}": os.path.join(out_dir, f"{stem}_lod{i}.{k}") for k in kinds})
     for path in outputs.values():
         if os.path.realpath(path) == src:
             fail(f"refusing to overwrite the source file {src}; pick another --name or --out-dir")
@@ -364,6 +409,7 @@ def main() -> None:
         if not source["mesh_objects"]:
             fail("the input has no mesh objects")
         dec = decimate_to(a.tris, a.allow_skinned, a.allow_shape_keys)
+        textures = downscale_textures(a.max_texture)
         for act in bpy.data.actions:  # keep imported clips in the .blend even while unassigned
             act.use_fake_user = True
         bpy.ops.file.pack_all()
@@ -373,6 +419,12 @@ def main() -> None:
         if "fbx" in outputs:
             export_fbx(outputs["fbx"])
         result_scene = stats()
+        lods = []
+        for i, frac in enumerate(lod_fractions, 1):  # each LOD reduces the previous one: same result, cheaper
+            lod = decimate_to(max(1, int(result_scene["triangles"] * frac)), a.allow_skinned, a.allow_shape_keys)
+            for k in kinds:
+                (export_glb if k == "glb" else export_fbx)(outputs[f"lod{i}_{k}"])
+            lods.append({"lod": i, "fraction": frac, "triangles": lod["after"]})
     except SystemExit:
         raise
     except HandoffRefused as exc:
@@ -387,7 +439,7 @@ def main() -> None:
     ok = all(v.get("pass") for v in verify.values()) if verify else True
     warnings = []
     for k, v in verify.items():
-        if v.get("triangles") not in (None, result_scene["triangles"]):
+        if not k.startswith("lod") and v.get("triangles") not in (None, result_scene["triangles"]):
             warnings.append(f"{k}: reopened with {v.get('triangles')} triangles, saved {result_scene['triangles']}")
         if v.get("images", 0) < result_scene["images"]:
             warnings.append(f"{k}: reopened with {v.get('images')} of {result_scene['images']} images "
@@ -401,6 +453,7 @@ def main() -> None:
         ok = False
     emit("HANDOFF_RESULT", {
         "ok": ok, "blender": bpy.app.version_string, "source": source, "decimation": dec,
+        "textures_downscaled": textures, "lods": lods,
         "result": {k: result_scene[k] for k in ("triangles", "vertices", "mesh_objects", "materials",
                                                  "images", "image_list", "armatures", "skinned_meshes",
                                                  "actions", "scene_fps")},

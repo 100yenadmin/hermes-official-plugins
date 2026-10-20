@@ -119,23 +119,36 @@ user's goal before the first paid call.
 
 ## Pick the detail level
 
-Unless the user already said, ask where the model is going, not for a triangle number. First run
-`hermes config get plugins.entries.meshy.settings.default_detail` ("not set" means `ask`; `game` or
-`detailed` picks that route without asking, but the user's own words win).
+Unless the user already said, ask what the asset IS and where it goes, not for a triangle number.
+First run `hermes config get plugins.entries.meshy.settings.default_detail` ("not set" means `ask`;
+`game`, `mobile` or `detailed` picks that route without asking, but the user's own words win).
 
-| Where it goes | Route |
+| Asset | Route and `target_polycount` (PC / console; mobile ≈ half) |
 |---|---|
-| Game asset, prop, character, mobile, background | Smart Topology: `model_type: "smart-topology"`, `ai_model: "meshy-t2.5"`, `target_polycount` 15000 (lower for mobile/background). Text: 5 preview (+10 refine for textures); image: 15 textured |
-| Hero, close-up, renders, cinematics, 3D printing | Standard full detail (`latest`, no remesh) |
-| Detail AND a triangle budget | Standard, then reduce: `meshy_remesh` (5 credits) or the Blender optimized copy (no additional Meshy credits) |
+| Player character, boss, hero NPC | Smart: 15000 (up to 30000 for a stylised hero look) |
+| NPC, common mob, creature | Smart: 5000–15000 |
+| Weapon, tool, held item | Smart: 3000 (1000–5000) |
+| Small prop (chest, barrel, crate) | Smart: 1500 (300–3000) |
+| Building, large set piece | Standard, then split or reduce; 5000–50000 total |
+| Close-up, renders, cinematics, 3D printing | Standard full detail (`latest`, no remesh) |
+| Fine carved detail AND a budget | Standard, then `meshy_remesh` (5 credits) or the Blender copy |
 
-Put the choice in one line inside the cost confirmation, e.g. "Smart Topology at 15k triangles,
-5 credits for the untextured preview; say if you want full detail instead." Ask for a number only if the user cares or the use
-is unclear. Polycount never changes the price. Smart Topology is triangle-only (no quads), keeps
-textured characters and props close to Standard at game distance, but smooths away engraving,
-filigree and crisp bevels, can drop thin hanging parts (cloth tails) and returns several separate,
-partly open parts. After generation, report the ACTUAL triangle count (it differs from the target),
-never the requested one: details in [workflows](references/workflows.md) Scenario K.
+Smart = `model_type: "smart-topology"`, `ai_model: "meshy-t2.5"` (100–30000). Text: 5 preview
+(+10 refine for textures); image: 15 textured. Polycount never changes the price.
+
+Put the choice in one line inside the cost confirmation, e.g. "Smart Topology at 1,500 triangles
+for a game prop, 5 credits for the untextured preview; say if you want more detail." Smart
+Topology is triangle-only (no quads), keeps textured characters and props close to Standard at game
+distance, but smooths away engraving, filigree and crisp bevels, can drop thin hanging parts (cloth
+tails) and returns several separate, partly open parts (merge them on import; one material = one draw
+call). After generation, report the ACTUAL triangle count (it differs from the target), never the
+requested one: details in [workflows](references/workflows.md) Scenario K.
+
+**Many on screen (MMO, crowds, mobile):** the per-model count matters less than the total per frame.
+Offer once, after the download, the Blender copy's game set (`--lods 0.5,0.25,0.1 --max-texture 2048`,
+1024 for props and mobile): lower-detail versions for distance and smaller textures, which usually
+run out before triangles do. Meshy textures are often 4K. Skinned meshes need the user's OK for
+`--allow-skinned` first, and the result's `lost` list must be reported.
 
 ## Pick the right format
 

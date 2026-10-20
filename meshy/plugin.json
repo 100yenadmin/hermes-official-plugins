@@ -68,10 +68,10 @@
         },
         "default_detail": {
           "type": "str",
-          "choices": ["ask", "game", "detailed"],
+          "choices": ["ask", "game", "mobile", "detailed"],
           "default": "ask",
           "label": "Default detail level",
-          "description": "How the Meshy skill picks mesh detail when you do not say. Ask asks where the model is going; game uses Smart Topology (clean ~15k-triangle mesh, cheaper); detailed uses Standard full detail (renders, close-ups, printing)."
+          "description": "How the Meshy skill picks mesh detail when you do not say. Ask asks what the asset is and where it goes; game uses Smart Topology sized per asset (characters ~15k, weapons ~3k, props ~1.5k triangles); mobile halves those; detailed uses Standard full detail (renders, close-ups, printing)."
         },
         "blender_path": {
           "type": "str",

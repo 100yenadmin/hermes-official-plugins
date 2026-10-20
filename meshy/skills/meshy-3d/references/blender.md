@@ -67,10 +67,11 @@ tell the user the version and stop.
 - Keep the original download and a versioned working copy; every run writes
   `<stem>_optimized.*` next to (never over) the source. Do not remesh, rerig, reset transforms or
   touch a working skin/rest pose just because the import looks unfamiliar.
-- Budget is per purpose and needs the user's number:
-  mobile / background prop 5-20k triangles, PC game prop or character 20-100k, cinematic / hero
-  close-up up to the source count (often no decimation). A static prop and an animated hero need
-  different budgets. Keep the high-detail master.
+- Budget is per asset and needs the user's number: use the table in SKILL.md "Pick the detail
+  level" (characters ~15k, weapons ~3k, props ~1.5k on PC, about half on mobile; hero close-ups up
+  to the source count). Keep the high-detail master.
+- Many on screen (MMO, crowds, mobile): offer `--lods 0.5,0.25,0.1` (distance copies) and
+  `--max-texture 2048` (1024 for props and mobile); textures usually run out before triangles.
 - Format by engine: Godot / Blender / web: GLB. Unity / Unreal: FBX (or both).
 - Wording: decimation reduces triangles; it is not retopology. If the user wants clean topology,
   Meshy remesh (5 credits) changes polygon count/topology; check the result, it is not
@@ -82,13 +83,16 @@ tell the user the version and stop.
 
 ```
 "<blender>" --background --factory-startup --python "<script>" -- \
-  --input /abs/model.glb --out-dir /abs/dir [--tris N] [--export glb|fbx|both|none] [--name stem]
+  --input /abs/model.glb --out-dir /abs/dir [--tris N] [--export glb|fbx|both|none] [--name stem] \\
+  [--lods 0.5,0.25,0.1] [--max-texture 2048]
 ```
 
 | Flag | Effect |
 |---|---|
 | `--tris N` | Decimate (collapse) all meshes proportionally to at most N; 0/omitted = none; at or below source = none |
 | `--export` | `glb` (default), `fbx`, `both`, `none` (.blend only) |
+| `--lods F,F,..` | Also export `<stem>_lod1..N` at those fractions of the result's triangles (largest first); same skinned / shape-key refusals |
+| `--max-texture N` | Downscale any texture whose longer side exceeds N px (aspect kept); reported under `textures_downscaled` |
 | `--name` | Output stem (default input stem); `_optimized` is appended |
 | `--force` | Replace existing OUTPUT files (the source is always refused) |
 | `--allow-skinned` | Decimate meshes bound to an armature (weights can tear; check poses after) |
