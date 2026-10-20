@@ -349,3 +349,19 @@ def test_image_download_ignores_preexisting_temporary_symlinks(api, monkeypatch)
     assert victim.read_text() == "unchanged"
     assert Path(saved["paths"][0]).read_bytes() == b"image"
     assert json.loads((folder / "images.json").read_text())["complete"]
+
+
+
+@pytest.mark.parametrize("kind,formats,preview", [
+    ("image-to-3d", {"glb": "https://assets.meshy.ai/a.glb"}, False),
+    ("text-to-3d-preview", {"glb": "https://assets.meshy.ai/a.glb"}, True),
+    ("text-to-3d-refine", {"glb": "https://assets.meshy.ai/a.glb", "fbx": "https://assets.meshy.ai/a.fbx"}, False),
+])
+def test_formats_separates_existing_downloads_from_priced_conversions(api, monkeypatch, kind, formats, preview):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"id": _TASK, "type": kind, "model_urls": formats})
+    result = api.formats(_TASK)
+    assert {r["format"] for r in result["formats"]} == set(formats)
+    assert result["is_preview"] == preview
+    assert {r["format"] for r in result["conversions"]} == {"glb", "fbx", "obj", "stl", "usdz", "blend", "3mf"} - set(formats)
+    assert all(r["cost"] == 1 and "meshy_convert" in r["message"] and _TASK in r["message"] for r in result["conversions"])

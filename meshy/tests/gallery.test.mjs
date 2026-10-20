@@ -29,3 +29,28 @@ for (const [filter, expected] of [['all', ['image', 'model']], ['image', ['image
     assert.deepEqual(['image', 'model'].filter(kind => matchesKind(filter, kind)), expected)
   })
 }
+
+// Image actions send explicit requests; they never implicitly approve unknown costs.
+const { imageNextActions } = await import('../src/gallery.ts')
+test('image Next uses task IDs and requires options/cost approval',()=>{
+ const rows=imageNextActions('image-task',{kind:'remote',url:'https://assets.meshy.ai/a.png',label:'Mech',media:'image'})
+ assert.equal(rows.length,3)
+ assert.ok(rows[0].message.includes('meshy_image_to_3d'))
+ assert.ok(rows.every(r=>r.message.includes('input_task_id "image-task"')&&r.message.includes('ask for my approval')))
+})
+test('saved image Next uses local files rather than an expired task reference',()=>{
+ const rows=imageNextActions('old-task',{kind:'file',path:'/project/front.png',media:'image',images:['/project/front.png','/project/back.png']})
+ assert.ok(rows[0].message.includes('meshy_image_to_3d'))
+ assert.ok(rows.at(-1).message.includes('meshy_multi_image_to_3d'))
+ assert.ok(rows[0].message.includes('/project/front.png')&&!rows[0].message.includes('/project/back.png'))
+ assert.ok(rows.every(r=>!r.message.includes('Use input_task_id')))
+})
+
+test('image actions reference the displayed view and reserve all views for an explicit action',()=>{
+ const source={kind:'remote',url:'https://assets.meshy.ai/front.png',images:['https://assets.meshy.ai/front.png','https://assets.meshy.ai/back.png'],media:'image',label:'Mech'}
+ const rows=imageNextActions('task',source,1)
+ assert.ok(rows[0].message.includes('only image 2 of 2'))
+ assert.ok(rows[1].message.includes('only image 2 of 2'))
+ assert.equal(rows.at(-1).label,'Make 3D from all views')
+ assert.ok(rows.at(-1).message.includes('input_task_id "task"'))
+})

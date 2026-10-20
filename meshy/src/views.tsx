@@ -19,7 +19,7 @@ import {
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 
 import { createStage, dataUrlToBuffer, type ModelStats, type Stage } from './stage.ts'
-import { matchesKind, sourceForAsset, type RemoteModel, type Source } from './gallery.ts'
+import { imageNextActions, matchesKind, sourceForAsset, type RemoteModel, type Source } from './gallery.ts'
 export type { RemoteModel, Source } from './gallery.ts'
 
 export type Rest = PluginContext['rest']
@@ -131,12 +131,14 @@ export function fetchSource(rest: Rest, source: Source): Promise<FilePayload> {
     : rest<FilePayload>(`remote?url=${encodeURIComponent(source.url)}`, { timeoutMs: 180_000 })
 }
 
-function ImageViewer({ rest, source }: { rest: Rest; source: Source }) {
+function ImageViewer({ rest, source, imageIndex, onImageIndexChange }: { rest: Rest; source: Source; imageIndex?: number; onImageIndexChange?: (index: number) => void }) {
   const images = source.images?.length ? source.images : [source.kind === 'file' ? source.path : source.url]
   const [index, setIndex] = useState(0)
   const [data, setData] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const url = images[index]
+  const current = Math.min(imageIndex ?? index, images.length - 1)
+  const choose = (value: number) => { setIndex(value); onImageIndexChange?.(value) }
+  const url = images[current]
   useEffect(() => {
     let live = true
     setData(null)
@@ -155,22 +157,22 @@ function ImageViewer({ rest, source }: { rest: Rest; source: Source }) {
       ) : <span role="status">Loading image…</span>}
       {images.length > 1 && (
         <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-          <Button disabled={index === 0} onClick={() => setIndex(index - 1)} size="sm" variant="outline">Previous image</Button>
-          <span>{index + 1} / {images.length}</span>
-          <Button disabled={index === images.length - 1} onClick={() => setIndex(index + 1)} size="sm" variant="outline">Next image</Button>
+          <Button disabled={current === 0} onClick={() => choose(current - 1)} size="sm" variant="outline">Previous image</Button>
+          <span>{current + 1} / {images.length}</span>
+          <Button disabled={current === images.length - 1} onClick={() => choose(current + 1)} size="sm" variant="outline">Next image</Button>
         </div>
       )}
     </div>
   )
 }
 
-function AssetViewer(props: Parameters<typeof ModelViewer>[0]) {
+function AssetViewer(props: Parameters<typeof ModelViewer>[0] & { imageIndex?: number; onImageIndexChange?: (index: number) => void }) {
   const { source, rest } = props
   if (source.kind === 'remote' && source.expired) {
     return <div role="status" style={V.empty}>This asset’s download link has expired. Open a locally saved copy if you have one.</div>
   }
   return source.media === 'image'
-    ? <ImageViewer key={source.kind === 'file' ? source.path : source.url} rest={rest} source={source} />
+    ? <ImageViewer key={source.kind === 'file' ? source.path : source.url} rest={rest} source={source} imageIndex={props.imageIndex} onImageIndexChange={props.onImageIndexChange} />
     : <ModelViewer {...props} />
 }
 
@@ -180,6 +182,18 @@ function AssetThumbnail({ asset }: { asset: RemoteModel }) {
   return asset.thumbnail_url && !asset.expired && !failed
     ? <img alt="" style={V.thumb} src={asset.thumbnail_url} onError={() => setFailed(true)} />
     : <Codicon name={asset.kind === 'image' ? 'file-media' : 'symbol-misc'} />
+}
+
+function ImageNext({ task, source, imageIndex }: { task: string; source: Source; imageIndex: number }) {
+  return <DropdownMenu>
+    <DropdownMenuTrigger asChild><Button data-meshy-image-next size="sm" variant="ghost"><Codicon name="sparkle" /> Next <Codicon name="chevron-down" size={12} /></Button></DropdownMenuTrigger>
+    <DropdownMenuContent align="end" style={{ minWidth: 250 }}>
+      {imageNextActions(task, source, imageIndex).map(row => <DropdownMenuItem key={row.id} onSelect={() => {
+        if (!host.composer?.submit(null, row.message)) host.notify({ kind: 'warning', message: 'Open a chat to work with this image' })
+      }}>{row.label}</DropdownMenuItem>)}
+      <DropdownMenuSeparator /><DropdownMenuItem disabled>Choose options and approve credits in chat</DropdownMenuItem>
+    </DropdownMenuContent>
+  </DropdownMenu>
 }
 
 async function copyTaskId(task: string) {
@@ -458,14 +472,16 @@ interface FormatRow {
  *  model on screen (no credits: Meshy made every listed format at generation time) and reveals it. */
 export function FormatMenu({ rest, os, task, beside, onSaved }: { rest: Rest; os: Os; task: string; beside?: string; onSaved?: () => void }) {
   const [rows, setRows] = useState<FormatRow[] | null>(null)
+  const [conversions, setConversions] = useState<{ format: string; cost: number; message: string }[]>([])
+  const [isPreview, setIsPreview] = useState(false)
   const [error, setError] = useState<null | string>(null)
   const [busy, setBusy] = useState<null | string>(null)
   const query = `formats?task=${encodeURIComponent(task)}${beside ? `&beside=${encodeURIComponent(beside)}` : ''}`
 
   const load = useCallback(() => {
     setError(null)
-    rest<{ formats: FormatRow[] }>(query, { timeoutMs: 30_000 })
-      .then(r => setRows(r.formats))
+    rest<{ formats: FormatRow[]; conversions?: { format: string; cost: number; message: string }[]; is_preview?: boolean }>(query, { timeoutMs: 30_000 })
+      .then(r => { setRows(r.formats); setConversions(r.conversions || []); setIsPreview(!!r.is_preview) })
       .catch((err: unknown) => setError(errorText(err)))
   }, [rest, query])
 
@@ -518,9 +534,16 @@ export function FormatMenu({ rest, os, task, beside, onSaved }: { rest: Rest; os
         {rows !== null && rows.length === 1 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem disabled>A preview has GLB only; refine it for FBX, OBJ, STL, USDZ</DropdownMenuItem>
+            <DropdownMenuItem disabled>{isPreview ? 'Untextured preview: refine it to add textures' : 'This task returned only one download format'}</DropdownMenuItem>
           </>
         )}
+        {rows !== null && !error && conversions.length > 0 && <>
+          <DropdownMenuSeparator />
+          {conversions.map(row => <DropdownMenuItem key={`convert:${row.format}`} disabled={busy !== null} onSelect={() => {
+            if (!host.composer?.submit(null, row.message)) host.notify({ kind: 'warning', message: 'Open a chat to convert this model' })
+          }}><span style={{ flex: 1 }}>Convert to {row.format.toUpperCase()}</span><span style={V.cost}>{row.cost} cr</span></DropdownMenuItem>)}
+          <DropdownMenuItem disabled>Conversion creates a new task · sends a chat request</DropdownMenuItem>
+        </>}
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -653,6 +676,7 @@ export function TranscriptCard({
         <span style={V.spacer} />
         {task && !streaming && <ActionMenu rest={rest} task={task} />}
         {task && !streaming && <FormatMenu beside={path || undefined} os={os} rest={rest} task={task} />}
+        {live && <Button onClick={() => setLive(false)} size="sm" variant="ghost">Close preview</Button>}
         <Button onClick={() => openInWorkspace(source, title)} size="sm" variant="ghost">
           <Codicon name="link-external" /> Open
         </Button>
@@ -845,6 +869,9 @@ export function Gallery({
   onOpenSettings: () => void
 }) {
   const [selected, setSelected] = useState<null | Source>(initial)
+  const [imageIndex, setImageIndex] = useState(0)
+  const selectedKey = selected?.kind === 'file' ? selected.path : selected?.url
+  useEffect(() => setImageIndex(0), [selectedKey])
   // The Meshy task behind the selection (a generation's id, or a local file's recorded id): drives Download.
   const [selTask, setSelTask] = useState<null | { task: string; title: string }>(null)
   const [remote, setRemote] = useState<RemoteModel[] | null>(null)
@@ -1018,6 +1045,7 @@ export function Gallery({
           <div data-meshy-gallery-head style={V.mainHead}>
             <span style={V.cardTitle}>{selected.kind === 'file' ? selected.path.split(/[\\/]/).pop() : selected.label}</span>
             <span style={V.spacer} />
+            {selTask && selected.media === 'image' && <ImageNext task={selTask.task} source={selected} imageIndex={imageIndex} />}
             {selTask && selected.media === 'image' && <ImageDownload key={`images:${selTask.task}`} rest={rest} os={os} task={selTask.task} source={selected} onSaved={refresh} />}
             {selTask && !(selected.media === 'image' || (selected.kind === 'remote' && selected.expired)) && <ActionMenu key={`a:${selTask.task}`} rest={rest} task={selTask.task} />}
             {selTask && !(selected.media === 'image' || (selected.kind === 'remote' && selected.expired)) && (
@@ -1038,7 +1066,7 @@ export function Gallery({
         </div>}
         {selected ? (
           <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-            <AssetViewer autoRotate={autoRotate} height="100%" key={String(autoRotate)} os={os} rest={rest} source={selected} />
+            <AssetViewer imageIndex={imageIndex} onImageIndexChange={setImageIndex} autoRotate={autoRotate} height="100%" key={String(autoRotate)} os={os} rest={rest} source={selected} />
           </div>
         ) : null}
         {selected && selTask && <MadeFrom key={`m:${selTask.task}`} onPick={pickTask} rest={rest} task={selTask.task} />}

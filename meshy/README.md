@@ -196,3 +196,12 @@ Images are saved under the profile's plugin-data `saved-assets/<task-id>/` direc
 available locally after API links expire. Saved sets have **Show saved images**; incomplete sets
 have **Retry image download**. Downloads are explicit and spend no generation credits.
 The selected asset's full **Task ID** is shown with **Copy ID** for use in follow-up agent requests.
+
+Image **Next** offers image-to-3D, image edits, and multi-view generation through chat, with settings
+and credit approval before generation. Saved images use their local paths for follow-up requests.
+The model Download menu distinguishes existing exports (free downloads) from explicit **Convert to
+FORMAT · 1 cr** chat actions; one available format does not imply the model is an untextured preview.
+The viewer renders on demand, stops scheduling frames when hidden/idle, caps moving views to 30 fps
+(15 fps for meshes above 500k triangles), and limits pixel density to 1.5. Inline **Close preview**
+releases its GPU resources. Original model geometry and downloaded files are unchanged; parsing and
+first upload of dense models can still be expensive.

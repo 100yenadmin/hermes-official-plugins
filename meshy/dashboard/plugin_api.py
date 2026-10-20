@@ -511,12 +511,22 @@ def formats(task: str, beside: str | None = None):
     key = _api_key()
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
-    urls = _result_urls(_task(task, key))
+    row = _task(task, key)
+    urls = _result_urls(row)
     out = []
     for fmt in sorted((k for k in urls if _split_format(k)[0] in _FORMAT_ORDER), key=_format_sort_key):
         saved = folder / _saved_name(stem, fmt)
         out.append({"format": fmt, "saved": str(saved) if saved.is_file() else None})
-    return {"task": task, "formats": out}
+    kind = str(row.get("type") or "")
+    conversions = []
+    if urls and kind in ("text-to-3d-preview", "text-to-3d-refine", "image-to-3d", "multi-image-to-3d", "remesh", "retexture", "convert", "resize"):
+        for fmt in ("glb", "fbx", "obj", "stl", "usdz", "blend", "3mf"):
+            if fmt not in urls:
+                conversions.append({"format": fmt, "cost": 1,
+                                    "message": f'Meshy task {task}: convert it to {fmt.upper()} using meshy_convert '
+                                    f'with input_task_id "{task}" and target_formats ["{fmt}"] (1 credit), '
+                                    'then wait and download the converted task. This message confirms the 1-credit conversion cost.'})
+    return {"task": task, "formats": out, "conversions": conversions, "is_preview": kind == "text-to-3d-preview"}
 
 
 @router.post("/save")
