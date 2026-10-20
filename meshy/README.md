@@ -147,7 +147,8 @@ From `meshy/`, run the backend regression tests against a sibling Hermes checkou
 PYTHONPATH=../../hermes-agent python -m pytest tests/test_plugin_api.py -q
 ```
 
-With Node 22.6+, run `npm ci`, `npm run test:gallery`, and `npm run typecheck`.
+Use the latest patched Node.js 24 LTS release, supported by Hermes Desktop.
+Run `npm ci`, `npm run test:gallery`, and `npm run typecheck`.
 After renderer changes, run `npm run build` and commit the generated `desktop/plugin.js`.
 
 ## Tools

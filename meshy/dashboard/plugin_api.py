@@ -297,7 +297,7 @@ def local(limit: int = Query(50, ge=1, le=200)):
         st = p.stat()
         seen[str(p.resolve())] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
                                   "modified": int(st.st_mtime * 1000), "task": _local_task(p)}
-    for item in [*_archived_files(), *_saved_images()]:
+    for item in _saved_images():
         seen[item["path"]] = item
     for row in _load_index():
         p = Path(row["path"])
@@ -886,50 +886,15 @@ def details(task: str):
     }
 
 
-def _archive_root() -> Path:
+def _saved_assets_root() -> Path:
     return _data_root() / "saved-assets"
-
-
-def _archive_state() -> dict:
-    # Read-only compatibility for copies saved by the earlier development build.
-    # No setting, endpoint, or background job writes this manifest anymore.
-    try:
-        return json.loads((_data_root() / "autosave.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {"tasks": {}}
-
-
-def _archived_files() -> list[dict]:
-    files = []
-    for task, row in _archive_state().get("tasks", {}).items():
-        for raw in row.get("paths", []):
-            try:
-                path = _resolve_readable(raw)
-            except HTTPException:
-                continue
-            if not path.is_relative_to(_archive_root().resolve()):
-                continue
-            files.append({"path": str(path), "name": path.name, "task": task,
-                          "project": "Saved assets", "kind": row["kind"], "prompt": row.get("prompt"),
-                          "bytes": path.stat().st_size, "modified": int(path.stat().st_mtime * 1000)})
-    grouped = []
-    for item in files:
-        if item["kind"] == "image":
-            existing = next((f for f in grouped if f["task"] == item["task"]), None)
-            if existing:
-                existing["images"].append(item["path"])
-                existing["bytes"] += item["bytes"]
-                continue
-            item["images"] = [item["path"]]
-        grouped.append(item)
-    return grouped
 
 
 @router.get("/storage")
 def storage():
     # Count known files once, including companion textures and copies saved by the MCP server.
     paths = set()
-    for folder in (_archive_root(), _data_root() / "meshy_output"):
+    for folder in (_saved_assets_root(), _data_root() / "meshy_output"):
         for path in folder.rglob("*") if folder.is_dir() else ():
             if path.is_file() and not path.is_symlink() and path.suffix != ".part":
                 paths.add(path.resolve())
@@ -965,9 +930,9 @@ def save_images(body: dict):
         if not isinstance(urls, list) or not urls:
             raise HTTPException(status_code=404, detail="this task has no generated images")
         urls = [_asset_url(url) for url in urls]
-        folder = _archive_root() / task
+        folder = _saved_assets_root() / task
         folder.mkdir(parents=True, exist_ok=True)
-        if folder.resolve() != _archive_root().resolve() / task:
+        if folder.resolve() != _saved_assets_root().resolve() / task:
             raise HTTPException(status_code=403, detail="image folder must not be a symlink")
         outputs = []
         for index, url in enumerate(urls):
@@ -1000,7 +965,7 @@ def save_images(body: dict):
 
 def _saved_images() -> list[dict]:
     out = []
-    for manifest in _archive_root().glob("*/images.json"):
+    for manifest in _saved_assets_root().glob("*/images.json"):
         try:
             row = json.loads(manifest.read_text(encoding="utf-8"))
             task = row.get("task")
@@ -1014,7 +979,7 @@ def _saved_images() -> list[dict]:
                     path = _resolve_readable(str(manifest.parent / name))
                 except HTTPException:
                     continue
-                if path.is_relative_to(_archive_root().resolve()) and path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                if path.is_relative_to(_saved_assets_root().resolve()) and path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
                     paths.append(path)
             if paths:
                 out.append({"path": str(paths[0]), "images": [str(p) for p in paths], "name": paths[0].name,

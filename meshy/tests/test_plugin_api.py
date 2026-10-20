@@ -274,22 +274,6 @@ def test_storage_counts_companions_and_indexed_files_once_without_network(api):
     assert Path(summary["directory"]) == api.data
 
 
-def test_previous_saved_image_sets_survive_without_auto_save_or_api_key(api, monkeypatch):
-    folder = api.data / "saved-assets" / _TASK
-    folder.mkdir(parents=True)
-    paths = [folder / "image-1.png", folder / "image-2.png"]
-    for p in paths:
-        p.write_bytes(b"image")
-    state = {"tasks": {_TASK: {"kind": "image", "prompt": "Mech", "paths": [str(p) for p in paths]}}}
-    (api.data / "autosave.json").write_text(json.dumps(state))
-    monkeypatch.setattr(api, "_api_key", lambda: None)
-    local = api.local(limit=200)["files"]
-    assert len(local) == 1 and local[0]["kind"] == "image"
-    assert local[0]["images"] == [str(p) for p in paths]
-    assert api.storage()["bytes"] == 10
-    assert api.file(local[0]["path"])["bytes"] == 5
-
-
 @pytest.mark.parametrize("task", ["", "../outside", "https://assets.meshy.ai/x.png"])
 def test_image_download_validates_task_before_network(api, task):
     assert _status(api.save_images, {"task": task}) == 400
@@ -340,7 +324,7 @@ def test_image_download_rejects_missing_outputs_and_foreign_hosts_before_writing
     monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
     monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": urls})
     assert _status(api.save_images, {"task": _TASK}) == expected
-    assert not api._archive_root().exists()
+    assert not api._saved_assets_root().exists()
 
 
 def test_image_lookup_uses_image_endpoint_response(api, monkeypatch):
@@ -358,7 +342,7 @@ def test_image_download_ignores_preexisting_temporary_symlinks(api, monkeypatch)
     import io
     monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
     monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": ["https://assets.meshy.ai/a.png"]})
-    folder = api._archive_root() / _TASK
+    folder = api._saved_assets_root() / _TASK
     folder.mkdir(parents=True)
     victim = api.tmp / "outside" / "keep.txt"
     victim.write_text("unchanged")
