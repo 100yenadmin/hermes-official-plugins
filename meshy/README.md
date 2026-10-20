@@ -179,3 +179,5 @@ The MCP server and the workflow rules the skill carries are by Meshy AI
 ([meshy-dev/meshy-mcp-server](https://github.com/meshy-dev/meshy-mcp-server), MIT,
 Copyright (c) 2026 Meshy AI). Meshy is a product of Meshy AI. Packaging and skill: Nous
 Research, MIT.
+
+Remote API assets normally expire after three days. Viewing a remote asset does not save it. Use the Desktop Download menu or the agent download workflow to keep models locally; save images into your project through the agent. Expired remote entries without an indexed local model copy are hidden. The gallery deduplicates tasks returned by multiple API endpoints.

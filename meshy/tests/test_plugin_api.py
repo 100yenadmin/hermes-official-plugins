@@ -218,3 +218,21 @@ def test_image_details_recovers_provider_prompt_without_local_provenance(api, mo
         raise urllib.error.HTTPError(path, 404, "missing", {}, None)
     monkeypatch.setattr(api, "_meshy_get", get)
     assert api.details(_TASK)["prompt"] == "low poly mech concept"
+
+
+def test_gallery_hides_expired_unsaved_assets_and_deduplicates_tasks(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api.time, "time", lambda: 1000)
+    current = {"id": _TASK, "type": "image-to-image", "status": "SUCCEEDED", "created_at": 100,
+               "expires_at": 2000000, "image_urls": ["https://assets.meshy.ai/current.png"]}
+    old = {**current, "id": "01a15965-4a40-718b-8912-4046ede4837f", "created_at": 200,
+           "expires_at": 999000}
+    def get(path, *_a, **_k):
+        if path.split("?")[0] in {"/openapi/v1/text-to-image", "/openapi/v1/image-to-image"}:
+            return [old, current]
+        return []
+    monkeypatch.setattr(api, "_meshy_get", get)
+    result = api.models(limit=1)["models"]
+    assert len(result) == 1  # expired rows must not consume the visible limit
+    assert result[0]["task_id"] == _TASK
+    assert result[0]["task_type"] == "image-to-image"

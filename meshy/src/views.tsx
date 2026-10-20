@@ -843,6 +843,10 @@ export function Gallery({
     if (!selTask || !remote) return
     const asset = remote.find(row => row.task_id === selTask.task)
     if (asset) setSelected(sourceForAsset(asset))
+    else if (selected?.kind === 'remote') {
+      setSelected(null)
+      setSelTask(null)
+    }
   }, [remote, selTask])
 
   const pickTask = (task: string) => {
@@ -904,6 +908,11 @@ export function Gallery({
           </div>
         )}
         {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
+        <div role="note" style={V.hint}>
+          Remote API assets normally expire after 3 days. Viewing does not save a copy:
+          use Download for models, or ask Hermes to save images to your project.
+          Expired assets without a local copy are hidden.
+        </div>
         {filter !== 'image' && local && local.length > 0 && <div style={V.section}>On this machine</div>}
         {local?.filter(f => matchesKind(filter, 'model') && matches(f.prompt, f.name, f.project)).map(f => {
           const s: Source = { kind: 'file', path: f.path, ...(f.task ? { task: f.task } : {}) }

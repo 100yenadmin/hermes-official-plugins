@@ -175,6 +175,7 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
     if not key:
         return {"configured": False, "models": []}
     merged: list[dict] = []
+    seen: set[str] = set()
     for task_type, path in (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS):
         try:
             rows = _meshy_get(f"{path}?page_size={limit}&sort_by=-created_at", key)
@@ -187,20 +188,25 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
         for row in rows if isinstance(rows, list) else []:
             if row.get("status") != "SUCCEEDED":
                 continue
+            task_id = row.get("id")
+            if not isinstance(task_id, str) or not task_id or task_id in seen:
+                continue
+            seen.add(task_id)
+            actual_type = row.get("type")
+            label_type = actual_type if actual_type in {t for t, _ in (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS)} else task_type
             urls = _result_urls(row)
             # A rig's bind-pose character sits still; its walking clip shows what the rig is for.
             clips = [u for k, u in sorted(urls.items()) if k.startswith("glb:")]
             glb = (clips[-1] if clips and task_type == "rigging" else None) or urls.get("glb") or next(iter(clips), None)
             images = [u for u in (row.get("image_urls") or []) if isinstance(u, str) and u]
             expires = row.get("expires_at")
-            merged.append({"task_id": row.get("id"), "task_type": task_type, "prompt": row.get("prompt") or _clip_label(urls),
+            merged.append({"task_id": row.get("id"), "task_type": label_type, "prompt": row.get("prompt") or _clip_label(urls),
                            "created_at": row.get("created_at"), "thumbnail_url": row.get("thumbnail_url"),
                            "glb_url": glb, "kind": "image" if task_type in {t for t, _ in _IMAGE_ENDPOINTS} else "model",
                            "image_urls": images, "expires_at": expires,
                            "expired": isinstance(expires, (int, float)) and 0 < expires <= time.time() * 1000,
                            "credits": row.get("consumed_credits")})
     merged.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
-    merged = merged[:limit]
     credits = _credits_by_task(key)
     prov = _load_prov()
     saved = {f["task"]: f["path"] for f in local(limit=200)["files"] if f.get("task")}
@@ -209,7 +215,8 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
             m["credits"] = credits.get(m["task_id"])
         m["local_path"] = saved.get(m["task_id"]) if m["kind"] == "model" else None
         m["prompt"] = _label_for(m["task_id"], prov) or m["prompt"]
-    return {"configured": True, "models": merged}
+    visible = [m for m in merged if not m["expired"] or m["local_path"]]
+    return {"configured": True, "models": visible[:limit]}
 
 
 # Profile-scoped index of models this plugin served or saved, so files the agent wrote into a project
