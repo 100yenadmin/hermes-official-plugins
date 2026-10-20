@@ -263,9 +263,18 @@ async function cdpConnect(chromeBin, profileDir, size) {
     '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--mute-audio',
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--hide-scrollbars',
     `--window-size=${size},${size}`, `--user-data-dir=${profileDir}`, '--remote-debugging-port=0', 'about:blank']
-  const proc = spawn(chromeBin, args, { stdio: ['ignore', 'ignore', 'pipe'], detached: false })
+  // Chromium gets a private TMPDIR, removed with it (a SIGKILLed browser leaves its
+  // org.chromium.* dirs behind). Kept short: Chromium puts its singleton unix socket there and
+  // aborts (SIGTRAP) past the 108-byte sockaddr limit, as with deep per-profile scratch dirs.
+  const env = { ...process.env }
+  let shortTmp = null
+  if (process.platform !== 'win32') env.TMPDIR = shortTmp = fs.mkdtempSync(path.join(os.tmpdir().length > 60 ? '/tmp' : os.tmpdir(), 'meshy-'))
+  const proc = spawn(chromeBin, args, { stdio: ['ignore', 'ignore', 'pipe'], detached: false, env })
   // Never leave a browser behind, even on Ctrl-C / timeout.
-  const reap = () => { try { proc.kill('SIGKILL') } catch {} }
+  const reap = () => {
+    try { proc.kill('SIGKILL') } catch {}
+    if (shortTmp) try { fs.rmSync(shortTmp, { recursive: true, force: true }) } catch {}
+  }
   process.on('exit', reap)
   for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(sig, () => { reap(); process.exit(130) })
   let stderr = ''
@@ -304,7 +313,7 @@ async function cdpConnect(chromeBin, profileDir, size) {
     return d.result.result.value
   }
   await send('Runtime.enable'); await send('Log.enable')
-  const close = () => { try { ws.close() } catch {} ; try { proc.kill('SIGKILL') } catch {} }
+  const close = () => { try { ws.close() } catch {} ; reap() }
   return { evaluate, close, proc, stderr: () => stderr, pageErrors }
 }
 
@@ -330,6 +339,7 @@ async function main() {
   const t0 = Date.now()
   const params = { size: a.size, fps: a.fps, frames: 1, az0: Math.PI / 5, clip: a.clip || null, listOnly: !!a.listClips, label: null }
   const work = fs.mkdtempSync(path.join(os.tmpdir(), 'meshy-preview-'))
+  if (!a.keepFrames) process.on('exit', () => { try { fs.rmSync(work, { recursive: true, force: true }) } catch {} })
   const b = await cdpConnect(chrome, path.join(work, 'profile'), a.size)
   const cleanup = () => { b.close(); if (!a.keepFrames) fs.rmSync(work, { recursive: true, force: true }) }
   try {
