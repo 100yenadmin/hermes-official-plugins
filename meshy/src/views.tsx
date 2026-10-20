@@ -19,7 +19,7 @@ import {
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 
 import { createStage, dataUrlToBuffer, type ModelStats, type Stage } from './stage.ts'
-import { imageNextActions, matchesKind, sourceForAsset, type RemoteModel, type Source } from './gallery.ts'
+import { imageNextActions, matchesKind, reconcileSelection, sourceForAsset, type RemoteModel, type Source } from './gallery.ts'
 export type { RemoteModel, Source } from './gallery.ts'
 
 export type Rest = PluginContext['rest']
@@ -873,6 +873,7 @@ export function Gallery({
   onOpenSettings: () => void
 }) {
   const [selected, setSelected] = useState<null | Source>(initial)
+  const explicitSelection = useRef(Boolean(initial))
   const [imageIndex, setImageIndex] = useState(0)
   const selectedKey = selected?.kind === 'file' ? selected.path : selected?.url
   useEffect(() => setImageIndex(0), [selectedKey])
@@ -905,6 +906,7 @@ export function Gallery({
   useEffect(refresh, [refresh])
   useEffect(() => {
     if (initial) {
+      explicitSelection.current = true
       setSelected(initial)
       setSelTask(
         initial.task
@@ -916,23 +918,24 @@ export function Gallery({
 
   useEffect(() => {
     if (!selTask || !remote) return
-    const asset = remote.find(row => row.task_id === selTask.task)
-    // Preserve the specific clip the user picked when several saved variants share a task.
-    const saved = local?.find(row => row.task === selTask.task && selected?.kind === 'file' && row.path === selected.path)
-      || local?.find(row => row.task === selTask.task)
-    if (saved) setSelected({ kind: 'file', path: saved.path, task: selTask.task,
-      media: saved.kind || 'model', images: saved.images, incomplete: saved.download_incomplete, label: saved.prompt || saved.name })
-    else if (asset) setSelected(sourceForAsset(asset))
-    else if (initial?.kind === 'remote' && initial.task === selTask.task) setSelected(initial)
-    else if (selected?.kind === 'remote') {
-      setSelected(null)
-      setSelTask(null)
+    const saved: Source[] = (local || []).map(file => ({
+      kind: 'file', path: file.path, task: file.task || undefined, media: file.kind || 'model',
+      images: file.images, incomplete: file.download_incomplete, label: file.prompt || file.name
+    }))
+    if (explicitSelection.current) {
+      // The initial-source effect may have queued a new clip in this same effect flush.
+      setSelected(current => reconcileSelection(current, current?.task || selTask.task, true, remote, saved))
+      return
     }
+    const next = reconcileSelection(selected, selTask.task, false, remote, saved)
+    setSelected(next)
+    if (!next) setSelTask(null)
   }, [remote, local, selTask, initial])
 
   const pickTask = (task: string) => {
     const f = local?.find(x => x.task === task)
     if (f) {
+      explicitSelection.current = false
       setSelected({ kind: 'file', path: f.path, task, media: f.kind || 'model', images: f.images, incomplete: f.download_incomplete, label: f.prompt || f.name })
       setSelTask({ task, title: f.name })
       return
@@ -940,6 +943,7 @@ export function Gallery({
     const r = remote?.find(m => m.task_id === task)
     const source = r && sourceForAsset(r)
     if (source) {
+      explicitSelection.current = false
       setSelected(source)
       setSelTask({ task, title: r.prompt || r.task_type })
       return
@@ -994,6 +998,7 @@ export function Gallery({
         {local?.filter(f => matchesKind(filter, f.kind || 'model') && matches(f.prompt, f.name, f.project)).map(f => {
           const s: Source = { kind: 'file', path: f.path, media: f.kind || 'model', images: f.images, incomplete: f.download_incomplete, label: f.prompt || f.name, ...(f.task ? { task: f.task } : {}) }
           const pickLocal = () => {
+            explicitSelection.current = true
             setSelected(s)
             setSelTask(f.task ? { task: f.task, title: f.name } : null)
           }
@@ -1021,6 +1026,7 @@ export function Gallery({
               key={m.task_id}
               onClick={() => {
                 if (s) {
+                  explicitSelection.current = false
                   setSelected(s)
                   setSelTask({ task: m.task_id, title: m.prompt || m.task_type })
                 }

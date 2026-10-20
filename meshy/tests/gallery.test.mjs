@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { matchesKind, sourceForAsset } from '../src/gallery.ts'
+import { matchesKind, reconcileSelection, sourceForAsset } from '../src/gallery.ts'
 
 const model = { task_id: 'task', task_type: 'image-to-3d', prompt: 'Mech', kind: 'model',
   image_urls: [], expired: false, glb_url: 'https://assets.meshy.ai/mech.glb' }
@@ -59,3 +59,21 @@ test('opening a remote gallery source retains its task ID for workspace actions'
  const source=sourceForAsset(model)
  assert.equal(source.task,model.task_id)
 })
+
+const clip = { kind: 'remote', task: 'task', url: 'https://assets.meshy.ai/running.glb', label: 'Running' }
+const bindPose = { kind: 'file', task: 'task', path: '/saved/bind-pose.glb' }
+const savedClip = { kind: 'file', task: 'task', path: '/project/running.glb' }
+for (const [name, selected, explicit, remote, saved, expected] of [
+  ['explicit remote clip survives a different default and saved sibling', clip, true, [model], [bindPose], clip],
+  ['explicit remote clip survives an absent gallery task', clip, true, [], [], clip],
+  ['explicit local clip outside the bounded list survives a saved sibling', savedClip, true, [model], [bindPose], savedClip],
+  ['explicit local selection receives metadata only for its own file', savedClip, true, [model], [bindPose, { ...savedClip, label: 'Running' }], { ...savedClip, label: 'Running' }],
+  ['generic task selection switches to its saved copy', clip, false, [model], [bindPose], bindPose],
+  ['generic task refresh preserves the chosen saved variant', savedClip, false, [model], [bindPose, savedClip], savedClip],
+  ['generic remote selection clears when no output remains', clip, false, [], [], null],
+  ['selecting another task does not restore the initial clip', sourceForAsset({ ...model, task_id: 'other' }), false, [{ ...model, task_id: 'other' }], [bindPose], sourceForAsset({ ...model, task_id: 'other' })]
+]) {
+  test(name, () => {
+    assert.deepEqual(reconcileSelection(selected, selected.task, explicit, remote, saved), expected)
+  })
+}

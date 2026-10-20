@@ -28,6 +28,23 @@ export function sourceForAsset(asset: RemoteModel): Source | null {
   } : null
 }
 
+/** A task may contain several clips/files. Only generic task selections may change files. */
+export function reconcileSelection(
+  selected: Source | null,
+  task: string,
+  explicit: boolean,
+  remote: RemoteModel[],
+  saved: Source[]
+): Source | null {
+  const exact = selected?.kind === 'file'
+    ? saved.find(source => source.kind === 'file' && source.path === selected.path && source.task === task)
+    : undefined
+  if (explicit) return exact || selected
+  const local = exact || saved.find(source => source.task === task)
+  const asset = remote.find(row => row.task_id === task)
+  return local || (asset && sourceForAsset(asset)) || (selected?.kind === 'file' ? selected : null)
+}
+
 export function matchesKind(filter: 'all' | 'image' | 'model', kind: 'image' | 'model'): boolean {
   return filter === 'all' || filter === kind
 }
