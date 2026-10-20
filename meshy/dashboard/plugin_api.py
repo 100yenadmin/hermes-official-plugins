@@ -44,7 +44,8 @@ _MIME = {".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".png": "image
 # Model types the list endpoints serve, newest-first per type; merged and re-sorted below.
 _MODEL_ENDPOINTS = (("text-to-3d", "/openapi/v2/text-to-3d"), ("image-to-3d", "/openapi/v1/image-to-3d"),
                     ("multi-image-to-3d", "/openapi/v1/multi-image-to-3d"), ("remesh", "/openapi/v1/remesh"),
-                    ("retexture", "/openapi/v1/retexture"), ("rigging", "/openapi/v1/rigging"))
+                    ("retexture", "/openapi/v1/retexture"), ("rigging", "/openapi/v1/rigging"),
+                    ("animation", "/openapi/v1/animations"))
 
 
 # Defaults mirror plugin.json ``extensions.com.nousresearch.hermes.config_schema``; Settings ▸ Plugins
@@ -167,10 +168,13 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
         for row in rows if isinstance(rows, list) else []:
             if row.get("status") != "SUCCEEDED":
                 continue
-            urls = row.get("model_urls") or {}
-            merged.append({"task_id": row.get("id"), "task_type": task_type, "prompt": row.get("prompt") or "",
+            urls = _result_urls(row)
+            # A rig's bind-pose character sits still; its walking clip shows what the rig is for.
+            clips = [u for k, u in sorted(urls.items()) if k.startswith("glb:")]
+            glb = (clips[-1] if clips and task_type == "rigging" else None) or urls.get("glb") or next(iter(clips), None)
+            merged.append({"task_id": row.get("id"), "task_type": task_type, "prompt": row.get("prompt") or _clip_label(urls),
                            "created_at": row.get("created_at"), "thumbnail_url": row.get("thumbnail_url"),
-                           "glb_url": urls.get("glb") if isinstance(urls, dict) else None})
+                           "glb_url": glb})
     merged.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
     merged = merged[:limit]
     credits = _credits_by_task(key)
@@ -300,6 +304,82 @@ _TASK_ID = re.compile(r"^[0-9a-f][0-9a-f-]{15,63}$")
 _MAX_SAVE_BYTES = 1024 * 1024 * 1024
 
 
+# Rigging and animation tasks carry no ``model_urls``: their files sit in ``result`` as
+# ``<what>_<fmt>_url`` (``rigged_character_glb_url``, ``animation_fbx_url``) and, for a rig's free
+# clips, ``result.basic_animations.<clip>_<fmt>_url``. The main file maps to the plain format key;
+# extra clips map to ``<fmt>:<clip>`` (``glb:walking``) so the Download menu lists one row each.
+_MAIN_OUTPUTS = ("rigged_character", "animation", "processed")
+_VARIANT = re.compile(r"^[a-z0-9_]{1,40}$")
+
+
+def _result_urls(row: dict) -> dict[str, str]:
+    """``{format or format:clip: url}`` for any task: ``model_urls`` as-is, else its ``result`` files."""
+    urls = row.get("model_urls")
+    if isinstance(urls, dict) and urls:
+        return {k: v for k, v in urls.items() if isinstance(v, str) and v}
+    result = row.get("result")
+    out: dict[str, str] = {}
+    if not isinstance(result, dict):
+        return out
+
+    def take(prefix: str, field: str, url: object) -> None:
+        if not (isinstance(url, str) and url and field.endswith("_url")):
+            return
+        stem = field[:-4]
+        fmt = next((f for f in _FORMAT_ORDER if stem == f or stem.endswith("_" + f)), None)
+        if not fmt:
+            return
+        what = stem[: -len(fmt)].rstrip("_")
+        if "armature" in what:
+            return  # skeleton-only exports: not a model a user means to open
+        name = what if not prefix else f"{prefix}_{what}" if what else prefix
+        if not prefix and (not what or what in _MAIN_OUTPUTS):
+            out.setdefault(fmt, url)
+            return
+        clip = re.sub(r"^(basic_animations_|processed_)", "", name)
+        if _VARIANT.match(clip):
+            out.setdefault(f"{fmt}:{clip}", url)
+
+    for field, value in result.items():
+        if isinstance(value, dict):
+            for sub, url in value.items():
+                take("", sub, url) if field == "basic_animations" else take(field, sub, url)
+        else:
+            take("", field, value)
+    return out
+
+
+def _owning_record(row: dict, task_id: str, key: str) -> dict:
+    """Meshy answers a task id on every endpoint, reshaped to that endpoint (a rig id read from
+    text-to-3d has ``model_urls`` and no rig files). The record's own ``type`` names the real owner;
+    re-read rigging/animation tasks there so their ``result`` files are what the menus list."""
+    kind = str(row.get("type") or "").lower()
+    path = "/openapi/v1/rigging" if kind.startswith("rig") else "/openapi/v1/animations" if "anim" in kind else None
+    if not path or isinstance(row.get("result"), dict):
+        return row
+    try:
+        owned = _meshy_get(f"{path}/{task_id}", key)
+    except (urllib.error.URLError, OSError, ValueError):
+        return row
+    return owned if isinstance(owned, dict) and owned.get("id") == task_id else row
+
+
+def _clip_label(urls: dict[str, str]) -> str:
+    """A rig/animation task has no prompt; name it by the clips it carries (``walking, running``)."""
+    clips = sorted({_split_format(k)[1] for k in urls if ":" in k} - {None})
+    return ", ".join(c.replace("_", " ") for c in clips if c)
+
+
+def _split_format(key: str) -> tuple[str, str | None]:
+    base, _, clip = key.partition(":")
+    return base, (clip or None)
+
+
+def _format_sort_key(key: str) -> tuple[int, str]:
+    base, clip = _split_format(key)
+    return (_FORMAT_ORDER.index(base) if base in _FORMAT_ORDER else 99, clip or "")
+
+
 def _task(task_id: str, key: str) -> dict:
     """The task record (with signed ``model_urls``), found on whichever generation endpoint owns it."""
     if not _TASK_ID.match(task_id or ""):
@@ -314,7 +394,7 @@ def _task(task_id: str, key: str) -> dict:
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise _meshy_error(exc) from exc
         if isinstance(row, dict) and row.get("id") == task_id:
-            return row
+            return _owning_record(row, task_id, key)
     raise HTTPException(status_code=404, detail="Meshy has no finished task with that id")
 
 
@@ -359,12 +439,11 @@ def formats(task: str, beside: str | None = None):
     key = _api_key()
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
-    urls = _task(task, key).get("model_urls") or {}
+    urls = _result_urls(_task(task, key))
     out = []
-    for fmt in _FORMAT_ORDER:
-        if isinstance(urls, dict) and urls.get(fmt):
-            saved = folder / f"{stem}.{fmt}"
-            out.append({"format": fmt, "saved": str(saved) if saved.is_file() else None})
+    for fmt in sorted((k for k in urls if _split_format(k)[0] in _FORMAT_ORDER), key=_format_sort_key):
+        saved = folder / _saved_name(stem, fmt)
+        out.append({"format": fmt, "saved": str(saved) if saved.is_file() else None})
     return {"task": task, "formats": out}
 
 
@@ -373,7 +452,8 @@ def save(body: dict):
     """Download one format of a finished task. Meshy produced every listed format at generation time,
     so this spends no credits. OBJ brings its .mtl and base-colour texture, renamed per model."""
     task_id, fmt = str(body.get("task") or ""), str(body.get("format") or "").lower()
-    if fmt not in _FORMAT_ORDER:
+    base, clip = _split_format(fmt)
+    if base not in _FORMAT_ORDER or (clip is not None and not _VARIANT.match(clip)):
         raise HTTPException(status_code=400, detail="unknown format")
     beside = body.get("beside") or None
     folder, stem = _save_target(task_id, beside)
@@ -381,13 +461,13 @@ def save(body: dict):
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
     row = _task(task_id, key)
-    urls = row.get("model_urls") or {}
-    if not isinstance(urls, dict) or not urls.get(fmt):
+    urls = _result_urls(row)
+    if not urls.get(fmt):
         raise HTTPException(status_code=404, detail=f"this model has no {fmt.upper()} file")
     folder.mkdir(parents=True, exist_ok=True)
     if not beside:
         (folder / _TASK_SIDECAR).write_text(task_id, encoding="utf-8")
-    dest = folder / f"{stem}.{fmt}"
+    dest = folder / _saved_name(stem, fmt)
     if not dest.is_file():
         _download(urls[fmt], dest)
         if fmt == "obj" and urls.get("mtl"):
@@ -395,6 +475,12 @@ def save(body: dict):
     if fmt in ("glb", "gltf"):
         _record_asset(dest, task_id)
     return {"path": str(dest), "bytes": dest.stat().st_size}
+
+
+def _saved_name(stem: str, fmt: str) -> str:
+    """``model.glb`` for the main file, ``model_walking.glb`` for a rig's extra clip."""
+    base, clip = _split_format(fmt)
+    return f"{stem}_{clip}.{base}" if clip else f"{stem}.{base}"
 
 
 def _save_obj_material(row: dict, mtl_url: str, folder: Path, stem: str) -> None:
