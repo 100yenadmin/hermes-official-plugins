@@ -58,6 +58,19 @@
           "default": 24,
           "label": "Recent generations shown",
           "description": "How many recent Meshy generations the gallery lists (1-60)."
+        },
+        "blender_handoff": {
+          "type": "str",
+          "choices": ["ask", "always", "never"],
+          "default": "ask",
+          "label": "Blender optimized copy",
+          "description": "When Blender is installed, offer an optimized copy for game testing after a download (packed textures, optional triangle budget, new .blend + GLB/FBX). Runs locally, no additional Meshy credits. Ask offers it once."
+        },
+        "blender_path": {
+          "type": "str",
+          "default": "",
+          "label": "Blender executable",
+          "description": "Full path to Blender 4.2 or newer. Empty finds it on PATH or in the usual install folders."
         }
       }
     }
