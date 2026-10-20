@@ -154,6 +154,8 @@ download result gave one), and that a saved file is permanent.
   working at `expires_at`. Gateways in strict media mode deliver only files under Hermes' cache
   folders or created in the last 10 minutes: download right before you reply, or `save_to` under
   `<HERMES_HOME>/cache/documents/`.
+  For animated or rigged models (and as a quick look at any model), render a short preview video
+  with [preview video](references/preview-video.md) and send it as an attachment.
 - **CLI / TUI:** plain text, no `MEDIA:` (printed literally): the absolute path, plus the signed
   link with its expiry if the user may want it elsewhere.
 - **Approvals off Desktop:** every create and download asks first. On a gateway the approval
