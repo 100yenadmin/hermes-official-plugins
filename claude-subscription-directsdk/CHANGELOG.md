@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Report `Claude request cancelled` when a request is cancelled while native acknowledges replayed history, and include native's exit code and stderr when native exits before that acknowledgment (#122, thanks @Eros-H).
 - Restore gzip compression for large direct Anthropic requests, with a process-wide latch and one uncompressed resend when request encoding is rejected.
 - A reasoning-off request (`reasoning.enabled: false` or effort `none`) on a route that cannot disable thinking (Haiku 5.5, Sonnet 5.5, Opus 5.5, Fable) now asks for `effort: low` instead of sending no effort, where native thought at its default effort. Routes that accept the disable still receive it.
 - Structured output no longer 400s upstream on schema keywords native rejects: `minimum`/`maximum`/`exclusiveMinimum`/`exclusiveMaximum`/`multipleOf` on integer and number, `maxItems`/`uniqueItems` on array, `minProperties`/`maxProperties` on object, and `type` beside `enum` (a nullable enum) are dropped from the wire schema only, and an array `minItems` above 1 is sent as 1. Hermes still validates the reply against the full schema, so the constraints hold, and core no longer retries without a schema (a doubled call).

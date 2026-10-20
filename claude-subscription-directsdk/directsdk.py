@@ -909,10 +909,15 @@ class Client:
                         while True:
                             ack = receive()
                             if ack is None:
-                                raise RuntimeError('Native exited before replay acknowledgment')
+                                # cancel() kills native, so the reader's None can win the race with receive()'s check.
+                                if request.cancelled.is_set():
+                                    raise RuntimeError('Claude request cancelled')
+                                # The reader waited on the process before pushing None, so returncode is set; let stderr finish draining.
+                                err_drain.join(timeout=1)
+                                raise RuntimeError(f'Native exited before replay acknowledgment (exit={p.returncode}){_stderr_tail(native_stderr)}')
                             if ack.get('type') == 'result':
                                 if ack.get('num_turns') != 0 or ack.get('is_error'):
-                                    raise RuntimeError('Native history replay not supported: expected zero-turn acknowledgment')
+                                    raise RuntimeError('Native history replay not supported: expected zero-turn acknowledgment' + _stderr_tail(native_stderr))
                                 break
                 send(None)
                 assistants, results, stopped, emitted = [], [], False, ''
