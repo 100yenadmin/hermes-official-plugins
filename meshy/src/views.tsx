@@ -75,6 +75,7 @@ const V = {
   error: { color: 'var(--ui-danger, #e5484d)' },
   toolbar: { position: 'absolute', top: 6, right: 6, display: 'flex', gap: 2, padding: 2, borderRadius: 6, background: 'color-mix(in srgb, var(--ui-bg, #111) 70%, transparent)' },
   toolOn: { color: 'var(--ui-accent)' },
+  scrub: { position: 'absolute', top: 44, right: 6, width: 'min(320px, calc(100% - 12px))', display: 'flex', alignItems: 'center', gap: 6, padding: '2px 8px', borderRadius: 6, fontSize: 11, color: '#e8e8ea', background: 'rgba(17, 18, 20, 0.62)', fontVariantNumeric: 'tabular-nums' },
   stats: { position: 'absolute', left: 6, bottom: 6, padding: '2px 6px', borderRadius: 4, fontSize: 11, color: '#e8e8ea', background: 'rgba(17, 18, 20, 0.62)', fontVariantNumeric: 'tabular-nums', pointerEvents: 'none' },
   card: { border: '1px solid var(--ui-stroke-secondary)', borderRadius: 10, padding: 8, margin: '6px 0', maxWidth: 640 },
   cardHead: { display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6, fontSize: 13, color: 'var(--ui-text-secondary)' },
@@ -97,6 +98,13 @@ const V = {
 } satisfies Record<string, CSSProperties>
 
 const fmtBytes = (n: number) => (n > 1048576 ? `${(n / 1048576).toFixed(1)} MB` : `${Math.round(n / 1024)} KB`)
+/** Meshy/Blender clip names look like `Armature|running|baselayer`; show the action part. */
+export const clipLabel = (name: string) => {
+  const parts = name.split('|').filter(p => p && !/^(armature|baselayer|mixamo\.com)$/i.test(p))
+  const word = (parts[0] ?? name).replace(/[_-]+/g, ' ').trim()
+  return word ? word.charAt(0).toUpperCase() + word.slice(1) : name
+}
+
 const fmtCount = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : `${n}`)
 
 /** `ctx.rest` rejects with `"<status>: <body>"`; show the backend's `detail` sentence, not raw JSON. */
@@ -136,6 +144,10 @@ export function ModelViewer({
   const [spin, setSpin] = useState(autoRotate)
   const [wire, setWire] = useState(false)
   const [grid, setGrid] = useState(true)
+  const [clip, setClip] = useState(0)
+  const [playing, setPlaying] = useState(true)
+  const [loop, setLoop] = useState(true)
+  const [clipTime, setClipTime] = useState({ time: 0, duration: 0 })
   const key = source.kind === 'file' ? source.path : source.url
 
   useEffect(() => {
@@ -150,6 +162,8 @@ export function ModelViewer({
     let live = true
     setState({ phase: 'loading' })
     setStats(null)
+    setClip(0)
+    setPlaying(true)
     fetchSource(rest, source)
       .then(async payload => {
         if (!live) {
@@ -178,6 +192,35 @@ export function ModelViewer({
   useEffect(() => stageRef.current?.setAutoRotate(spin), [spin])
   useEffect(() => stageRef.current?.setWireframe(wire), [wire, stats])
   useEffect(() => stageRef.current?.setGrid(grid), [grid])
+  const clips = stats?.animations ?? []
+  useEffect(() => stageRef.current?.setLoop(loop), [loop, stats])
+
+  // Mirror the clip clock into the scrub bar (~8 Hz is smooth enough for a slider and cheap); also
+  // picks up a play-once clip finishing on its own.
+  useEffect(() => {
+    if (!clips.length) {
+      return
+    }
+    const id = window.setInterval(() => {
+      const s = stageRef.current?.clipState()
+      if (s) {
+        setClipTime(prev => (Math.abs(prev.time - s.time) < 0.01 && prev.duration === s.duration ? prev : { time: s.time, duration: s.duration }))
+        setPlaying(prev => (prev === s.playing ? prev : s.playing))
+      }
+    }, 120)
+    return () => window.clearInterval(id)
+  }, [clips.length, stats])
+
+  const pickClip = (index: number) => {
+    stageRef.current?.playClip(index)
+    setClip(index)
+    setPlaying(true)
+  }
+
+  const flipPlaying = () => {
+    stageRef.current?.setPlaying(!playing)
+    setPlaying(!playing)
+  }
 
   const toggle = (on: boolean, set: (v: boolean) => void, icon: string, label: string) => (
     <Button
@@ -207,6 +250,41 @@ export function ModelViewer({
         </div>
       )}
       <div style={V.toolbar}>
+        {clips.length > 0 && (
+          <Button
+            aria-label={playing ? 'Pause animation' : 'Play animation'}
+            aria-pressed={playing}
+            data-meshy-play={playing ? 'playing' : 'paused'}
+            onClick={flipPlaying}
+            size="icon"
+            style={playing ? V.toolOn : undefined}
+            title={playing ? 'Pause animation' : 'Play animation'}
+            variant="ghost"
+          >
+            <Codicon name={playing ? 'debug-pause' : 'play'} />
+          </Button>
+        )}
+        {clips.length > 0 && toggle(loop, setLoop, 'debug-restart', loop ? 'Loop (on)' : 'Loop (off: play once)')}
+        {clips.length > 1 && (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button data-meshy-clips size="sm" title="Animation clip" variant="ghost">
+                <span style={{ maxWidth: 110, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {clipLabel(clips[clip] ?? '')}
+                </span>
+                <Codicon name="chevron-down" size={12} />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" style={{ minWidth: 160 }}>
+              {clips.map((name, i) => (
+                <DropdownMenuItem data-meshy-clip={i} key={`${i}-${name}`} onSelect={() => pickClip(i)} title={name}>
+                  <span style={{ flex: 1 }}>{clipLabel(name)}</span>
+                  {i === clip && <Codicon name="check" />}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
         {toggle(spin, setSpin, 'sync', 'Auto-rotate')}
         {toggle(wire, setWire, 'symbol-structure', 'Wireframe')}
         {toggle(grid, setGrid, 'symbol-numeric', 'Grid')}
@@ -225,10 +303,33 @@ export function ModelViewer({
           </Button>
         )}
       </div>
+      {clips.length > 0 && clipTime.duration > 0 && (
+        <div style={V.scrub}>
+          <input
+            aria-label="Animation position"
+            data-meshy-scrub
+            max={clipTime.duration}
+            min={0}
+            onChange={e => {
+              const t = Number(e.currentTarget.value)
+              stageRef.current?.seek(t)
+              setClipTime(prev => ({ ...prev, time: t }))
+            }}
+            step={0.01}
+            style={{ flex: 1, accentColor: 'var(--ui-accent)', cursor: 'pointer' }}
+            type="range"
+            value={Math.min(clipTime.time, clipTime.duration)}
+          />
+          <span style={{ minWidth: 70, textAlign: 'right' }}>
+            {clipTime.time.toFixed(1)} / {clipTime.duration.toFixed(1)} s
+          </span>
+        </div>
+      )}
       {stats && (
         <div data-meshy-stats style={V.stats}>
           {file ? `${file.name} · ${fmtBytes(file.bytes)} · ` : ''}
           {fmtCount(stats.triangles)} tris · {fmtCount(stats.vertices)} verts
+          {clips.length ? ` · ${clips.length} clip${clips.length === 1 ? '' : 's'}` : ''}
           {compact ? '' : ` · ${stats.meshes} mesh${stats.meshes === 1 ? '' : 'es'} · ${stats.materials} material${stats.materials === 1 ? '' : 's'}`}
         </div>
       )}
@@ -245,6 +346,12 @@ const FORMAT_LABEL: Record<string, string> = {
   usdz: 'USDZ · Apple AR Quick Look',
   '3mf': '3MF · 3D printing',
   blend: 'BLEND · Blender project'
+}
+
+/** `glb` → its label; `glb:walking` (a rig's extra clip file) → `GLB · walking`. */
+const formatLabel = (format: string) => {
+  const [base, clip] = format.split(':')
+  return clip ? `${base.toUpperCase()} · ${clip.replace(/_/g, ' ')}` : (FORMAT_LABEL[base] ?? base.toUpperCase())
 }
 
 interface FormatRow {
@@ -307,7 +414,7 @@ export function FormatMenu({ rest, os, task, beside }: { rest: Rest; os: Os; tas
               onSelect={() => pick(format, saved)}
               title={saved ?? undefined}
             >
-              <span style={{ flex: 1 }}>{FORMAT_LABEL[format] ?? format.toUpperCase()}</span>
+              <span style={{ flex: 1 }}>{formatLabel(format)}</span>
               <Codicon name={saved ? 'check' : 'cloud-download'} style={{ opacity: saved ? 1 : 0.55 }} />
             </DropdownMenuItem>
           ))

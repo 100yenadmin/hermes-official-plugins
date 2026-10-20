@@ -8,7 +8,13 @@
 import {
   ACESFilmicToneMapping,
   AmbientLight,
+  type AnimationAction,
+  type AnimationClip,
+  AnimationMixer,
   Box3,
+  LoopOnce,
+  LoopRepeat,
+  Clock,
   Color,
   DirectionalLight,
   GridHelper,
@@ -32,6 +38,8 @@ export interface ModelStats {
   meshes: number
   materials: number
   sizeMeters: [number, number, number]
+  /** Animation clip names, in file order (rigged/animated Meshy GLBs carry walk, run, ...). */
+  animations: string[]
 }
 
 export interface Stage {
@@ -40,6 +48,18 @@ export interface Stage {
   setWireframe: (on: boolean) => void
   setGrid: (on: boolean) => void
   resetView: () => void
+  /** Clip names of the loaded model (empty for a static mesh). */
+  listClips: () => string[]
+  /** Switch to a clip by name or index; it loops. Returns the index now playing, or -1. */
+  playClip: (clip: number | string) => number
+  /** Pause or resume the current clip (keeps its pose while paused). */
+  setPlaying: (on: boolean) => void
+  /** Loop the clip (default) or play it once and hold the last pose. */
+  setLoop: (on: boolean) => void
+  /** Jump the current clip to `seconds` (clamped); keeps the paused/playing state. */
+  seek: (seconds: number) => void
+  /** Where the current clip is: time and duration in seconds; `playing` turns false when a play-once clip ends. */
+  clipState: () => { time: number; duration: number; playing: boolean }
   snapshot: () => string
   dispose: () => void
 }
@@ -77,6 +97,12 @@ export function createStage(host: HTMLElement, background: string): Stage {
   scene.add(grid)
 
   let model: Object3D | null = null
+  let clips: AnimationClip[] = []
+  let mixer: AnimationMixer | null = null
+  let action: AnimationAction | null = null
+  let playing = false
+  let loop = true
+  const clock = new Clock()
   let dirty = true
   let home = { pos: camera.position.clone(), target: new Vector3() }
   let frame = 0
@@ -117,7 +143,14 @@ export function createStage(host: HTMLElement, background: string): Stage {
       return
     }
     const moved = controls.update()
-    if (moved || dirty) {
+    // A playing clip needs every frame; the clock is read each tick so a resume after pause or an
+    // off-screen stretch does not jump the pose forward by the time spent away.
+    const delta = clock.getDelta()
+    const animating = playing && mixer !== null && action !== null
+    if (animating) {
+      mixer!.update(Math.min(delta, 0.1))
+    }
+    if (moved || dirty || animating) {
       dirty = false
       renderer.render(scene, camera)
     }
@@ -128,6 +161,14 @@ export function createStage(host: HTMLElement, background: string): Stage {
     if (!model) {
       return
     }
+    mixer?.stopAllAction()
+    if (mixer) {
+      mixer.uncacheRoot(model)
+    }
+    mixer = null
+    action = null
+    clips = []
+    playing = false
     scene.remove(model)
     model.traverse(node => {
       const mesh = node as Mesh
@@ -167,6 +208,28 @@ export function createStage(host: HTMLElement, background: string): Stage {
     return size
   }
 
+  const playClipAt = (index: number): number => {
+    if (!mixer || index < 0 || index >= clips.length) {
+      return -1
+    }
+    const next = mixer.clipAction(clips[index])
+    if (next !== action) {
+      action?.fadeOut(0.25)
+      next.setLoop(loop ? LoopRepeat : LoopOnce, Infinity)
+      next.clampWhenFinished = true
+      next.reset().fadeIn(action ? 0.25 : 0).play()
+      action = next
+    }
+    if (!loop && action.time >= action.getClip().duration) {
+      action.reset().play()
+    }
+    action.paused = false
+    playing = true
+    clock.getDelta()
+    dirty = true
+    return index
+  }
+
   return {
     async load(bytes) {
       const gltf = await new GLTFLoader().parseAsync(bytes, '')
@@ -176,9 +239,29 @@ export function createStage(host: HTMLElement, background: string): Stage {
       disposeModel()
       model = gltf.scene
       scene.add(model)
+      clips = gltf.animations ?? []
+      if (clips.length) {
+        mixer = new AnimationMixer(model)
+        // Play-once: hold the last pose and let the UI flip back to "paused".
+        mixer.addEventListener('finished', () => {
+          playing = false
+          dirty = true
+        })
+        // Frame on the first clip's first pose: a rig's bind pose can differ from its animated stance.
+        playClipAt(0)
+        mixer.update(0)
+      }
       const size = frameModel(model)
       dirty = true
-      const stats: ModelStats = { triangles: 0, vertices: 0, meshes: 0, materials: 0, sizeMeters: [size.x, size.y, size.z] }
+      clock.getDelta()
+      const stats: ModelStats = {
+        triangles: 0,
+        vertices: 0,
+        meshes: 0,
+        materials: 0,
+        sizeMeters: [size.x, size.y, size.z],
+        animations: clips.map((c, i) => c.name || `Clip ${i + 1}`)
+      }
       const mats = new Set<string>()
       model.traverse(node => {
         const mesh = node as Mesh
@@ -220,6 +303,52 @@ export function createStage(host: HTMLElement, background: string): Stage {
       controls.target.copy(home.target)
       controls.update()
       dirty = true
+    },
+    listClips() {
+      return clips.map((c, i) => c.name || `Clip ${i + 1}`)
+    },
+    playClip(clip) {
+      const index = typeof clip === 'number' ? clip : clips.findIndex((c, i) => (c.name || `Clip ${i + 1}`) === clip)
+      return playClipAt(index)
+    },
+    setPlaying(on) {
+      if (!action) {
+        return
+      }
+      if (on && !loop && action.time >= action.getClip().duration - 1e-3) {
+        action.reset().play()  // a finished play-once clip restarts from the top
+      }
+      playing = on
+      action.paused = !on
+      action.enabled = true
+      clock.getDelta()
+      dirty = true
+    },
+    setLoop(on) {
+      loop = on
+      if (action) {
+        action.setLoop(on ? LoopRepeat : LoopOnce, Infinity)
+        action.clampWhenFinished = true
+      }
+    },
+    seek(seconds) {
+      if (!action || !mixer) {
+        return
+      }
+      const duration = action.getClip().duration
+      // Stop everything (ends a crossfade; stop() rewinds), then place this clip at full weight.
+      mixer.stopAllAction()
+      action.play()
+      action.time = Math.max(0, Math.min(duration, seconds))
+      action.setEffectiveWeight(1)
+      action.paused = !playing
+      mixer.update(0)
+      dirty = true
+    },
+    clipState() {
+      return action
+        ? { time: action.time, duration: action.getClip().duration, playing }
+        : { time: 0, duration: 0, playing: false }
     },
     snapshot() {
       renderer.render(scene, camera)
