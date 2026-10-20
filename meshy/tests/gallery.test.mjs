@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { matchesKind, reconcileSelection, sourceForAsset } from '../src/gallery.ts'
+import { imageNextActions, matchesKind, reconcileSelection, sourceForAsset } from '../src/gallery.ts'
 
 const model = { task_id: 'task', task_type: 'image-to-3d', prompt: 'Mech', kind: 'model',
   image_urls: [], expired: false, glb_url: 'https://assets.meshy.ai/mech.glb' }
@@ -30,34 +30,47 @@ for (const [filter, expected] of [['all', ['image', 'model']], ['image', ['image
   })
 }
 
-// Image actions send explicit requests; they never implicitly approve unknown costs.
-const { imageNextActions } = await import('../src/gallery.ts')
-test('image Next uses task IDs and requires options/cost approval',()=>{
- const rows=imageNextActions('image-task',{kind:'remote',url:'https://assets.meshy.ai/a.png',label:'Mech',media:'image'})
- assert.equal(rows.length,3)
- assert.ok(rows[0].message.includes('meshy_image_to_3d'))
- assert.ok(rows.every(r=>r.message.includes('input_task_id "image-task"')&&r.message.includes('ask for my approval')))
-})
-test('saved image Next uses local files rather than an expired task reference',()=>{
- const rows=imageNextActions('old-task',{kind:'file',path:'/project/front.png',media:'image',images:['/project/front.png','/project/back.png']})
- assert.ok(rows[0].message.includes('meshy_image_to_3d'))
- assert.ok(rows.at(-1).message.includes('meshy_multi_image_to_3d'))
- assert.ok(rows[0].message.includes('/project/front.png')&&!rows[0].message.includes('/project/back.png'))
- assert.ok(rows.every(r=>!r.message.includes('Use input_task_id')))
+test('image Next passes the source task to the generation tools', () => {
+  const rows = imageNextActions('image-task', {
+    kind: 'remote', url: 'https://assets.meshy.ai/a.png', label: 'Mech', media: 'image'
+  })
+  assert.ok(rows.find(row => row.id === 'model').message.includes('meshy_image_to_3d'))
+  assert.ok(rows.find(row => row.id === 'edit').message.includes('meshy_image_to_image'))
+  assert.ok(rows.every(row => row.message.includes('input_task_id "image-task"')))
+  assert.ok(!rows.some(row => row.id === 'all-model'))
 })
 
-test('image actions reference the displayed view and reserve all views for an explicit action',()=>{
- const source={kind:'remote',url:'https://assets.meshy.ai/front.png',images:['https://assets.meshy.ai/front.png','https://assets.meshy.ai/back.png'],media:'image',label:'Mech'}
- const rows=imageNextActions('task',source,1)
- assert.ok(rows[0].message.includes('only image 2 of 2'))
- assert.ok(rows[1].message.includes('only image 2 of 2'))
- assert.equal(rows.at(-1).label,'Make 3D from all views')
- assert.ok(rows.at(-1).message.includes('input_task_id "task"'))
+test('saved image Next uses local files rather than an expired task reference', () => {
+  const rows = imageNextActions('old-task', {
+    kind: 'file', path: '/project/front.png', media: 'image',
+    images: ['/project/front.png', '/project/back.png']
+  })
+  const single = rows.find(row => row.id === 'model')
+  const all = rows.find(row => row.id === 'all-model')
+  assert.ok(single.message.includes('meshy_image_to_3d'))
+  assert.ok(single.message.includes('/project/front.png'))
+  assert.ok(!single.message.includes('/project/back.png'))
+  assert.ok(all.message.includes('meshy_multi_image_to_3d'))
+  assert.ok(all.message.includes('/project/front.png') && all.message.includes('/project/back.png'))
+  assert.ok(rows.every(row => !row.message.includes('input_task_id')))
 })
 
-test('opening a remote gallery source retains its task ID for workspace actions',()=>{
- const source=sourceForAsset(model)
- assert.equal(source.task,model.task_id)
+test('image actions change the selected-view reference without changing the all-views reference', () => {
+  const source = {
+    kind: 'remote', url: 'https://assets.meshy.ai/front.png', media: 'image', label: 'Mech',
+    images: ['https://assets.meshy.ai/front.png', 'https://assets.meshy.ai/back.png']
+  }
+  const front = imageNextActions('task', source, 0)
+  const back = imageNextActions('task', source, 1)
+  for (const id of ['model', 'edit', 'views']) {
+    assert.notEqual(front.find(row => row.id === id).reference, back.find(row => row.id === id).reference)
+  }
+  assert.equal(front.find(row => row.id === 'all-model').reference, back.find(row => row.id === 'all-model').reference)
+  assert.ok(back.find(row => row.id === 'all-model').message.includes('input_task_id "task"'))
+})
+
+test('opening a remote gallery source retains its task ID for workspace actions', () => {
+  assert.equal(sourceForAsset(model).task, model.task_id)
 })
 
 const clip = { kind: 'remote', task: 'task', url: 'https://assets.meshy.ai/running.glb', label: 'Running' }

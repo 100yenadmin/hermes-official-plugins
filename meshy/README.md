@@ -117,25 +117,39 @@ you get, rendered with stock three.js:
   show what Meshy and the download folder still know.
 - **Credit chip** in the status bar, refreshed after every Meshy tool call.
 
-The gallery includes generated images as well as 3D models. Use **All / Images / Models** to
-filter the list; image tasks open a 2D preview with navigation between generated views, while
-3D tasks retain the interactive model viewer. `image-to-3d` denotes a 3D model, not an image.
-Expired remote assets are labelled explicitly and do not load broken thumbnails or report an
-invalid API key. An indexed local model copy is preferred when available. CDN downloads can
-also become unavailable before the gallery refreshes; those errors explain that the asset or
-signed link is unavailable instead of suggesting that credentials should be replaced.
+### Images and saved assets
 
-Offline regression checks: `python -m pytest tests/test_plugin_api.py -q`, and (Node 22.6+)
-`npm ci && npm run test:gallery && npm run typecheck`. Rebuild the committed Desktop bundle
-with `npm run build` after changing the renderer.
+Use **All / Images / Models** to filter the gallery. Image previews support switching between
+views, **Download image** / **Download all N images**, and **Next** actions for 3D generation,
+image edits, and additional views through chat. **Copy ID** copies the task ID for follow-up requests.
+
+API assets normally expire after three days. Viewing does not save them: use **Download** to
+keep a local copy. Expired entries without local copies are hidden. Image sets are saved under
+`saved-assets/<task-id>/` in the plugin's data directory; interrupted sets offer **Retry image download**.
+The gallery footer shows known local storage usage and a folder link; it does not scan arbitrary
+files elsewhere on disk.
+
+Model downloads list available exports for free. Missing formats have separate **Convert** actions
+that request a paid conversion through chat.
 
 The renderer never reads files or holds the key. `dashboard/plugin_api.py` (mounted at
 `/api/plugins/meshy/` once the plugin is enabled) answers the viewer: the balance and recent tasks
 from Meshy's API, `.glb`/`.gltf`/image bytes from your home directory or the plugin's output folder
 (nothing else, symlinks resolved first), and signed `assets.meshy.ai` downloads. Cards load on
 click, render only while on screen, and free their WebGL context when unmounted, so a long chat
-of models stays light. Build the bundle with `npm ci && npm run build` (output:
-`desktop/plugin.js`, committed).
+of models stays light. **Close preview** releases an inline viewer's resources. Loading a dense GLB
+can still stall the renderer initially.
+
+### Development
+
+From `meshy/`, run the backend regression tests against a sibling Hermes checkout:
+
+```bash
+PYTHONPATH=../../hermes-agent python -m pytest tests/test_plugin_api.py -q
+```
+
+With Node 22.6+, run `npm ci`, `npm run test:gallery`, and `npm run typecheck`.
+After renderer changes, run `npm run build` and commit the generated `desktop/plugin.js`.
 
 ## Tools
 
@@ -179,29 +193,3 @@ The MCP server and the workflow rules the skill carries are by Meshy AI
 ([meshy-dev/meshy-mcp-server](https://github.com/meshy-dev/meshy-mcp-server), MIT,
 Copyright (c) 2026 Meshy AI). Meshy is a product of Meshy AI. Packaging and skill: Nous
 Research, MIT.
-
-Remote API assets normally expire after three days. Viewing does not save an asset:
-use the Desktop Download menu to choose the model format, or ask Hermes to save assets into your
-project. Expired remote entries without local copies are hidden. The gallery deduplicates tasks
-returned by multiple API endpoints.
-
-The compact gallery footer shows known local file count and storage size, plus a folder link.
-Totals include plugin-managed files, MCP downloads (including companions), and indexed project
-models, deduplicated by resolved path. Arbitrary copies elsewhere on disk are not discovered.
-Previously saved image sets and model variants remain accessible locally, including files saved by
-the earlier development build. There are no automatic asset downloads or auto-save settings.
-
-Select an image in the gallery and choose **Download image** or **Download all N images**.
-Images are saved under the profile's plugin-data `saved-assets/<task-id>/` directory and stay
-available locally after API links expire. Saved sets have **Show saved images**; incomplete sets
-have **Retry image download**. Downloads are explicit and spend no generation credits.
-The selected asset's full **Task ID** is shown with **Copy ID** for use in follow-up agent requests.
-
-Image **Next** offers image-to-3D, image edits, and multi-view generation through chat, with settings
-and credit approval before generation. Saved images use their local paths for follow-up requests.
-The model Download menu distinguishes existing exports (free downloads) from explicit **Convert to
-FORMAT · 1 cr** chat actions; one available format does not imply the model is an untextured preview.
-The viewer renders on demand, stops scheduling frames when hidden/idle, caps moving views to 30 fps
-(15 fps for meshes above 500k triangles), and limits pixel density to 1.5. Inline **Close preview**
-releases its GPU resources. Original model geometry and downloaded files are unchanged; parsing and
-first upload of dense models can still be expensive.
