@@ -85,21 +85,14 @@ Catalog entries come in two tiers:
 <p>Pick it in <code>hermes model</code> → <b>Claude Subscription DirectSDK (Experimental)</b></p>
 </td>
 <td width="50%" valign="top">
-<a href="telegram-business/"><img src="assets/telegram-business.jpg" alt="Telegram Business Mode plugin"></a>
-<h3><a href="telegram-business/">Telegram Business Mode</a></h3>
-<code>hermes plugins install hermes-telegram-business</code>
-<p>Turns Hermes into an observe-with-approval secretary for your Telegram Business account. It drafts replies to your customers, and nothing is sent until you approve it.</p>
-<p>Gateway platform add-on · owner approval on every reply</p>
-</td>
-</tr>
-<tr>
-<td width="50%" valign="top">
 <a href="memory-wiki/"><img src="assets/memory-wiki.jpg" alt="Memory Wiki plugin"></a>
 <h3><a href="memory-wiki/">Memory Wiki</a></h3>
 <code>hermes plugins install hermes-memory-wiki</code>
 <p>A dashboard and Desktop tab that turns your local session history into browsable subject pages and daily logs, plus a read-only audit panel for <code>MEMORY.md</code> and <code>USER.md</code>.</p>
 <p>Dashboard tab · reads local history, writes nothing</p>
 </td>
+</tr>
+<tr>
 <td width="50%" valign="top">
 <a href="blender/"><img src="assets/blender.jpg" alt="Blender plugin"></a>
 <h3><a href="blender/">Blender</a></h3>
@@ -107,8 +100,6 @@ Catalog entries come in two tiers:
 <p>The official Blender Lab MCP server over stdio, pinned to upstream, with a Blender workflow skill, so Hermes can read and change your Blender scene. Needs Blender 5.1+ with its MCP add-on, Git and uv. Its tools run Python inside Blender, so use trusted workflows.</p>
 <p>MCP server + skill · Windows, macOS, Linux</p>
 </td>
-</tr>
-<tr>
 <td width="50%" valign="top">
 <a href="snyk/"><img src="assets/snyk.jpg" alt="Snyk plugin"></a>
 <h3><a href="snyk/">Snyk</a></h3>
@@ -116,6 +107,8 @@ Catalog entries come in two tiers:
 <p>Scan code (SAST), dependencies, container images, IaC and SBOMs through Snyk's first-party MCP server, with the snyk-security-scan workflow skill. Needs Node.js/npm and a free Snyk account.</p>
 <p>MCP server + skill · browser login via <code>snyk_auth</code></p>
 </td>
+</tr>
+<tr>
 <td width="50%" valign="top">
 <a href="touchdesigner/"><img src="assets/touchdesigner.jpg" alt="TouchDesigner plugin"></a>
 <h3><a href="touchdesigner/">TouchDesigner</a></h3>
@@ -123,8 +116,6 @@ Catalog entries come in two tiers:
 <p>Drive a live TouchDesigner session through 404.zero's free twozero MCP server, which runs inside TouchDesigner itself, with the touchdesigner-mcp workflow skill and 20+ reference files (operators, GLSL, audio-reactive, instancing) bundled.</p>
 <p>MCP server + skill · TouchDesigner on macOS or Windows</p>
 </td>
-</tr>
-<tr>
 <td width="50%" valign="top">
 <a href="accent-picker/"><img src="assets/accent-picker.jpg" alt="Accent Picker plugin"></a>
 <h3><a href="accent-picker/">Accent Picker</a> <sup>desktop</sup></h3>
@@ -132,6 +123,8 @@ Catalog entries come in two tiers:
 <p>An OKLCH colour wheel in the Hermes Desktop status bar. Drag it and the whole theme retints live, so theme authors can try accents in place. The colour is scratch state and never persisted.</p>
 <p>Desktop plugin · status bar + palette commands</p>
 </td>
+</tr>
+<tr>
 <td width="50%" valign="top">
 <a href="langfuse/"><img src="assets/langfuse.jpg" alt="Langfuse plugin"></a>
 <h3><a href="langfuse/">Langfuse</a></h3>
@@ -139,8 +132,6 @@ Catalog entries come in two tiers:
 <p>Traces every Hermes turn to Langfuse: one span per turn, one generation per LLM call with usage and cost from Hermes' own pricing (cache and reasoning tokens included), one observation per tool call and subagent. Content capture is sanitized by default, with metadata-only and full modes.</p>
 <p>Observability hooks · Langfuse Cloud or self-hosted</p>
 </td>
-</tr>
-<tr>
 <td width="50%" valign="top">
 <a href="rea/"><img src="assets/rea.jpg" alt="REA plugin"></a>
 <h3><a href="rea/">REA</a></h3>
@@ -148,6 +139,8 @@ Catalog entries come in two tiers:
 <p>Reverse engineer programs with REA's MCP server: native binaries, .NET assemblies, Electron and JavaScript apps, Android packages, firmware and browser activity, with REA's reverse-engineer-anything workflow skill. Static JavaScript and archive inspection work out of the box; native decompilation needs your own Ghidra, Hopper or IDA. Needs Node.js 22.19+.</p>
 <p>MCP server + skill · about 170 tools, loaded on demand</p>
 </td>
+</tr>
+<tr>
 <td width="50%" valign="top">
 <a href="xchat/"><img src="assets/xchat.jpg" alt="X Chat plugin"></a>
 <h3><a href="xchat/">X Chat</a></h3>
@@ -155,11 +148,9 @@ Catalog entries come in two tiers:
 <p>Talk to Hermes in X's end-to-end encrypted DMs. Hermes runs as the X account you connect: chat with it in your own self-chat ("message yourself"), or give it a separate account and DM that. Messages are decrypted and encrypted locally with X's official Chat XDK, so X only routes ciphertext. Supports encrypted media, threaded replies, group chats with mention gating, and cron delivery. <code>hermes xchat setup</code> shows which account Hermes will run as and registers its keys. Needs an X developer app with chat API access.</p>
 <p>Gateway platform <code>xchat</code> · end-to-end encrypted</p>
 </td>
-</tr>
-<tr>
 <td width="50%" valign="top">
 <h3>More on the way</h3>
-<p>Official plugins move in here as they leave Hermes core or join from their own repos. Browse everything else, from Nous, vendors and the community, in the <a href="https://hermes-agent.nousresearch.com/docs/plugins">plugin catalog</a>.</p>
+<p>Official plugins move in here as they leave Hermes core or join from their own repos. Browse everything else, from Nous, vendors and the community, in the <a href="https://hermes-agent.nousresearch.com/docs/plugins">plugin catalog</a>. Experimental plugins we built but don't support live in <a href="https://github.com/NousResearch/hermes-labs-plugins">hermes-labs-plugins</a>.</p>
 </td>
 </tr>
 </table>
