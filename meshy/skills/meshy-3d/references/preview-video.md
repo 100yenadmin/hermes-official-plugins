@@ -43,6 +43,12 @@ character ~20 s; a 1.75M-triangle scan a few minutes. Run it with a terminal tim
 and re-encoded at a capped bitrate when that would exceed `--max-mb`, so frame rate and
 length are never cut to fit.
 
+The render itself is offline: the page never navigates, and only resources embedded in the GLB
+load. An external image/buffer URI inside the GLB is not fetched (a missing texture renders white
+and the JSON lists it under `blocked_urls`; an external buffer makes the load fail). The output
+is encoded to a private file and renamed into place; an `--out` that is the source GLB (or a
+hard link to it) is refused.
+
 ## Deliver
 
 Reply with a short sentence and the video on its own line, plus the thumbnail if useful:

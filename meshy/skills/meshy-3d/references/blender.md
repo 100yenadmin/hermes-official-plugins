@@ -119,8 +119,12 @@ One JSON line; exit 0 = ok. Report real numbers from it, never the requested bud
   FBX; re-link in the engine), or a GLB reimport triangle count that differs slightly (split normals/UV seams).
 
 Known live results (Blender 4.5.14): FBX drops shape-key (morph) animation, so a model with
-morphs should go out as GLB. Exit 2 = refused or failed before writing: the error says why and the
-source is untouched.
+morphs should go out as GLB. Exit 2 = refused or failed: the error says why and the
+source is untouched. Exit 2 can follow a PARTIAL publication (a later output could not be moved into
+place, or appeared meanwhile from an overlapping run): trust the error's "already saved: [...]" list,
+not "nothing was written". Without `--force` an output is never replaced, even one created during the run.
+Display-only helpers the glTF importer adds (the bone-shape Icosphere in `glTF_not_exported`) are not
+counted, decimated or exported.
 
 ## 6. Check and report
 

@@ -159,7 +159,21 @@ scene.add(new THREE.HemisphereLight(0xffffff, 0x8d8d8d, 0.6))
 const key = new THREE.DirectionalLight(0xffffff, 1.6); key.castShadow = true
 key.shadow.mapSize.set(1024, 1024); key.shadow.bias = -0.0005; key.shadow.normalBias = 0.02
 scene.add(key, key.target)
-const gltf = await new GLTFLoader().parseAsync(window.__glb.buffer, '')
+// No network, no local files: a GLB can still name absolute image/buffer URIs. Only its own embedded
+// resources (data:, and the blob: URLs three.js makes for bufferView images) load; anything else gets
+// a 1x1 white PNG and is reported under blocked_urls.
+const blocked = []
+const manager = new THREE.LoadingManager()
+manager.setURLModifier(u => {
+  if (/^(data|blob):/i.test(u)) return u
+  blocked.push(u)
+  return 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4//8/AAX+Av4N70a4AAAAAElFTkSuQmCC'
+})
+let gltf
+try { gltf = await new GLTFLoader(manager).parseAsync(window.__glb.buffer, '') } catch (e) {
+  window.__info = { error: 'GLB load failed: ' + (e && e.message || e) + (blocked.length ? '; external resources are not fetched: ' + blocked.join(', ') : ''), clips: [] }
+  throw e
+}
 window.__glb = null
 const model = gltf.scene
 let tris = 0
@@ -200,7 +214,7 @@ const sc = key.shadow.camera; sc.left = sc.bottom = -radius * 1.6; sc.right = sc
 // 2D composite for the label.
 const out = document.createElement('canvas'); out.width = out.height = S
 const ctx = out.getContext('2d')
-window.__info = { clips, clip: clip && clip.name, duration: clip ? clip.duration : 0, triangles: Math.round(tris), size: [sz.x, sz.y, sz.z].map(v => +v.toFixed(3)) }
+window.__info = { clips, clip: clip && clip.name, duration: clip ? clip.duration : 0, triangles: Math.round(tris), size: [sz.x, sz.y, sz.z].map(v => +v.toFixed(3)), blocked_urls: blocked }
 window.renderFrame = (i) => {
   const t = i / P.fps, u = i / P.frames
   if (mixer) mixer.setTime(t % clip.duration)
@@ -228,7 +242,8 @@ window.__ready = true
 `
 
 // The page never navigates or touches the network: it stays on about:blank, three.js modules
-// are turned into blob: URLs behind an import map, and the GLB bytes are pushed in over CDP.
+// are turned into blob: URLs behind an import map, the GLB bytes are pushed in over CDP, and the
+// loader refuses external resource URLs a GLB may name (see setURLModifier in MAIN).
 // (Some hosts' Chromium builds hang on any http/file navigation in headless mode.)
 function moduleSources(threeDir) {
   const rd = r => fs.readFileSync(path.join(threeDir, r), 'utf8')
@@ -375,7 +390,8 @@ async function main() {
       await new Promise(r => setTimeout(r, 250))
     }
     if (info.error) throw new Error(`${info.error}; clips: ${info.clips.map(c => c.name).join(', ')}`)
-    if (a.listClips) { console.log(JSON.stringify({ ok: true, clips: info.clips, triangles: info.triangles })); return }
+    const blockedUrls = info.blocked_urls && info.blocked_urls.length ? { blocked_urls: info.blocked_urls } : {}
+    if (a.listClips) { console.log(JSON.stringify({ ok: true, clips: info.clips, triangles: info.triangles, ...blockedUrls })); return }
     const loadS = (Date.now() - tl) / 1000
     // Duration: turntable 6 s; a clip loops whole cycles to reach >= 4 s, capped at 8 s.
     let seconds = a.seconds
@@ -437,7 +453,7 @@ async function main() {
     console.log(JSON.stringify({ ok: true, out, bytes, mb: +(bytes / 1048576).toFixed(2), seconds: +seconds.toFixed(2), fps: a.fps, frames, size: a.size,
       clip: info.clip, clips: info.clips.map(c => c.name), triangles: info.triangles, encode: mode,
       load_s: +loadS.toFixed(1), render_s: +renderS.toFixed(1), total_s: +((Date.now() - t0) / 1000).toFixed(1),
-      probe: ffprobeInfo(ffmpeg, out), chrome, ffmpeg, three: threeDir }))
+      probe: ffprobeInfo(ffmpeg, out), chrome, ffmpeg, three: threeDir, ...blockedUrls }))
   } catch (e) {
     die(String(e.message || e), { chrome_stderr: b.stderr().slice(-600) })
   } finally { cleanup() }
