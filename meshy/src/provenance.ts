@@ -91,13 +91,19 @@ export function createProvenanceWriter(post: (body: unknown) => Promise<unknown>
   const ownerOf = (e: GatewayEvent) =>
     e.profile === undefined && e.connectionId === undefined ? active() : `${e.connectionId ?? host.state?.connectionId.get() ?? ''}::${norm(e.profile)}`
   const send = (body: unknown) => void post(body).catch(() => undefined)
+  // Deferred a tick: core re-points ctx.rest from its own subscription to the same atoms, and a switch can
+  // land in a batch; flushing before that would post B's rows to A's backend.
+  let timer: ReturnType<typeof setTimeout> | undefined
   const flush = () => {
-    const key = active()
-    const rows = pending.get(key)
-    if (rows) {
-      pending.delete(key)
-      rows.forEach(send)
-    }
+    clearTimeout(timer)
+    timer = setTimeout(() => {
+      const key = active()
+      const rows = pending.get(key)
+      if (rows) {
+        pending.delete(key)
+        rows.forEach(send)
+      }
+    }, 0)
   }
   const offs = [host.state?.profile.subscribe(flush), host.state?.connectionId.subscribe(flush)]
   return {
@@ -112,6 +118,7 @@ export function createProvenanceWriter(post: (body: unknown) => Promise<unknown>
       pending.set(owner, rows.slice(-200))
     },
     dispose() {
+      clearTimeout(timer)
       offs.forEach(off => off?.())
       pending.clear()
     }
