@@ -272,6 +272,9 @@ def test_a_beside_export_is_reused_only_for_the_task_that_saved_it(api, monkeypa
     saved.write_bytes(b"USER EDITED THE EXPORT")
     api.save({"task": new, "format": "stl", "beside": str(anchor)})
     assert saved.read_bytes() == b"USER EDITED THE EXPORT"
+    other.write_bytes(b"USER EDITED THE SUFFIXED ONE")  # the fallback name is checked the same way
+    third = Path(api.save({"task": new, "format": "stl", "beside": str(tank)})["path"])
+    assert other.read_bytes() == b"USER EDITED THE SUFFIXED ONE" and third.name == f"tank-{new[-8:]}-2.stl"
     tank.with_suffix(".mtl").write_text("USER MTL", encoding="utf-8")
     obj = Path(api.save({"task": new, "format": "obj", "beside": str(tank)})["path"])
     assert tank.with_suffix(".mtl").read_text(encoding="utf-8") == "USER MTL" and obj.name == f"tank-{new[-8:]}.obj"

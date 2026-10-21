@@ -263,7 +263,10 @@ def _record_asset(path: Path, task_id: str | None = None, export: bool = False) 
                     row["sha256"] = _sha256(resolved)
             row.update(name=resolved.name, last_opened=now, task_id=task or row.get("task_id"))
             rows.sort(key=lambda r: r.get("last_opened") or 0, reverse=True)
-            _write_json(_index_path(), rows[:_INDEX_CAP])
+            # Models and other exports are capped apart: a run of STL saves must not push gallery models out.
+            is_model = [Path(r.get("path", "")).suffix.lower() in _INDEXED for r in rows]
+            _write_json(_index_path(), [r for r, m in zip(rows, is_model) if m][:_INDEX_CAP]
+                        + [r for r, m in zip(rows, is_model) if not m][:_INDEX_CAP])
     except OSError as exc:  # the index is a convenience; serving the file never fails on it
         _log.debug("meshy asset index: %s", exc)
 
@@ -498,8 +501,13 @@ def _beside_dest(folder: Path, stem: str, fmt: str, task_id: str, anchor: Path |
     dest = folder / _saved_name(stem, fmt)
     if anchor is None or dest == anchor:
         return dest, dest.is_file()
-    if any((folder / n).exists() and not _ours(folder / n, saved) for n in _bundle(stem, fmt)):
-        dest = folder / _saved_name(f"{stem}-{task_id[-8:]}", fmt)
+    # The suffixed name gets the same check (the user may have edited it too): first free-or-ours wins.
+    for name in [stem, f"{stem}-{task_id[-8:]}", *(f"{stem}-{task_id[-8:]}-{n}" for n in range(2, 100))]:
+        if not any((folder / n).exists() and not _ours(folder / n, saved) for n in _bundle(name, fmt)):
+            dest = folder / _saved_name(name, fmt)
+            break
+    else:
+        raise HTTPException(status_code=409, detail=f"no free file name for this {fmt.upper()} beside the model")
     row = _ours(dest, saved)
     return dest, bool(row) and row.get("task_id") == task_id
 
