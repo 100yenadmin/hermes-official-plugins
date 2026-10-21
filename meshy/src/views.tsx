@@ -1,3 +1,4 @@
+import type { StorageStatus } from './gallery.ts'
 /**
  * React surfaces over the three.js stage: an inline transcript card, the workspace gallery, and the
  * status-bar credit chip. Every byte comes from the plugin's own backend (`ctx.rest`) because the
@@ -19,6 +20,17 @@ import { type CSSProperties, useCallback, useEffect, useRef, useState } from 're
 
 import { createStage, dataUrlToBuffer, type ModelStats, type Stage } from './stage.ts'
 import { TaskCard } from './task-card.tsx'
+import {
+  imageNextActions,
+  matchesKind,
+  reconcileSelection,
+  sourceForAsset,
+  sourceForLocalFile,
+  type LocalFile,
+  type RemoteAsset,
+  type Source
+} from './gallery.ts'
+export type { LocalFile, RemoteAsset, Source } from './gallery.ts'
 
 export type Rest = PluginContext['rest']
 export type Os = PluginContext['os']
@@ -47,30 +59,6 @@ export interface Balance {
   settings?: Partial<MeshySettings>
 }
 
-export interface RemoteModel {
-  task_id: string
-  task_type: string
-  prompt: string
-  created_at: number
-  thumbnail_url: null | string
-  glb_url: null | string
-  credits?: null | number
-}
-
-export interface LocalFile {
-  path: string
-  name: string
-  project: string
-  bytes: number
-  modified: number
-  /** Meshy task id when recorded (MCP metadata.json, /save, or a card that opened it); enables Download. */
-  task?: null | string
-  /** What made it (its prompt, the nearest ancestor's, or its source image), when recorded. */
-  prompt?: null | string
-}
-
-export type Source = { kind: 'file'; path: string; task?: string } | { kind: 'remote'; url: string; label: string; task?: string }
-
 // Inline styles with theme variables: no injected <style> tag (nothing global to leak or clean up),
 // and every surface reskins with the active theme.
 export const V = {
@@ -88,7 +76,7 @@ export const V = {
   spacer: { flex: 1 },
   poster: { width: '100%', height: 160, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 6, borderRadius: 8, border: '1px dashed var(--ui-stroke-secondary)', background: 'transparent', color: 'var(--ui-text-secondary)', cursor: 'pointer', fontSize: 13 },
   gallery: { display: 'flex', height: '100%', minHeight: 0 },
-  list: { width: 280, flexShrink: 0, overflowY: 'auto', borderRight: '1px solid var(--ui-stroke-secondary)', padding: 6 },
+  list: { width: 280, flexShrink: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', borderRight: '1px solid var(--ui-stroke-secondary)', padding: 6 },
   listHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '2px 4px 6px', fontWeight: 600, fontSize: 13 },
   section: { padding: '8px 6px 4px', fontSize: 11, textTransform: 'uppercase', letterSpacing: 0.4, color: 'var(--ui-text-quaternary)' },
   hint: { padding: '6px', fontSize: 12, color: 'var(--ui-text-tertiary)' },
@@ -144,6 +132,110 @@ export function fetchSource(rest: Rest, source: Source): Promise<FilePayload> {
   return source.kind === 'file'
     ? rest<FilePayload>(`file?path=${encodeURIComponent(source.path)}${source.task ? `&task=${encodeURIComponent(source.task)}` : ''}`, { timeoutMs: 120_000 })
     : rest<FilePayload>(`remote?url=${encodeURIComponent(source.url)}`, { timeoutMs: 180_000 })
+}
+
+function ImageViewer({ rest, source, imageIndex, onImageIndexChange }: { rest: Rest; source: Source; imageIndex?: number; onImageIndexChange?: (index: number) => void }) {
+  const images = source.images?.length ? source.images : [source.kind === 'file' ? source.path : source.url]
+  const [index, setIndex] = useState(0)
+  const [data, setData] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+  const current = Math.min(imageIndex ?? index, images.length - 1)
+  const choose = (value: number) => {
+    setIndex(value)
+    onImageIndexChange?.(value)
+  }
+  const url = images[current]
+  useEffect(() => {
+    let live = true
+    setData(null)
+    setError(null)
+    fetchSource(rest, source.kind === 'file' ? { ...source, path: url } : { ...source, url }).then(result => {
+      if (live) setData(result.dataUrl)
+    }).catch((err: unknown) => {
+      if (live) setError(errorText(err))
+    })
+    return () => { live = false }
+  }, [rest, url])
+  return (
+    <div data-meshy-image style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 12 }}>
+      {error ? <div role="alert" style={V.error}>{error}</div> : data ? (
+        <img alt={source.label || 'Saved image'} src={data} onError={() => setError('This image could not be decoded.')} style={{ maxWidth: '100%', maxHeight: 'calc(100% - 48px)', objectFit: 'contain' }} />
+      ) : <span role="status">Loading image…</span>}
+      {images.length > 1 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <Button disabled={current === 0} onClick={() => choose(current - 1)} size="sm" variant="outline">Previous image</Button>
+          <span>{current + 1} / {images.length}</span>
+          <Button disabled={current === images.length - 1} onClick={() => choose(current + 1)} size="sm" variant="outline">Next image</Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AssetViewer(props: Parameters<typeof ModelViewer>[0] & { imageIndex?: number; onImageIndexChange?: (index: number) => void }) {
+  const { source, rest } = props
+  if (source.kind === 'remote' && source.expired) {
+    return <div role="status" style={V.empty}>This asset’s download link has expired. Open a locally saved copy if you have one.</div>
+  }
+  return source.media === 'image'
+    ? <ImageViewer key={source.kind === 'file' ? source.path : source.url} rest={rest} source={source} imageIndex={props.imageIndex} onImageIndexChange={props.onImageIndexChange} />
+    : <ModelViewer {...props} />
+}
+
+function AssetThumbnail({ asset }: { asset: RemoteAsset }) {
+  const [failed, setFailed] = useState(false)
+  useEffect(() => setFailed(false), [asset.thumbnail_url])
+  return asset.thumbnail_url && !asset.expired && !failed
+    ? <img alt="" style={V.thumb} src={asset.thumbnail_url} onError={() => setFailed(true)} />
+    : <Codicon name={asset.kind === 'image' ? 'file-media' : 'symbol-misc'} />
+}
+
+function ImageNext({ task, source, imageIndex }: { task: string; source: Source; imageIndex: number }) {
+  return <DropdownMenu>
+    <DropdownMenuTrigger asChild><Button data-meshy-image-next size="sm" variant="ghost"><Codicon name="sparkle" /> Next <Codicon name="chevron-down" size={12} /></Button></DropdownMenuTrigger>
+    <DropdownMenuContent align="end" style={{ minWidth: 250 }}>
+      {imageNextActions(task, source, imageIndex).map(row => <DropdownMenuItem key={row.id} onSelect={() => {
+        if (!host.composer?.submit(null, row.message)) host.notify({ kind: 'warning', message: 'Open a chat to work with this image' })
+      }}>{row.label}</DropdownMenuItem>)}
+      <DropdownMenuSeparator /><DropdownMenuItem disabled>Choose options and approve credits in chat</DropdownMenuItem>
+    </DropdownMenuContent>
+  </DropdownMenu>
+}
+
+async function copyTaskId(task: string) {
+  try {
+    if (!navigator.clipboard) throw new Error('Clipboard unavailable')
+    await navigator.clipboard.writeText(task)
+    host.notify({ kind: 'success', message: 'Task ID copied' })
+  } catch {
+    host.notify({ kind: 'error', message: 'Could not copy. Select the task ID and copy it manually.' })
+  }
+}
+
+function ImageDownload({ rest, os, task, source, onSaved }: { rest: Rest; os: Os; task: string; source: Source; onSaved: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const count = source.images?.length || 1
+  const download = async () => {
+    if (source.kind === 'file' && !source.incomplete) {
+      void os.revealPath(source.path)
+      return
+    }
+    setBusy(true)
+    try {
+      const saved = await rest<{ paths: string[]; directory: string }>('save-images', { method: 'POST', body: { task }, timeoutMs: 600_000 })
+      host.notify({ kind: 'success', message: `Saved ${saved.paths.length} image${saved.paths.length === 1 ? '' : 's'}` })
+      void os.revealPath(saved.paths.length === 1 ? saved.paths[0] : saved.directory)
+    } catch (err) {
+      host.notify({ kind: 'error', message: `Image download: ${errorText(err)}` })
+    } finally {
+      setBusy(false)
+      onSaved()
+    }
+  }
+  return <Button disabled={busy || (source.kind === 'remote' && source.expired)} onClick={() => void download()} size="sm" variant="outline">
+    <Codicon name={busy ? 'loading' : source.kind === 'file' ? 'folder-opened' : 'cloud-download'} spinning={busy} />
+    {busy ? 'Saving images…' : source.kind === 'file' ? source.incomplete ? 'Retry image download' : 'Show saved images' : count > 1 ? `Download all ${count} images` : 'Download image'}
+  </Button>
 }
 
 /** One live viewport. Mounting creates a WebGL context; unmounting frees it. */
@@ -389,16 +481,22 @@ interface FormatRow {
 
 /** "Download ▾": one row per file type Meshy produced for this task. Picking one saves it beside the
  *  model on screen (no credits: Meshy made every listed format at generation time) and reveals it. */
-export function FormatMenu({ rest, os, task, beside }: { rest: Rest; os: Os; task: string; beside?: string }) {
+export function FormatMenu({ rest, os, task, beside, onSaved }: { rest: Rest; os: Os; task: string; beside?: string; onSaved?: () => void }) {
   const [rows, setRows] = useState<FormatRow[] | null>(null)
+  const [conversions, setConversions] = useState<{ format: string; cost: number; message: string }[]>([])
+  const [isPreview, setIsPreview] = useState(false)
   const [error, setError] = useState<null | string>(null)
   const [busy, setBusy] = useState<null | string>(null)
   const query = `formats?task=${encodeURIComponent(task)}${beside ? `&beside=${encodeURIComponent(beside)}` : ''}`
 
   const load = useCallback(() => {
     setError(null)
-    rest<{ formats: FormatRow[] }>(query, { timeoutMs: 30_000 })
-      .then(r => setRows(r.formats))
+    rest<{ formats: FormatRow[]; conversions?: { format: string; cost: number; message: string }[]; is_preview?: boolean }>(query, { timeoutMs: 30_000 })
+      .then(r => {
+        setRows(r.formats)
+        setConversions(r.conversions || [])
+        setIsPreview(!!r.is_preview)
+      })
       .catch((err: unknown) => setError(errorText(err)))
   }, [rest, query])
 
@@ -413,6 +511,7 @@ export function FormatMenu({ rest, os, task, beside }: { rest: Rest; os: Os; tas
         setRows(prev => prev?.map(row => (row.format === fmt ? { ...row, saved: r.path } : row)) ?? prev)
         host.notify({ kind: 'success', message: `Saved ${r.path.split(/[\\/]/).pop()}` })
         void os.revealPath(r.path)
+        onSaved?.()
       })
       .catch((err: unknown) => host.notify({ kind: 'error', message: `Meshy ${fmt.toUpperCase()}: ${errorText(err)}` }))
       .finally(() => setBusy(null))
@@ -450,9 +549,16 @@ export function FormatMenu({ rest, os, task, beside }: { rest: Rest; os: Os; tas
         {rows !== null && rows.length === 1 && (
           <>
             <DropdownMenuSeparator />
-            <DropdownMenuItem disabled>A preview has GLB only; refine it for FBX, OBJ, STL, USDZ</DropdownMenuItem>
+            <DropdownMenuItem disabled>{isPreview ? 'Untextured preview: refine it to add textures' : 'This task returned only one download format'}</DropdownMenuItem>
           </>
         )}
+        {rows !== null && !error && conversions.length > 0 && <>
+          <DropdownMenuSeparator />
+          {conversions.map(row => <DropdownMenuItem key={`convert:${row.format}`} disabled={busy !== null} onSelect={() => {
+            if (!host.composer?.submit(null, row.message)) host.notify({ kind: 'warning', message: 'Open a chat to convert this model' })
+          }}><span style={{ flex: 1 }}>Convert to {row.format.toUpperCase()}</span><span style={V.cost}>{row.cost} cr</span></DropdownMenuItem>)}
+          <DropdownMenuItem disabled>Conversion creates a new task · sends a chat request</DropdownMenuItem>
+        </>}
       </DropdownMenuContent>
     </DropdownMenu>
   )
@@ -776,7 +882,7 @@ export function Gallery({
   os,
   initial,
   autoRotate,
-  onOpenSettings
+  onOpenSettings,
 }: {
   rest: Rest
   os: Os
@@ -785,24 +891,31 @@ export function Gallery({
   onOpenSettings: () => void
 }) {
   const [selected, setSelected] = useState<null | Source>(initial)
+  const explicitSelection = useRef(Boolean(initial))
+  const [imageIndex, setImageIndex] = useState(0)
+  const selectedKey = selected?.kind === 'file' ? selected.path : selected?.url
+  useEffect(() => setImageIndex(0), [selectedKey])
   // The Meshy task behind the selection (a generation's id, or a local file's recorded id): drives Download.
   const [selTask, setSelTask] = useState<null | { task: string; title: string }>(null)
-  const [remote, setRemote] = useState<RemoteModel[] | null>(null)
+  const [remote, setRemote] = useState<RemoteAsset[] | null>(null)
   const [local, setLocal] = useState<LocalFile[] | null>(null)
+  const [storage, setStorage] = useState<StorageStatus | null>(null)
   const [error, setError] = useState<null | string>(null)
   const [configured, setConfigured] = useState(true)
   const [query, setQuery] = useState('')
+  const [filter, setFilter] = useState<'all' | 'image' | 'model'>('all')
   const q = query.trim().toLowerCase()
   const matches = (...texts: Array<null | string | undefined>) => !q || texts.some(t => (t ?? '').toLowerCase().includes(q))
 
   const refresh = useCallback(() => {
     setError(null)
-    rest<{ configured: boolean; models: RemoteModel[] }>('models', { timeoutMs: 60_000 })
+    rest<{ configured: boolean; models: RemoteAsset[] }>('models', { timeoutMs: 60_000 })
       .then(r => {
         setConfigured(r.configured)
         setRemote(r.models)
       })
       .catch((e: unknown) => setError(errorText(e)))
+    rest<StorageStatus>('storage').then(setStorage).catch(() => setStorage(null))
     rest<{ files: LocalFile[] }>('local')
       .then(r => setLocal(r.files))
       .catch(() => setLocal([]))
@@ -811,6 +924,7 @@ export function Gallery({
   useEffect(refresh, [refresh])
   useEffect(() => {
     if (initial) {
+      explicitSelection.current = true
       setSelected(initial)
       setSelTask(
         initial.task
@@ -820,17 +934,33 @@ export function Gallery({
     }
   }, [initial])
 
-  const pickTask = (task: string) => {
-    const r = remote?.find(m => m.task_id === task && m.glb_url)
-    if (r?.glb_url) {
-      setSelected({ kind: 'remote', url: r.glb_url, label: r.prompt || r.task_type, task })
-      setSelTask({ task, title: r.prompt || r.task_type })
+  useEffect(() => {
+    if (!selTask || !remote) return
+    const saved = (local || []).map(sourceForLocalFile)
+    if (explicitSelection.current) {
+      // The initial-source effect may have queued a new clip in this same effect flush.
+      setSelected(current => reconcileSelection(current, current?.task || selTask.task, true, remote, saved))
       return
     }
+    const next = reconcileSelection(selected, selTask.task, false, remote, saved)
+    setSelected(next)
+    if (!next) setSelTask(null)
+  }, [remote, local, selTask, initial])
+
+  const pickTask = (task: string) => {
     const f = local?.find(x => x.task === task)
     if (f) {
-      setSelected({ kind: 'file', path: f.path, task })
+      explicitSelection.current = false
+      setSelected(sourceForLocalFile(f))
       setSelTask({ task, title: f.name })
+      return
+    }
+    const r = remote?.find(m => m.task_id === task)
+    const source = r && sourceForAsset(r)
+    if (source) {
+      explicitSelection.current = false
+      setSelected(source)
+      setSelTask({ task, title: r.prompt || r.task_type })
       return
     }
     host.notify({ kind: 'info', message: `Task ${task.slice(0, 8)} isn't in the gallery list (older than the list, or never downloaded)` })
@@ -842,93 +972,115 @@ export function Gallery({
   return (
     <div data-meshy-gallery style={V.gallery}>
       <aside style={V.list}>
-        <div style={V.listHead}>
-          <span>Meshy models</span>
-          <span>
-            <Button aria-label="Meshy settings" onClick={onOpenSettings} size="icon" title="Meshy settings" variant="ghost">
-              <Codicon name="settings-gear" />
-            </Button>
-            <Button aria-label="Refresh" onClick={refresh} size="icon" title="Refresh" variant="ghost">
-              <Codicon name="refresh" />
-            </Button>
-          </span>
-        </div>
-        <input
-          aria-label="Search prompts"
-          data-meshy-search
-          onChange={e => setQuery(e.target.value)}
-          placeholder="Search prompts…"
-          style={V.search}
-          type="search"
-          value={query}
-        />
-        {!configured && (
-          <div style={V.hint}>
-            Add your Meshy API key to list your generations.{' '}
-            <Button onClick={onOpenSettings} size="sm" variant="outline">
-              Open Meshy settings
-            </Button>
+        <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+          <div style={V.listHead}>
+            <span>Meshy assets</span>
+            <span>
+              <Button aria-label="Meshy settings" onClick={onOpenSettings} size="icon" title="Meshy settings" variant="ghost">
+                <Codicon name="settings-gear" />
+              </Button>
+              <Button aria-label="Refresh" onClick={refresh} size="icon" title="Refresh" variant="ghost">
+                <Codicon name="refresh" />
+              </Button>
+            </span>
           </div>
-        )}
-        {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
-        {local && local.length > 0 && <div style={V.section}>On this machine</div>}
-        {local?.filter(f => matches(f.prompt, f.name, f.project)).map(f => {
-          const s: Source = { kind: 'file', path: f.path, ...(f.task ? { task: f.task } : {}) }
-          const pickLocal = () => {
-            setSelected(s)
-            setSelTask(f.task ? { task: f.task, title: f.name } : null)
-          }
-          return (
-            <button data-meshy-item style={isSel(s) ? { ...V.item, ...V.itemOn } : V.item} key={f.path} onClick={pickLocal} title={f.path} type="button">
-              <Codicon name="file-binary" />
-              <span style={V.itemText}>
-                <span style={V.ellipsis}>{f.prompt || f.name}</span>
-                <small style={{ ...V.itemSub, ...V.ellipsis }}>
-                  {f.prompt ? `${f.name} · ` : ''}
-                  {f.project} · {fmtBytes(f.bytes)}
-                </small>
-              </span>
-            </button>
-          )
-        })}
-        {remote && remote.length > 0 && <div style={V.section}>Recent generations</div>}
-        {remote === null && configured && !error && <div style={V.hint}>Loading…</div>}
-        {remote?.filter(m => matches(m.prompt, m.task_type)).map(m => {
-          const s: null | Source = m.glb_url ? { kind: 'remote', url: m.glb_url, label: m.prompt || m.task_type, task: m.task_id } : null
-          return (
-            <button
-              data-meshy-item style={s && isSel(s) ? { ...V.item, ...V.itemOn } : V.item}
-              disabled={!s}
-              key={m.task_id}
-              onClick={() => {
-                if (s) {
-                  setSelected(s)
-                  setSelTask({ task: m.task_id, title: m.prompt || m.task_type })
-                }
-              }}
-              title={m.prompt ? `${m.prompt}\n${m.task_id}` : m.task_id}
-              type="button"
-            >
-              {m.thumbnail_url ? <img alt="" style={V.thumb} src={m.thumbnail_url} /> : <Codicon name="symbol-misc" />}
-              <span style={V.itemText}>
-                <span style={V.ellipsis}>{m.prompt || m.task_type}</span>
-                <small style={V.itemSub}>
-                  {m.task_type}
-                  {typeof m.credits === 'number' ? ` · ${m.credits} credits` : ''} · {new Date(m.created_at).toLocaleDateString()}
-                </small>
-              </span>
-            </button>
-          )
-        })}
+          <input
+            aria-label="Search prompts"
+            data-meshy-search
+            onChange={e => setQuery(e.target.value)}
+            placeholder="Search prompts…"
+            style={V.search}
+            type="search"
+            value={query}
+          />
+          <div role="group" aria-label="Asset type" style={{ display: 'flex', gap: 4, padding: '6px 0' }}>
+            {(['all', 'image', 'model'] as const).map(kind => (
+              <Button key={kind} aria-pressed={filter === kind} onClick={() => setFilter(kind)} size="sm" variant={filter === kind ? 'outline' : 'ghost'}>
+                {kind === 'all' ? 'All' : kind === 'image' ? 'Images' : 'Models'}
+              </Button>
+            ))}
+          </div>
+          {!configured && (
+            <div style={V.hint}>
+              Add your Meshy API key to list your generations.{' '}
+              <Button onClick={onOpenSettings} size="sm" variant="outline">
+                Open Meshy settings
+              </Button>
+            </div>
+          )}
+          {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
+          {local && local.some(f => matchesKind(filter, f.kind || 'model')) && <div style={V.section}>On this machine</div>}
+          {local?.filter(f => matchesKind(filter, f.kind || 'model') && matches(f.prompt, f.name, f.project)).map(f => {
+            const s = sourceForLocalFile(f)
+            const pickLocal = () => {
+              explicitSelection.current = true
+              setSelected(s)
+              setSelTask(f.task ? { task: f.task, title: f.name } : null)
+            }
+            return (
+              <button data-meshy-item style={isSel(s) ? { ...V.item, ...V.itemOn } : V.item} key={f.path} onClick={pickLocal} title={f.path} type="button">
+                <Codicon name="file-binary" />
+                <span style={V.itemText}>
+                  <span style={V.ellipsis}>{f.prompt || f.name}</span>
+                  <small style={{ ...V.itemSub, ...V.ellipsis }}>
+                    {f.prompt ? `${f.name} · ` : ''}
+                    {f.project} · {fmtBytes(f.bytes)}
+                  </small>
+                </span>
+              </button>
+            )
+          })}
+          {remote && remote.length > 0 && <div style={V.section}>Recent generations</div>}
+          {remote === null && configured && !error && <div style={V.hint}>Loading…</div>}
+          {remote?.filter(m => !local?.some(f => f.task === m.task_id) && matchesKind(filter, m.kind) && matches(m.prompt, m.task_type)).map(m => {
+            const s = sourceForAsset(m)
+            return (
+              <button
+                data-meshy-item style={s && isSel(s) ? { ...V.item, ...V.itemOn } : V.item}
+                disabled={!s}
+                key={m.task_id}
+                onClick={() => {
+                  if (s) {
+                    explicitSelection.current = false
+                    setSelected(s)
+                    setSelTask({ task: m.task_id, title: m.prompt || m.task_type })
+                  }
+                }}
+                title={m.prompt ? `${m.prompt}\n${m.task_id}` : m.task_id}
+                type="button"
+              >
+                <AssetThumbnail asset={m} />
+                <span style={V.itemText}>
+                  <span style={V.ellipsis}>{m.prompt || m.task_type}</span>
+                  <small style={V.itemSub}>
+                    {m.task_type}
+                    {typeof m.credits === 'number' ? ` · ${m.credits} credits` : ''} · {new Date(m.created_at).toLocaleDateString()}
+                    {m.expired ? m.local_path ? ' · Local copy' : ' · Expired' : ''}
+                  </small>
+                </span>
+              </button>
+            )
+          })}
+        </div>
+        <div role="note" style={{ ...V.hint, borderTop: '1px solid var(--ui-stroke-secondary)', marginTop: 6 }}>
+          {storage && <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span title="Includes Meshy downloads and known project copies">{fmtBytes(storage.bytes)} · {storage.files} local files</span>
+            <Button onClick={() => void os.revealPath(storage.directory)} size="sm" variant="ghost">Show folder</Button>
+          </div>}
+          <div title="Viewing does not save an asset. Use Download or ask Hermes to save it. Expired entries without local copies are hidden.">Download to keep assets · API links normally expire after 3 days.</div>
+        </div>
       </aside>
       <section style={V.main}>
         {selected && (
           <div data-meshy-gallery-head style={V.mainHead}>
             <span style={V.cardTitle}>{selected.kind === 'file' ? selected.path.split(/[\\/]/).pop() : selected.label}</span>
             <span style={V.spacer} />
-            {selTask && <ActionMenu key={`a:${selTask.task}`} rest={rest} task={selTask.task} />}
-            {selTask && (
+            {selTask && selected.media === 'image' && <ImageNext task={selTask.task} source={selected} imageIndex={imageIndex} />}
+            {selTask && selected.media === 'image' && <ImageDownload key={`images:${selTask.task}`} rest={rest} os={os} task={selTask.task} source={selected} onSaved={refresh} />}
+            {selTask && !(selected.media === 'image' || (selected.kind === 'remote' && selected.expired)) && <ActionMenu key={`a:${selTask.task}`} rest={rest} task={selTask.task} />}
+            {selTask && !(selected.media === 'image' || (selected.kind === 'remote' && selected.expired)) && (
               <FormatMenu
+                onSaved={refresh}
                 beside={selected.kind === 'file' ? selected.path : undefined}
                 key={`${selTask.task}:${selected.kind === 'file' ? selected.path : ''}`}
                 os={os}
@@ -938,16 +1090,20 @@ export function Gallery({
             )}
           </div>
         )}
+        {selected && selTask && <div data-meshy-task-id style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8, padding: '0 12px 8px', fontSize: 12, color: 'var(--ui-text-tertiary)' }}>
+          <span>Task ID</span><code style={{ userSelect: 'text', overflowWrap: 'anywhere' }}>{selTask.task}</code>
+          <Button aria-label="Copy task ID" onClick={() => void copyTaskId(selTask.task)} size="sm" variant="ghost"><Codicon name="copy" /> Copy ID</Button>
+        </div>}
         {selected ? (
           <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-            <ModelViewer autoRotate={autoRotate} height="100%" key={String(autoRotate)} os={os} rest={rest} source={selected} />
+            <AssetViewer imageIndex={imageIndex} onImageIndexChange={setImageIndex} autoRotate={autoRotate} height="100%" key={String(autoRotate)} os={os} rest={rest} source={selected} />
           </div>
         ) : null}
         {selected && selTask && <MadeFrom key={`m:${selTask.task}`} onPick={pickTask} rest={rest} task={selTask.task} />}
         {selected ? null : (
           <div style={V.empty}>
             <Codicon name="symbol-misc" size={32} />
-            <span>Pick a model to view it in 3D.</span>
+            <span>Pick an image or a model to preview.</span>
           </div>
         )}
       </section>
