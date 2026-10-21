@@ -238,22 +238,24 @@ def test_save_downloads_a_file_once_and_a_retry_finishes_failed_companions(api, 
 
 def test_a_beside_export_is_reused_only_for_the_task_that_saved_it(api, monkeypatch):
     """A project file regenerated as a new task keeps its name; the old task's robot.stl beside it is never
-    served or listed as the new task's export, and a file the user made there is never overwritten."""
+    served or listed as the new task's export, and a file the user made or edited there is never overwritten."""
     old, new = "01a15976-d838-7532-99d8-000000000050", _TASK
     a = "https://assets.meshy.ai/"
-    rows = {old: {"id": old, "model_urls": {"stl": a + "old.stl"}}, new: {"id": new, "model_urls": {"stl": a + "new.stl"}}}
+    rows = {old: {"id": old, "model_urls": {"stl": a + "old.stl"}},
+            new: {"id": new, "model_urls": {"stl": a + "new.stl", "obj": a + "m.obj", "mtl": a + "m.mtl"}}}
     monkeypatch.setattr(api, "_task", lambda t, _k: rows[t])
-    hits = _fake_assets(monkeypatch, api, {"old.stl": b"OLD TASK STL", "new.stl": b"NEW TASK STL"})
+    hits = _fake_assets(monkeypatch, api, {"old.stl": b"OLD TASK STL", "new.stl": b"NEW TASK STL",
+                                           "m.obj": b"mtllib material.mtl\nv 0 0 0\n", "m.mtl": b"newmtl material\n"})
     anchor = Path.home() / "projects" / "demo" / "robot.glb"
     anchor.parent.mkdir(parents=True)
     anchor.write_bytes(b"glTF-old")
     api.save({"task": old, "format": "stl", "beside": str(anchor)})
 
     anchor.write_bytes(b"glTF-regenerated")
-    assert api.formats(new, beside=str(anchor))["formats"] == [{"format": "stl", "saved": None}]
+    assert {"format": "stl", "saved": None} in api.formats(new, beside=str(anchor))["formats"]
     saved = Path(api.save({"task": new, "format": "stl", "beside": str(anchor)})["path"])
     assert saved.read_bytes() == b"NEW TASK STL" and hits.get("new.stl") == 1
-    assert api.formats(new, beside=str(anchor))["formats"] == [{"format": "stl", "saved": str(saved)}]
+    assert {"format": "stl", "saved": str(saved)} in api.formats(new, beside=str(anchor))["formats"]
     api.save({"task": new, "format": "stl", "beside": str(anchor)})
     assert hits["new.stl"] == 1  # this task's own export is reused
     assert [f["name"] for f in api.local(limit=50)["files"]] == []  # exports are indexed, not gallery models
@@ -266,3 +268,11 @@ def test_a_beside_export_is_reused_only_for_the_task_that_saved_it(api, monkeypa
     other = Path(api.save({"task": new, "format": "stl", "beside": str(tank)})["path"])
     assert mine.read_bytes() == b"USER MADE THIS" and other.name == f"tank-{new[-8:]}.stl"
     assert other.read_bytes() == b"NEW TASK STL"
+    # ...nor is one Hermes saved that the user edited since, nor a user's .mtl an OBJ save would bring along.
+    saved.write_bytes(b"USER EDITED THE EXPORT")
+    api.save({"task": new, "format": "stl", "beside": str(anchor)})
+    assert saved.read_bytes() == b"USER EDITED THE EXPORT"
+    tank.with_suffix(".mtl").write_text("USER MTL", encoding="utf-8")
+    obj = Path(api.save({"task": new, "format": "obj", "beside": str(tank)})["path"])
+    assert tank.with_suffix(".mtl").read_text(encoding="utf-8") == "USER MTL" and obj.name == f"tank-{new[-8:]}.obj"
+    assert obj.with_suffix(".mtl").read_text(encoding="utf-8") == "newmtl material\n"

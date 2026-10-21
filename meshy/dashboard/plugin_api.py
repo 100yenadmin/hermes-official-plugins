@@ -468,18 +468,40 @@ def _save_target(task_id: str, beside: str | None) -> tuple[Path, str, Path | No
     return _data_root() / "meshy_output" / task_id, "model", None  # full id: UUIDv7 prefixes repeat within ms
 
 
+def _saved_rows() -> dict[str, dict]:
+    return {r["path"]: r for r in _load_index() if isinstance(r, dict) and r.get("path")}
+
+
+def _ours(path: Path, saved: dict[str, dict]) -> dict | None:
+    """The index row of a file Hermes saved and nobody has touched since (same size and mtime), else None."""
+    row = saved.get(str(path))
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return row if row and row.get("bytes") == st.st_size and row.get("mtime") == int(st.st_mtime * 1000) else None
+
+
+def _bundle(stem: str, fmt: str) -> list[str]:
+    """Every file one save writes: an OBJ brings its .mtl and texture."""
+    main = _saved_name(stem, fmt)
+    return [main, f"{stem}.mtl", f"{stem}_texture.png"] if fmt == "obj" else [main]
+
+
 def _beside_dest(folder: Path, stem: str, fmt: str, task_id: str, anchor: Path | None,
-                 saved_by: dict[str, str | None]) -> tuple[Path, bool]:
+                 saved: dict[str, dict]) -> tuple[Path, bool]:
     """Where a format of ``task_id`` goes, and whether a file already there is this task's.
-    Beside a project file only our own saves are replaceable: a sibling an earlier task saved is
-    refreshed, but a file Hermes never saved (the user's own robot.stl) is never overwritten, so the
-    export takes a task-suffixed name instead. The anchor itself is the card's model, i.e. this task's."""
+    Beside a project file only Hermes' own, untouched saves are replaceable: a sibling an earlier task
+    saved is refreshed, but a file Hermes never saved, or one the user edited since (robot.stl, robot.mtl),
+    is never overwritten, so the export takes a task-suffixed name instead. The anchor itself is the
+    card's model, i.e. this task's."""
     dest = folder / _saved_name(stem, fmt)
     if anchor is None or dest == anchor:
         return dest, dest.is_file()
-    if dest.is_file() and str(dest) not in saved_by:
+    if any((folder / n).exists() and not _ours(folder / n, saved) for n in _bundle(stem, fmt)):
         dest = folder / _saved_name(f"{stem}-{task_id[-8:]}", fmt)
-    return dest, dest.is_file() and saved_by.get(str(dest)) == task_id
+    row = _ours(dest, saved)
+    return dest, bool(row) and row.get("task_id") == task_id
 
 
 def _staging(dest: Path) -> tuple[int, Path]:
@@ -514,10 +536,10 @@ def formats(task: str, beside: str | None = None):
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
     urls = _result_urls(_task(task, key))
-    saved_by = {r["path"]: r.get("task_id") for r in _load_index()} if beside else {}
+    saved_rows = _saved_rows() if beside else {}
     out = []
     for fmt in sorted((k for k in urls if _split_format(k)[0] in _FORMAT_ORDER), key=_format_sort_key):
-        saved, mine = _beside_dest(folder, stem, fmt, task, anchor, saved_by)
+        saved, mine = _beside_dest(folder, stem, fmt, task, anchor, saved_rows)
         out.append({"format": fmt, "saved": str(saved) if mine else None})
     return {"task": task, "formats": out}
 
@@ -546,8 +568,7 @@ def save(body: dict):
     with _STATE_LOCK:
         dest_lock = _SAVE_LOCKS.setdefault(str(folder / _saved_name(stem, fmt)), threading.Lock())
     with dest_lock:
-        saved_by = {r["path"]: r.get("task_id") for r in _load_index()} if beside else {}
-        dest, mine = _beside_dest(folder, stem, fmt, task_id, anchor, saved_by)
+        dest, mine = _beside_dest(folder, stem, fmt, task_id, anchor, _saved_rows() if beside else {})
         stem = dest.name[: -len(_saved_name("", fmt))] if beside else stem  # OBJ companions follow a suffixed name
         fresh = not mine
         if fresh:
@@ -556,6 +577,8 @@ def save(body: dict):
         # The .mtl is published last: an OBJ without one is a save whose companions failed, so finish them now.
         if fmt == "obj" and urls.get("mtl") and (fresh or not (folder / f"{stem}.mtl").is_file()):
             _save_obj_material(row, urls["mtl"], folder, stem)
+            for name in _bundle(stem, fmt):  # the rewritten OBJ and its companions are Hermes' saves too
+                _record_asset(folder / name, task_id, export=True)
     if fmt in ("glb", "gltf"):
         _record_asset(dest, task_id)
     return {"path": str(dest), "bytes": dest.stat().st_size}
