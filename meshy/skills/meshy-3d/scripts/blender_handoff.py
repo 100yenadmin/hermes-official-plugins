@@ -433,8 +433,15 @@ def main() -> None:
             for k in kinds:
                 (export_glb if k == "glb" else export_fbx)(outputs[f"lod{i}_{k}"])
             lods.append({"lod": i, "fraction": frac, "triangles": lod["after"]})
+        moved = []
         for k, p in outputs.items():
-            os.replace(p, final[k])
+            try:
+                os.replace(p, final[k])
+            except OSError as exc:
+                shutil.rmtree(stage, ignore_errors=True)
+                fail(f"could not move {final[k]} into place ({exc}); already saved: {moved or 'nothing'} "
+                     f"(source untouched: {src})")
+            moved.append(final[k])
     except SystemExit:
         raise
     except HandoffRefused as exc:

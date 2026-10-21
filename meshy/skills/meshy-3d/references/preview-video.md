@@ -32,7 +32,7 @@ node <skill_dir>/scripts/render_preview.mjs /abs/path/model.glb --label "Knight"
 
 It prints one JSON line. On success: `{"ok": true, "out": "<abs .mp4>", "mb": ..., "seconds":
 ..., "clip": ..., "render_s": ...}`. Default output:
-`<HERMES_HOME>/cache/videos/meshy/<model>-<clip|turntable>.mp4`. That directory is on the
+`<HERMES_HOME>/cache/videos/meshy/<model>-<clipN-name|turntable>.mp4`. That directory is on the
 gateway's media allowlist (`gateway/platforms/base.py` `MEDIA_DELIVERY_SAFE_ROOTS` includes
 `<HERMES_HOME>/cache/videos`), so delivery works even with `HERMES_MEDIA_DELIVERY_STRICT` on.
 Keep the default unless the user names a place.
@@ -49,7 +49,7 @@ Reply with a short sentence and the video on its own line, plus the thumbnail if
 
 ```
 Here's your knight walking (4.3 s loop).
-MEDIA:/home/me/.hermes/cache/videos/meshy/knight_walking-walking_man.mp4
+MEDIA:/home/me/.hermes/cache/videos/meshy/knight_walking-clip1-walking_man.mp4
 ```
 
 The gateway strips the `MEDIA:` line and uploads the file natively (`.mp4` goes to the

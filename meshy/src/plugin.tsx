@@ -132,7 +132,7 @@ const plugin: HermesPlugin = {
       if (isMeshyCall(payload.name, payload.args)) {
         refreshBalance()
         for (const rec of creationsFrom(payload.name, payload.args, payload.result)) {
-          provenance.record(event, { ...rec, session_id: event.session_id })
+          provenance.record({ ...rec, session_id: event.session_id })
         }
       }
     })

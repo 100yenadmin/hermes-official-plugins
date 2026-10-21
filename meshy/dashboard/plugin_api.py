@@ -94,6 +94,18 @@ def _meshy_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail="Meshy API unreachable")
 
 
+# The asset index and provenance are read-modify-written by concurrent requests in the one dashboard process.
+_STATE_LOCK = threading.Lock()
+
+
+def _write_json(target: Path, value: object) -> None:
+    """Atomic replace through a per-writer temp file (callers hold _STATE_LOCK)."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.part")
+    tmp.write_text(json.dumps(value, indent=1), encoding="utf-8")
+    tmp.replace(target)
+
+
 def _data_root() -> Path:
     """The plugin's data dir (the MCP server's cwd, so its default ``meshy_output/`` lives here)."""
     from hermes_constants import get_hermes_home
@@ -234,21 +246,18 @@ def _record_asset(path: Path, task_id: str | None = None) -> None:
         st = resolved.stat()
         task = task_id if isinstance(task_id, str) and _TASK_ID.match(task_id) else None
         now = int(time.time() * 1000)
-        rows = _load_index()
-        key = str(resolved)
-        row = next((r for r in rows if r.get("path") == key), None)
-        if row is None:
-            row = {"path": key, "first_seen": now}
-            rows.append(row)
-        if row.get("bytes") != st.st_size or row.get("mtime") != int(st.st_mtime * 1000) or not row.get("sha256"):
-            row.update(bytes=st.st_size, mtime=int(st.st_mtime * 1000), sha256=_sha256(resolved))
-        row.update(name=resolved.name, last_opened=now, task_id=task or row.get("task_id"))
-        rows.sort(key=lambda r: r.get("last_opened") or 0, reverse=True)
-        target = _index_path()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(target.name + ".part")
-        tmp.write_text(json.dumps(rows[:_INDEX_CAP], indent=1), encoding="utf-8")
-        tmp.replace(target)
+        with _STATE_LOCK:  # concurrent /file reads each upsert: one read-modify-write at a time
+            rows = _load_index()
+            key = str(resolved)
+            row = next((r for r in rows if r.get("path") == key), None)
+            if row is None:
+                row = {"path": key, "first_seen": now}
+                rows.append(row)
+            if row.get("bytes") != st.st_size or row.get("mtime") != int(st.st_mtime * 1000) or not row.get("sha256"):
+                row.update(bytes=st.st_size, mtime=int(st.st_mtime * 1000), sha256=_sha256(resolved))
+            row.update(name=resolved.name, last_opened=now, task_id=task or row.get("task_id"))
+            rows.sort(key=lambda r: r.get("last_opened") or 0, reverse=True)
+            _write_json(_index_path(), rows[:_INDEX_CAP])
     except OSError as exc:  # the index is a convenience; serving the file never fails on it
         _log.debug("meshy asset index: %s", exc)
 
@@ -301,7 +310,7 @@ def _label_for(task_id: str, prov: dict[str, dict]) -> str | None:
     return None
 
 
-# /save writes the full task id here (its folder is named by the first 8 characters only).
+# /save writes the full task id here (older saves used an 8-character folder name).
 _TASK_SIDECAR = ".meshy-task"
 
 
@@ -673,7 +682,6 @@ def actions(task: str):
 # Provenance: what made each model. Meshy's task record keeps a text prompt but not an image task's
 # input, nor which task a remesh/rig/animation came from, so Desktop records the creating tool call here.
 _PROV_NAME = "provenance.json"
-_PROV_LOCK = threading.Lock()
 _PROV_CAP = 2000
 _PROV_TEXT = ("prompt", "texture_prompt", "text_style_prompt", "negative_prompt", "object_prompt")
 _PROV_PARENT = ("preview_task_id", "input_task_id", "rig_task_id")
@@ -727,21 +735,35 @@ def provenance(body: dict):
     if settings:
         row["settings"] = {k: (v[:10] if isinstance(v, list) else v) for k, v in settings.items()}
     sid = body.get("session_id")
-    if isinstance(sid, str) and _SESSION_ID.match(sid):
-        row["session_id"] = sid
-    # Read-modify-write under one lock: completions for parallel calls arrive together, and an unlocked
-    # pair of writers each saved its own copy and dropped the other's record.
-    with _PROV_LOCK:
+    # Ownership comes from this backend's own sessions, never from the client's guess: Desktop tags a
+    # local event with whatever profile/connection is in front when it arrives, so a record is accepted
+    # only by the profile whose state.db holds the chat that made it. 409 = keep it and try elsewhere.
+    if not (isinstance(sid, str) and _SESSION_ID.match(sid)) or not _own_session(sid):
+        raise HTTPException(status_code=409, detail="that chat is not on this profile")
+    row["session_id"] = sid
+    with _STATE_LOCK:  # completions of a parallel tool_call arrive together
         rows = _load_prov()
         rows[task_id] = row
         if len(rows) > _PROV_CAP:
             rows = dict(sorted(rows.items(), key=lambda kv: kv[1].get("recorded_at") or 0)[-_PROV_CAP:])
-        target = _prov_path()
-        target.parent.mkdir(parents=True, exist_ok=True)
-        tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.part")
-        tmp.write_text(json.dumps(rows, indent=1), encoding="utf-8")
-        tmp.replace(target)
+        _write_json(_prov_path(), rows)
     return {"ok": True}
+
+
+def _own_session(session_id: str) -> bool:
+    """True when this profile's state.db has the session (read-only; no schema work, no writes)."""
+    import sqlite3
+
+    from hermes_constants import get_hermes_home
+    db = get_hermes_home() / "state.db"
+    if not db.is_file():
+        return False
+    try:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5) as conn:
+            return conn.execute("SELECT 1 FROM sessions WHERE id = ? LIMIT 1", (session_id,)).fetchone() is not None
+    except sqlite3.Error as exc:
+        _log.debug("meshy provenance: session lookup failed: %s", exc)
+        return False
 
 
 def _download_lineage(task_id: str) -> tuple[str | None, list[dict]]:

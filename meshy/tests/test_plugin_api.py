@@ -136,18 +136,31 @@ def test_actions_state_a_real_cost_and_only_what_the_task_supports(api, monkeypa
     assert _status(api.actions, "not-a-task-id") == 400
 
 
+def _sessions(api, *ids):
+    """This profile's state.db with these chats (the real table name and key column)."""
+    import sqlite3
+    with sqlite3.connect(api.tmp / "hermes" / "state.db") as db:
+        db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY)")
+        db.executemany("INSERT OR IGNORE INTO sessions VALUES (?)", [(i,) for i in ids])
+
+
 def test_provenance_keeps_what_made_a_model_and_never_a_signed_url(api, monkeypatch):
-    """The gallery's "Made from": a child step shows its origin's prompt; tokens and junk are never stored."""
+    """The gallery's "Made from": a child step shows its origin's prompt; tokens, junk and another
+    profile's chats are never stored."""
     parent, child = _TASK, "01a15965-4a40-718b-8912-4046ede4837f"
+    _sessions(api, "sess-1")
     api.provenance({"task_id": parent, "tool": "meshy_image_to_3d", "session_id": "sess-1",
                     "args": {"image_url": "https://cdn.example.com/frog.png?Signature=SECRET&Expires=9",
                              "texture_prompt": "mossy green frog", "model_type": "smart-topology", "target_polycount": 15000}})
-    api.provenance({"task_id": child, "tool": "meshy_remesh",
+    api.provenance({"task_id": child, "tool": "meshy_remesh", "session_id": "sess-1",
                     "args": {"input_task_id": parent, "target_polycount": 8000, "topology": "triangle"}})
     stored = api._prov_path().read_text(encoding="utf-8")
     assert "SECRET" not in stored and "Signature" not in stored
     for bad in ({"task_id": "x", "tool": "meshy_rig"}, {"task_id": child, "tool": "rm -rf"}):
         assert _status(api.provenance, bad) == 400
+    other = {"task_id": "01a15965-4a40-718b-8912-000000000001", "tool": "meshy_rig", "args": {}}
+    assert _status(api.provenance, {**other, "session_id": "a-chat-on-another-profile"}) == 409
+    assert _status(api.provenance, other) == 409
 
     monkeypatch.setattr(api, "_api_key", lambda: None)  # no key: details still answers from the record
     d = api.details(child)
@@ -158,11 +171,21 @@ def test_provenance_keeps_what_made_a_model_and_never_a_signed_url(api, monkeypa
     assert api.details(parent)["session_id"] == "sess-1"
 
 
-def test_parallel_provenance_writes_keep_every_record_and_tasks_get_their_own_folder(api):
-    """Completions of a parallel tool_call arrive together; two tasks a millisecond apart share a prefix."""
+def test_parallel_writes_keep_every_record_and_tasks_get_their_own_folder(api):
+    """Completions of a parallel tool_call arrive together, as do /file reads; two tasks a millisecond
+    apart share their first 8 characters."""
     from concurrent.futures import ThreadPoolExecutor
+    _sessions(api, "s")
     ids = [f"01a15976-d838-7532-99d8-{i:012x}" for i in range(24)]
+    models = []
+    for i in range(12):
+        m = api.data / "meshy_output" / f"m{i}" / "model.glb"
+        m.parent.mkdir(parents=True)
+        m.write_bytes(b"glTF" + bytes([i]) * 64)
+        models.append(m)
     with ThreadPoolExecutor(max_workers=12) as pool:
-        list(pool.map(lambda i: api.provenance({"task_id": i, "tool": "meshy_remesh", "args": {}}), ids))
+        list(pool.map(lambda i: api.provenance({"task_id": i, "tool": "meshy_remesh", "args": {}, "session_id": "s"}), ids))
+        list(pool.map(api._record_asset, models))
     assert set(ids) <= set(api._load_prov())
+    assert {str(m.resolve()) for m in models} <= {r["path"] for r in api._load_index()}
     assert api._save_target(ids[0], None)[0] != api._save_target(ids[1], None)[0]

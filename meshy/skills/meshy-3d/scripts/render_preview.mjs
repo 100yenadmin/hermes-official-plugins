@@ -395,7 +395,9 @@ async function main() {
     // steer the default output out of the videos folder (ffmpeg runs with -y).
     const slug = s => s.toLowerCase().replace(/[^a-z0-9._-]+/g, '_').replace(/^[._]+/, '').slice(0, 80) || 'model'
     const videos = path.join(hermesHome(), 'cache', 'videos', 'meshy')
-    const outDefault = path.join(videos, `${slug(stem)}-${info.clip ? slug(pretty(info.clip)) : 'turntable'}.mp4`)
+    // The clip's position keeps names apart when two clip names slug alike (non-Latin names, "Walk"/"walk").
+    const clipPart = info.clip ? `clip${Math.max(0, info.clips.findIndex(c => c.name === info.clip)) + 1}-${slug(pretty(info.clip))}` : 'turntable'
+    const outDefault = path.join(videos, `${slug(stem)}-${clipPart}.mp4`)
     if (!a.out && path.dirname(path.resolve(outDefault)) !== path.resolve(videos)) {
       throw new Error(`refusing to write outside ${videos}`)
     }
