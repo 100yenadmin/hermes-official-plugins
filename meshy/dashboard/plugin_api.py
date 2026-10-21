@@ -603,8 +603,7 @@ def task_state(task: str):
 # In-flight tasks for the Desktop progress chip. Meshy's list endpoints return status + progress per
 # task; the chip polls this only while a Meshy tool runs or a task is still in flight.
 _ACTIVE_STATUSES = ("PENDING", "IN_PROGRESS")
-_ACTIVE_ENDPOINTS = (*_MODEL_ENDPOINTS, ("text-to-image", "/openapi/v1/text-to-image"),
-                     ("animation", "/openapi/v1/animations"))
+_ACTIVE_ENDPOINTS = (*_MODEL_ENDPOINTS, ("text-to-image", "/openapi/v1/text-to-image"))
 # A task queued longer than this is Meshy's problem, not a progress bar's (Meshy advises 60 min max).
 _ACTIVE_MAX_AGE_MS = 60 * 60 * 1000
 
@@ -801,6 +800,8 @@ def _download_lineage(task_id: str) -> tuple[str | None, list[dict]]:
             meta = json.loads(meta_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        if not isinstance(meta, dict):
+            continue  # another tool's metadata.json (valid JSON, not a project record)
         tasks = [t for t in meta.get("tasks") or [] if isinstance(t, dict) and _TASK_ID.match(str(t.get("task_id") or ""))]
         if any(t["task_id"] == task_id for t in tasks):
             seen, chain = set(), []
