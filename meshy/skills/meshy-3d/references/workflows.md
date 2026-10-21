@@ -74,6 +74,12 @@ Suggested flow:
 6. Checkpoint: get the user's approval of the final model (and animation) BEFORE writing into an existing game project; then download that engine's format with save_to inside the project's asset folder (one download per format).
 7. Say plainly that a downloaded model is not game-ready yet: no LODs, no collision mesh, no hand retopology, and pivot/scale may need fixing in the engine.
 
+Engine notes:
+- Unreal works in centimetres and Meshy exports metres: keep "Convert Scene Unit" on at FBX import (or scale ×100), else the model arrives 100× too small.
+- Roblox: a MeshPart takes at most 20,000 triangles. Set `target_polycount` at or under that (Smart Topology) or remesh first; export FBX or OBJ.
+- Locomotion clips: Meshy has no in-place option, so a walk or run can move the root. If the game moves the character itself, lock root motion on import (Unity: Root Transform Position (XZ) → Bake Into Pose; Unreal: Force Root Lock in the animation asset). Check by playing the clip and watching whether the character leaves its spot.
+- Godot 4: drop the `.glb` into the project; clips become an AnimationPlayer.
+
 ## Scenario D: Character Animation
 Trigger: user mentions rig, animate, walking, running, character animation.
 Suggested flow:

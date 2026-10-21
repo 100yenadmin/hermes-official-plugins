@@ -95,6 +95,9 @@ you get, rendered with stock three.js:
 - **Inline 3D cards.** After a download the agent ends its reply with
   `::meshy-model{path="/abs/model.glb" task="<task_id>"}`; Desktop shows it as a card you click to
   orbit, zoom, toggle wireframe and grid, or open in a tab. Other clients show the line as text.
+  Right after starting a job the agent can post just `::meshy-model{task="<task_id>"}` and reply at
+  once: the card shows Meshy's progress ("Meshy 38% · previewing"), then the thumbnail with Next and
+  Download, and fetches the GLB into the plugin's folder (free) when you click View in 3D.
 - **Download menu on every card.** It lists each file type Meshy produced for that task (a refined
   model: GLB, FBX, OBJ with its .mtl and texture, STL, USDZ; a preview: GLB only) and saves the one
   you pick next to the .glb, then opens its folder. No credits: Meshy made them all at generation

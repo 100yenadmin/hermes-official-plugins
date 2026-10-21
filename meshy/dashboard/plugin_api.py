@@ -14,6 +14,8 @@ Routes:
                             a served model is recorded in the profile's asset index (path, size, sha256, task)
     GET /formats?task=      the file types a finished task offers (glb, fbx, obj, stl, usdz ...) + any already saved
     POST /save              {task, format, beside?}: download one format next to ``beside`` (no credits)
+    GET /task?task=         one task's status + progress % + thumbnail, for a card given only a task id: it shows
+                            progress while Meshy works and the model once it is done (the agent need not wait)
     GET /active             Meshy tasks still PENDING/IN_PROGRESS with their progress % (progress chip)
     GET /actions?task=      the follow-up actions a finished task supports (texture, remesh, rig ...), each with
                             its credit cost and the chat message a card button sends; plus the live balance
@@ -572,6 +574,30 @@ def remote(url: str):
     _log.debug("meshy remote asset %s: %d bytes in %.1fs", parts.path, len(data), time.monotonic() - started)
     return {"name": Path(parts.path).name, "bytes": len(data),
             "dataUrl": f"data:{_MIME[suffix]};base64,{base64.b64encode(data).decode('ascii')}"}
+
+
+_TERMINAL_FAILED = ("FAILED", "CANCELED", "EXPIRED")
+
+
+@router.get("/task")
+def task_state(task: str):
+    """Status for a ``::meshy-model{task=...}`` card. Polled every few seconds while the task runs."""
+    key = _api_key()
+    if not key:
+        raise HTTPException(status_code=400, detail="no Meshy API key")
+    row = _task(task, key)
+    status = str(row.get("status") or "")
+    error = row.get("task_error") if isinstance(row.get("task_error"), dict) else {}
+    urls = _result_urls(row) if status == "SUCCEEDED" else {}
+    return {
+        "task": task, "status": status, "progress": int(row.get("progress") or 0),
+        "type": str(row.get("type") or ""), "stage": str(row.get("mode") or row.get("type") or ""),
+        "prompt": str(row.get("prompt") or "")[:200] or _clip_label(urls) or None,
+        "thumbnail": row.get("thumbnail_url") if isinstance(row.get("thumbnail_url"), str) else None,
+        "credits": row.get("consumed_credits"),
+        "has_model": "glb" in urls,
+        "error": (str(error.get("message") or "") or status.lower()) if status in _TERMINAL_FAILED else None,
+    }
 
 
 # In-flight tasks for the Desktop progress chip. Meshy's list endpoints return status + progress per

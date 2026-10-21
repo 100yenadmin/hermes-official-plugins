@@ -85,7 +85,11 @@ user's goal before the first paid call.
    the model). Keep the `task_id` and task type.
 4. **Wait** with `meshy_get_task_status` (`wait: true`, default 300 s per call). Generation
    usually takes 2–3 minutes. A wait that times out leaves the task running: poll the same
-   `task_id` again.
+   `task_id` again. **On Hermes Desktop, don't wait when nothing else needs the result:** right after
+   the create, end the reply with `::meshy-model{task="<task_id>" title="<short name>"}` on its own
+   line. The card shows Meshy's progress, then the model with its Next and Download menus. Wait only
+   when the next step needs the finished task (a chained refine/rig, a download into the project, a
+   chat app).
 5. **Never re-create on doubt.** If a create fails with a timeout, network error or 5xx, the
    task may exist and be billed: check `meshy_list_tasks` with that `task_type` first.
 6. **Download** with `meshy_download_model`, one `format` per call (singular; there is no
@@ -94,7 +98,10 @@ user's goal before the first paid call.
    directory (`meshy_output/`), not the current project. Report every saved path and the file size.
 7. **Report** the result: files and paths, formats, credits spent, the ACTUAL triangle count
    (see [Pick the detail level](#pick-the-detail-level)) and the `task_id` for follow-ups
-   (refine, rig, convert reuse it instead of regenerating).
+   (refine, rig, convert reuse it instead of regenerating). **Describe what the file holds, not what
+   the task claims:** a SUCCEEDED rig or animation task was billed, which doesn't prove the skeleton or
+   clips landed in the file. Run `python3 scripts/glb_stats.py <saved .glb>` (this skill's folder) and
+   say "rigged" only when `skins`/`joints` > 0, and "animated" only by naming the `clips` it lists.
 7b. **Offer the optional Blender copy, before step 8** (local, no additional Meshy credits) after a `.glb` download or
    when showing a local Meshy model. First run `hermes config get plugins.entries.meshy.settings.blender_handoff`
    ("not set" means `ask`). Unless it is `never`, find Blender: `hermes config get plugins.entries.meshy.settings.blender_path` first, then PATH and the per-OS folders in [blender](references/blender.md) §2.
@@ -114,8 +121,9 @@ user's goal before the first paid call.
    menu lists every file type Meshy produced for that task (a refined model: GLB, FBX, OBJ, STL,
    USDZ) and saves the one the user picks beside the .glb, at no credit cost; without `task=` the
    card has no menu. Other clients show the line as text, so write the path in prose as well.
-   To show a finished task the user has not downloaded yet, download it first (free) and use
-   `path=`; a `url=` card with a signed Meshy link does not render in current Desktop builds.
+   To show a task the user has not downloaded (running or finished), use `::meshy-model{task="<task_id>"}`:
+   the card downloads the GLB into the plugin's folder (free) only when the user opens it. A `url=`
+   card with a signed Meshy link does not render in current Desktop builds.
    Every result (refine, remesh, retexture, rig, animation) gets its OWN card with ITS task id, so
    the card's **Next** menu offers what that task supports. **Next** sends a message such as
    `Meshy task <id>: remesh it with meshy_remesh (5 credits) ...`. The cost in that message is the

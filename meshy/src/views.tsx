@@ -18,6 +18,7 @@ import {
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 
 import { createStage, dataUrlToBuffer, type ModelStats, type Stage } from './stage.ts'
+import { TaskCard } from './task-card.tsx'
 
 export type Rest = PluginContext['rest']
 export type Os = PluginContext['os']
@@ -72,7 +73,7 @@ export type Source = { kind: 'file'; path: string; task?: string } | { kind: 're
 
 // Inline styles with theme variables: no injected <style> tag (nothing global to leak or clean up),
 // and every surface reskins with the active theme.
-const V = {
+export const V = {
   viewer: { position: 'relative', width: '100%', borderRadius: 8, overflow: 'hidden', background: 'var(--ui-bg-secondary, #1b1d22)', ['--meshy-stage-bg' as string]: 'var(--ui-bg-secondary, #1b1d22)' },
   stage: { position: 'absolute', inset: 0 },
   overlay: { position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--ui-text-secondary)', fontSize: 13, pointerEvents: 'none' },
@@ -101,6 +102,14 @@ const V = {
   empty: { flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 8, color: 'var(--ui-text-tertiary)' },
   search: { width: 'calc(100% - 8px)', margin: '0 4px 6px', padding: '4px 8px', borderRadius: 6, border: '1px solid var(--ui-stroke-secondary)', background: 'transparent', color: 'var(--ui-text)', fontSize: 12 },
   ellipsis: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', display: 'block' },
+  taskLine: { fontSize: 13, color: 'var(--ui-text-secondary)', padding: '4px 2px' },
+  taskRun: { display: 'flex', alignItems: 'center', gap: 10, padding: '6px 2px' },
+  taskThumb: { width: 72, height: 72, objectFit: 'cover', borderRadius: 6, flexShrink: 0 },
+  taskImage: { width: '100%', maxHeight: 320, objectFit: 'contain', borderRadius: 8 },
+  bar: { height: 6, borderRadius: 3, background: 'var(--ui-bg-tertiary, rgba(127,127,127,.2))', overflow: 'hidden', marginTop: 4 },
+  barFill: { height: '100%', background: 'var(--ui-accent)', transition: 'width .4s ease' },
+  posterImage: { backgroundSize: 'cover', backgroundPosition: 'center', color: '#fff' },
+  posterLabel: { padding: '2px 8px', borderRadius: 6, background: 'rgba(0,0,0,.55)' },
   madeFrom: { display: 'flex', flexDirection: 'column', gap: 6, padding: '8px 10px', border: '1px solid var(--ui-stroke-secondary)', borderRadius: 8, fontSize: 12, color: 'var(--ui-text-secondary)', maxHeight: 220, overflowY: 'auto', flexShrink: 0 },
   madeHead: { display: 'flex', alignItems: 'center', gap: 6, minHeight: 24 },
   promptRow: { display: 'flex', alignItems: 'flex-start', gap: 4 },
@@ -540,7 +549,8 @@ export function ActionMenu({ rest, task }: { rest: Rest; task: string }) {
   )
 }
 
-/** Transcript directive card: `::meshy-model{path="/abs/model.glb"}` or `{url="https://assets.meshy.ai/..."}`.
+/** Transcript directive card: `::meshy-model{task="<id>"}` (live progress, then the model), `{path="/abs/model.glb"}`
+ *  or `{url="https://assets.meshy.ai/..."}`.
  *  Shows a click-to-load poster first so a long transcript never opens N WebGL contexts at once. */
 export function TranscriptCard({
   rest,
@@ -566,8 +576,11 @@ export function TranscriptCard({
       ? { kind: 'remote', url, label: title, ...(task ? { task } : {}) }
       : null
 
+  if (!source && task) {
+    return <TaskCard openInWorkspace={openInWorkspace} os={os} rest={rest} streaming={streaming} task={task} title={attrs.title} />
+  }
   if (!source) {
-    return <div style={{ ...V.card, ...V.error }}>Meshy model: give a path="..." or url="..."</div>
+    return <div style={{ ...V.card, ...V.error }}>Meshy model: give a task="...", path="..." or url="..."</div>
   }
 
   return (
