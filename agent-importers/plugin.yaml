@@ -1,0 +1,16 @@
+name: agent-importers
+label: Agent Importers
+kind: standalone
+version: 1.0.0
+author: NousResearch
+homepage: https://github.com/NousResearch/hermes-official-plugins/tree/main/agent-importers
+description: >
+  `hermes import-agent`: import a Claude Code (~/.claude), Codex CLI (~/.codex) or Cursor
+  (~/.cursor) setup into Hermes in one command. Instructions, Cursor rules and memories become
+  memory entries, Bash permission rules
+  become command allow/deny lists, MCP servers land in config.yaml, and skills are copied.
+  Always previews first; API keys and credentials are never imported. `--sync` re-imports
+  sources that changed. Formerly built into Hermes core.
+requires_hermes: ">=0.21.6"
+provides_tools: []
+provides_hooks: []

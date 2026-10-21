@@ -158,10 +158,16 @@ Catalog entries come in two tiers:
 </tr>
 <tr>
 <td width="50%" valign="top">
+<a href="agent-importers/"><img src="assets/agent-importers.jpg" alt="Agent Importers plugin"></a>
+<h3><a href="agent-importers/">Agent Importers</a></h3>
+<code>hermes plugins install agent-importers</code>
+<p><code>hermes import-agent</code> brings a Claude Code, Codex CLI or Cursor setup into Hermes in one command: instructions, Cursor rules and memories become memory entries, Bash permission rules become allow/deny lists, MCP servers land in <code>config.yaml</code> and skills are copied. Always previews first and never imports API keys; <code>--sync</code> re-imports sources that changed. Formerly built into Hermes core.</p>
+<p>CLI command · <code>hermes import-agent [claude-code|codex|cursor]</code></p>
+</td>
+<td width="50%" valign="top">
 <h3>More on the way</h3>
 <p>Official plugins move in here as they leave Hermes core or join from their own repos. Browse everything else, from Nous, vendors and the community, in the <a href="https://hermes-agent.nousresearch.com/docs/plugins">plugin catalog</a>. Experimental plugins we built but don't support live in <a href="https://github.com/NousResearch/hermes-labs-plugins">hermes-labs-plugins</a>.</p>
 </td>
-<td width="50%" valign="top"></td>
 </tr>
 </table>
 
@@ -172,6 +178,7 @@ Most plugins here used to live somewhere else: Home Assistant and Spotify were b
 
 - **You used the built-in Home Assistant, Spotify, Langfuse or Singularity backend:** `hermes update`, or the first start after updating, installs the plugin from the catalog with your existing config, env vars and login.
 - **You installed it from the catalog:** the catalog now points here, so `hermes plugins update <name>` moves your install to this repo and keeps your files.
+- **You used the built-in `hermes import-agent`:** profiles that registered an import for `--sync` get the `agent-importers` plugin on update; anywhere else, running `hermes import-agent` prints the one-line install (`hermes plugins install agent-importers`).
 - **You installed it by URL** (for example `hermes plugins install NousResearch/hermes-homeassistant`): reinstall once from the catalog with `hermes plugins install <name> --force` to follow future updates. The old repos are archived and get no new fixes.
 
 ## Repository layout
