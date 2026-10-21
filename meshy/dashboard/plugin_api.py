@@ -236,12 +236,14 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _record_asset(path: Path, task_id: str | None = None) -> None:
+def _record_asset(path: Path, task_id: str | None = None, export: bool = False) -> None:
     """Upsert one model into the index. Only a resolved .glb/.gltf inside the allowed roots is recorded
-    (the same gate /file applies), and a task id only when it is a well-formed Meshy id."""
+    (the same gate /file applies), and a task id only when it is a well-formed Meshy id. ``export``: a file
+    /save just wrote in any format, recorded with the task that produced it (the gallery lists models only)."""
     try:
         resolved = path.resolve(strict=True)
-        if resolved.suffix.lower() not in _INDEXED or not resolved.is_file():
+        model = resolved.suffix.lower() in _INDEXED
+        if not (model or export) or not resolved.is_file():
             return
         if not any(resolved.is_relative_to(root) for root in _allowed_roots()):
             return
@@ -255,8 +257,10 @@ def _record_asset(path: Path, task_id: str | None = None) -> None:
             if row is None:
                 row = {"path": key, "first_seen": now}
                 rows.append(row)
-            if row.get("bytes") != st.st_size or row.get("mtime") != int(st.st_mtime * 1000) or not row.get("sha256"):
-                row.update(bytes=st.st_size, mtime=int(st.st_mtime * 1000), sha256=_sha256(resolved))
+            if row.get("bytes") != st.st_size or row.get("mtime") != int(st.st_mtime * 1000) or (model and not row.get("sha256")):
+                row.update(bytes=st.st_size, mtime=int(st.st_mtime * 1000))
+                if model:
+                    row["sha256"] = _sha256(resolved)
             row.update(name=resolved.name, last_opened=now, task_id=task or row.get("task_id"))
             rows.sort(key=lambda r: r.get("last_opened") or 0, reverse=True)
             _write_json(_index_path(), rows[:_INDEX_CAP])
@@ -275,6 +279,8 @@ def local(limit: int = Query(50, ge=1, le=200)):
                                   "modified": int(st.st_mtime * 1000), "task": _local_task(p)}
     for row in _load_index():
         p = Path(row["path"])
+        if p.suffix.lower() not in _INDEXED:
+            continue  # an FBX/STL/OBJ /save wrote: indexed for its task, not a gallery model
         if str(p) in seen or not p.is_file():
             if str(p) in seen and not seen[str(p)]["task"] and row.get("task_id"):
                 seen[str(p)]["task"] = row["task_id"]
@@ -494,10 +500,13 @@ def formats(task: str, beside: str | None = None):
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
     urls = _result_urls(_task(task, key))
+    # Beside a project file a same-named sibling may be another task's export: it counts only if this task saved it.
+    saved_by = {r["path"]: r.get("task_id") for r in _load_index()} if beside else {}
     out = []
     for fmt in sorted((k for k in urls if _split_format(k)[0] in _FORMAT_ORDER), key=_format_sort_key):
         saved = folder / _saved_name(stem, fmt)
-        out.append({"format": fmt, "saved": str(saved) if saved.is_file() else None})
+        mine = saved.is_file() and (not beside or saved_by.get(str(saved)) == task)
+        out.append({"format": fmt, "saved": str(saved) if mine else None})
     return {"task": task, "formats": out}
 
 
@@ -526,9 +535,13 @@ def save(body: dict):
     with _STATE_LOCK:
         dest_lock = _SAVE_LOCKS.setdefault(str(dest), threading.Lock())
     with dest_lock:
-        fresh = not dest.is_file()
+        # Beside a project file, a same-named sibling may be an earlier task's export (the project file was
+        # regenerated as a new task): reuse it only when the index says THIS task saved it, else replace it.
+        saved_by = {r["path"]: r.get("task_id") for r in _load_index()} if beside else {}
+        fresh = not dest.is_file() or (bool(beside) and saved_by.get(str(dest)) != task_id)
         if fresh:
             _download(urls[fmt], dest)
+            _record_asset(dest, task_id, export=True)
         # The .mtl is published last: an OBJ without one is a save whose companions failed, so finish them now.
         if fmt == "obj" and urls.get("mtl") and (fresh or not (folder / f"{stem}.mtl").is_file()):
             _save_obj_material(row, urls["mtl"], folder, stem)

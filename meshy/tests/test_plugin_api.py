@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -196,7 +197,6 @@ def _fake_assets(monkeypatch, api, files: dict[str, bytes | int], delay: float =
     import io
     import threading
     import time
-    import urllib.error
     hits: dict[str, int] = {}
     lock = threading.Lock()
 
@@ -227,10 +227,33 @@ def test_save_downloads_a_file_once_and_a_retry_finishes_failed_companions(api, 
     assert [s["bytes"] for s in saved] == [3000, 3000] and hits["m.fbx"] == 1
 
     folder = api.data / "meshy_output" / _TASK
-    with pytest.raises(Exception):
+    with pytest.raises(urllib.error.HTTPError):  # the .mtl fetch failed: not reported as saved
         api.save({"task": _TASK, "format": "obj"})
     files["m.mtl"] = b"newmtl material\n"
     api.save({"task": _TASK, "format": "obj"})
     assert (folder / "model.mtl").read_text(encoding="utf-8") == "newmtl material\n" and hits["m.mtl"] == 2
     assert (folder / "model.obj").read_bytes().startswith(b"mtllib model.mtl\n")
     assert not list(folder.glob("*.part"))  # no staging file left behind
+
+
+def test_a_beside_export_is_reused_only_for_the_task_that_saved_it(api, monkeypatch):
+    """A project file regenerated as a new task keeps its name; the old task's robot.stl beside it is never
+    served or listed as the new task's export."""
+    old, new = "01a15976-d838-7532-99d8-000000000050", _TASK
+    a = "https://assets.meshy.ai/"
+    rows = {old: {"id": old, "model_urls": {"stl": a + "old.stl"}}, new: {"id": new, "model_urls": {"stl": a + "new.stl"}}}
+    monkeypatch.setattr(api, "_task", lambda t, _k: rows[t])
+    hits = _fake_assets(monkeypatch, api, {"old.stl": b"OLD TASK STL", "new.stl": b"NEW TASK STL"})
+    anchor = Path.home() / "projects" / "demo" / "robot.glb"
+    anchor.parent.mkdir(parents=True)
+    anchor.write_bytes(b"glTF-old")
+    api.save({"task": old, "format": "stl", "beside": str(anchor)})
+
+    anchor.write_bytes(b"glTF-regenerated")
+    assert api.formats(new, beside=str(anchor))["formats"] == [{"format": "stl", "saved": None}]
+    saved = Path(api.save({"task": new, "format": "stl", "beside": str(anchor)})["path"])
+    assert saved.read_bytes() == b"NEW TASK STL" and hits.get("new.stl") == 1
+    assert api.formats(new, beside=str(anchor))["formats"] == [{"format": "stl", "saved": str(saved)}]
+    api.save({"task": new, "format": "stl", "beside": str(anchor)})
+    assert hits["new.stl"] == 1  # this task's own export is reused
+    assert [f["name"] for f in api.local(limit=50)["files"]] == []  # exports are indexed, not gallery models
