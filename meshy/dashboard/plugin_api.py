@@ -462,17 +462,25 @@ def _save_target(task_id: str, beside: str | None) -> tuple[Path, str]:
     return _data_root() / "meshy_output" / task_id, "model"  # full id: UUIDv7 prefixes repeat within ms
 
 
+def _staging(dest: Path) -> tuple[int, Path]:
+    """A new, exclusively created temp file beside ``dest``: never an existing inode (symlink, hardlink or
+    another request's partial file). Publish it with ``os.replace``, which swaps the name, not the target."""
+    part = dest.with_name(f".{dest.name}.{os.urandom(8).hex()}.part")
+    # O_EXCL refuses any existing entry, a dangling symlink included; 0o666 keeps the user's umask.
+    return os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666), part
+
+
 def _download(url: str, dest: Path) -> None:
-    part = dest.with_name(dest.name + ".part")
+    fd, part = _staging(dest)
     try:
-        with urllib.request.urlopen(_asset_url(url), timeout=120) as resp, open(part, "wb") as out:
+        with open(fd, "wb") as out, urllib.request.urlopen(_asset_url(url), timeout=120) as resp:
             copied = 0
             while chunk := resp.read(1 << 20):
                 copied += len(chunk)
                 if copied > _MAX_SAVE_BYTES:
                     raise HTTPException(status_code=413, detail="asset larger than 1 GB")
                 out.write(chunk)
-        part.replace(dest)
+        os.replace(part, dest)
     except (urllib.error.URLError, OSError) as exc:
         raise _meshy_error(exc) from exc
     finally:
@@ -514,13 +522,21 @@ def save(body: dict):
     if not beside:
         (folder / _TASK_SIDECAR).write_text(task_id, encoding="utf-8")
     dest = folder / _saved_name(stem, fmt)
-    if not dest.is_file():
-        _download(urls[fmt], dest)
-        if fmt == "obj" and urls.get("mtl"):
-            _save_obj_material(row, urls["mtl"], folder, stem)
+    # Two clicks (or two windows) saving one file: the second waits, then finds it saved.
+    with _STATE_LOCK:
+        dest_lock = _SAVE_LOCKS.setdefault(str(dest), threading.Lock())
+    with dest_lock:
+        if not dest.is_file():
+            _download(urls[fmt], dest)
+            if fmt == "obj" and urls.get("mtl"):
+                _save_obj_material(row, urls["mtl"], folder, stem)
     if fmt in ("glb", "gltf"):
         _record_asset(dest, task_id)
     return {"path": str(dest), "bytes": dest.stat().st_size}
+
+
+# One lock per destination path, so concurrent saves of the same file download it once.
+_SAVE_LOCKS: dict[str, threading.Lock] = {}
 
 
 def _saved_name(stem: str, fmt: str) -> str:
@@ -539,18 +555,28 @@ def _save_obj_material(row: dict, mtl_url: str, folder: Path, stem: str) -> None
     if base:
         _download(base, folder / f"{stem}_texture.png")
         mtl = re.sub(r"(?m)^(\s*map_Kd\s+).*$", rf"\g<1>{stem}_texture.png", mtl)
-    (folder / f"{stem}.mtl").write_text(mtl, encoding="utf-8")
+    mtl_path = folder / f"{stem}.mtl"
+    fd, tmp = _staging(mtl_path)
+    try:
+        with open(fd, "w", encoding="utf-8") as out:
+            out.write(mtl)
+        os.replace(tmp, mtl_path)
+    finally:
+        tmp.unlink(missing_ok=True)
     # Repoint ``mtllib`` (a header line) by streaming: the OBJ is ~180 MB, never read it whole.
     obj = folder / f"{stem}.obj"
-    tmp = obj.with_name(obj.name + ".part")
-    with open(obj, "rb") as src, open(tmp, "wb") as dst:
-        for _ in range(64):
-            line = src.readline()
-            if not line:
-                break
-            dst.write(f"mtllib {stem}.mtl\n".encode() if line.startswith(b"mtllib ") else line)
-        shutil.copyfileobj(src, dst, 1 << 20)
-    tmp.replace(obj)
+    fd, tmp = _staging(obj)
+    try:
+        with open(obj, "rb") as src, open(fd, "wb") as dst:
+            for _ in range(64):
+                line = src.readline()
+                if not line:
+                    break
+                dst.write(f"mtllib {stem}.mtl\n".encode() if line.startswith(b"mtllib ") else line)
+            shutil.copyfileobj(src, dst, 1 << 20)
+        os.replace(tmp, obj)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 @router.get("/remote")
