@@ -328,6 +328,30 @@ def verify_fresh(path: str) -> dict:
     return {"pass": False, "error": f"no verify output (exit {r.returncode}): {r.stderr[-400:]}"}
 
 
+def publish(tmp: str, final: str, force: bool) -> None:
+    """Move a staged file into place. --force replaces the directory entry; without it publication is
+    no-clobber (hard link, then drop the staged name), so an output that appeared after the preflight
+    check (an overlapping handoff) raises FileExistsError instead of being replaced."""
+    if force:
+        os.replace(tmp, final)
+        return
+    try:
+        os.link(tmp, final)
+    except FileExistsError:
+        raise
+    except OSError:  # filesystem without hard links: exclusive create + copy, still never clobbers
+        try:
+            with open(tmp, "rb") as s, open(final, "xb") as d:
+                shutil.copyfileobj(s, d)
+        except FileExistsError:
+            raise
+        except OSError:
+            if os.path.exists(final):
+                os.unlink(final)
+            raise
+    os.unlink(tmp)
+
+
 # ---------------------------------------------------------------- render preview
 
 def render_preview(src: str, png: str) -> None:
@@ -473,7 +497,11 @@ def main() -> None:
         moved = []
         for k, p in outputs.items():
             try:
-                os.replace(p, final[k])
+                publish(p, final[k], a.force)
+            except FileExistsError:  # another handoff published this name after the preflight check
+                shutil.rmtree(stage, ignore_errors=True)
+                fail(f"output exists: {final[k]} (pass --force to replace it, or pick another --name); "
+                     f"already saved: {moved or 'nothing'} (source untouched: {src})")
             except OSError as exc:
                 shutil.rmtree(stage, ignore_errors=True)
                 fail(f"could not move {final[k]} into place ({exc}); already saved: {moved or 'nothing'} "
