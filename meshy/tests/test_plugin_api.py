@@ -253,7 +253,7 @@ def test_gallery_hides_expired_unsaved_assets_and_deduplicates_tasks(api, monkey
 
 def test_gallery_dedup_prefers_owning_endpoint_animation_outputs(api, monkeypatch):
     monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
-    generic = {"id": _TASK, "type": "rigging", "status": "SUCCEEDED", "created_at": 100,
+    generic = {"id": _TASK, "type": "rig", "status": "SUCCEEDED", "created_at": 100,
                "model_urls": {"glb": "https://assets.meshy.ai/bind-pose.glb"}}
     rig = {**generic, "model_urls": None,
            "result": {"rigged_character_glb_url": "https://assets.meshy.ai/bind-pose.glb",
@@ -272,6 +272,17 @@ def test_gallery_dedup_prefers_owning_endpoint_animation_outputs(api, monkeypatc
     assert len(rows) == 1
     assert rows[0]["task_type"] == "rigging"
     assert rows[0]["glb_url"] == "https://assets.meshy.ai/walking.glb"
+
+
+def test_dangling_model_link_does_not_break_the_gallery(api, monkeypatch):
+    folder = api.data / "meshy_output" / "project"
+    folder.mkdir(parents=True)
+    (folder / "gone.glb").symlink_to(folder / "missing.glb")
+    (folder / "model.glb").write_bytes(b"model")
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api, "_meshy_get", lambda *_a, **_k: [])
+    assert [f["name"] for f in api.local(limit=50)["files"]] == ["model.glb"]
+    assert api.models(limit=10)["models"] == []
 
 
 def test_storage_counts_companions_and_indexed_files_once_without_network(api):

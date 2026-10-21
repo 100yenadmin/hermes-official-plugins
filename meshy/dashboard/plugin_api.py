@@ -59,6 +59,9 @@ _MODEL_ENDPOINTS = (("text-to-3d", "/openapi/v2/text-to-3d"), ("image-to-3d", "/
                     ("animation", "/openapi/v1/animations"))
 _IMAGE_ENDPOINTS = (("text-to-image", "/openapi/v1/text-to-image"),
                     ("image-to-image", "/openapi/v1/image-to-image"))
+# A record's ``type`` uses Meshy's API names, not the endpoint labels above.
+_TYPE_ENDPOINT = {"rig": "rigging", "animate": "animation",
+                  "text-to-3d-preview": "text-to-3d", "text-to-3d-refine": "text-to-3d"}
 
 
 # Defaults mirror plugin.json ``extensions.com.nousresearch.hermes.config_schema``; Settings ▸ Plugins
@@ -209,11 +212,11 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
                 continue
             # Some list endpoints overlap. Prefer the task's owning endpoint so a generic
             # representation cannot hide its images or animation clips.
-            if task_id not in records or row.get("type") == task_type:
+            if task_id not in records or _TYPE_ENDPOINT.get(row.get("type"), row.get("type")) == task_type:
                 records[task_id] = (task_type, row)
     for task_type, row in records.values():
-        actual_type = row.get("type")
-        label_type = actual_type if actual_type in {t for t, _ in (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS)} else task_type
+        owner = _TYPE_ENDPOINT.get(row.get("type"), row.get("type"))
+        label_type = owner if owner in {t for t, _ in (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS)} else task_type
         urls = _result_urls(row)
         # A rig's bind-pose character sits still; its walking clip shows what the rig is for.
         clips = [u for k, u in sorted(urls.items()) if k.startswith("glb:")]
@@ -312,7 +315,10 @@ def local(limit: int = Query(50, ge=1, le=200)):
     out_dir = _data_root() / "meshy_output"
     seen: dict[str, dict] = {}
     for p in out_dir.rglob("*.glb") if out_dir.is_dir() else ():
-        st = p.stat()
+        try:
+            st = p.stat()
+        except OSError:  # a dangling link, or deleted since the scan
+            continue
         seen[str(p.resolve())] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
                                   "modified": int(st.st_mtime * 1000), "task": _local_task(p)}
     for item in _saved_images():
@@ -325,7 +331,10 @@ def local(limit: int = Query(50, ge=1, le=200)):
             if str(p) in seen and not seen[str(p)]["task"] and row.get("task_id"):
                 seen[str(p)]["task"] = row["task_id"]
             continue
-        st = p.stat()
+        try:
+            st = p.stat()
+        except OSError:
+            continue
         seen[str(p)] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
                         "modified": max(int(st.st_mtime * 1000), int(row.get("last_opened") or 0)),
                         "task": row.get("task_id") if isinstance(row.get("task_id"), str) else None}
@@ -1043,7 +1052,7 @@ def storage():
     return {"bytes": sum(sizes), "files": len(sizes), "directory": str(_data_root())}
 
 
-_IMAGE_SAVE_LOCK = threading.Lock()
+_IMAGE_SAVE_LOCKS: dict[str, threading.Lock] = {}  # one per task: unrelated sets download in parallel
 
 
 @router.post("/save-images")
@@ -1055,15 +1064,20 @@ def save_images(body: dict):
     key = _api_key()
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
-    with _IMAGE_SAVE_LOCK:
+    with _STATE_LOCK:
+        lock = _IMAGE_SAVE_LOCKS.setdefault(task, threading.Lock())
+    with lock:
         row = _task(task, key, images_only=True)
         urls = row.get("image_urls")
         if not isinstance(urls, list) or not urls:
             raise HTTPException(status_code=404, detail="this task has no generated images")
         urls = [_asset_url(url) for url in urls]
-        folder = _saved_assets_root() / task
+        root = _saved_assets_root()
+        folder = root / task
+        if root.is_symlink() or folder.is_symlink():
+            raise HTTPException(status_code=403, detail="image folder must not be a symlink")
         folder.mkdir(parents=True, exist_ok=True)
-        if folder.resolve() != _saved_assets_root().resolve() / task:
+        if folder.resolve() != root.resolve() / task:
             raise HTTPException(status_code=403, detail="image folder must not be a symlink")
         outputs = []
         for index, url in enumerate(urls):
@@ -1100,8 +1114,9 @@ def _saved_images() -> list[dict]:
         try:
             row = json.loads(manifest.read_text(encoding="utf-8"))
             task = row.get("task")
-            if not isinstance(task, str) or not _TASK_ID.match(task):
+            if not isinstance(task, str) or not _TASK_ID.match(task) or task != manifest.parent.name:
                 continue
+            prompt = row.get("prompt") if isinstance(row.get("prompt"), str) else None
             paths = []
             for name in row.get("files", []):
                 if not isinstance(name, str) or Path(name).name != name:
@@ -1114,7 +1129,7 @@ def _saved_images() -> list[dict]:
                     paths.append(path)
             if paths:
                 out.append({"path": str(paths[0]), "images": [str(p) for p in paths], "name": paths[0].name,
-                            "task": task, "kind": "image", "prompt": row.get("prompt"), "project": "Saved images",
+                            "task": task, "kind": "image", "prompt": prompt, "project": "Saved images",
                             "download_incomplete": not row.get("complete", True) or len(paths) != len(row.get("files", [])),
                             "bytes": sum(p.stat().st_size for p in paths), "modified": max(int(p.stat().st_mtime * 1000) for p in paths)})
         except (OSError, ValueError, AttributeError, TypeError):
