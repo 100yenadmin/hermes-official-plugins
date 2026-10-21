@@ -43,7 +43,7 @@ def _isolated_home(tmp_path, monkeypatch):
     (tmp_path / ".hermes").mkdir()
     # Importing hermes_cli.config seeds the profile home (SOUL.md, dirs). A real `hermes` process has
     # done that before any plugin command runs; doing it here keeps the dry-run snapshots honest.
-    import hermes_cli.config  # noqa: F401
+    importlib.import_module("hermes_cli.config")
 
 
 class _RepoRootIsNotATestPackage:

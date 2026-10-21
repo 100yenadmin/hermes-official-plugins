@@ -1,4 +1,5 @@
-"""``hermes import-agent``: argparse tree and the preview → confirm → apply flow."""
+"""``hermes import-agent`` and ``hermes claw``: argparse trees and the preview → confirm → apply
+flow. OpenClaw runs through :mod:`.openclaw`, imported only when an OpenClaw command runs."""
 
 from __future__ import annotations
 
@@ -12,12 +13,21 @@ from .importer import AGENT_DEFAULT_DIRS, SUPPORTED_AGENTS, AgentImporter, detec
 
 logger = logging.getLogger(__name__)
 
-HELP = "Import a Claude Code, Codex CLI or Cursor setup into Hermes"
+HELP = "Import an OpenClaw, Claude Code, Codex CLI or Cursor setup into Hermes"
 DESCRIPTION = (
-    "One-command import of another coding agent's setup into Hermes. Maps CLAUDE.md/AGENTS.md "
+    "One-command import of another agent's setup into Hermes. Maps CLAUDE.md/AGENTS.md "
     "instructions, Cursor rules, permission allowlists, MCP servers, skills, and memories into their Hermes "
     "equivalents. Always shows a preview before making changes. API keys and credentials are "
-    "never imported — run 'hermes setup' for those.")
+    "never imported — run 'hermes setup' for those. OpenClaw (the former 'hermes claw migrate') "
+    "imports allowlisted secrets only with --migrate-secrets.")
+CLAW_HELP = "OpenClaw migration tools"
+CLAW_DESCRIPTION = ("Migrate settings, memories, skills, and API keys from OpenClaw to Hermes "
+                    "('hermes claw migrate' is the same as 'hermes import-agent openclaw')")
+
+OPENCLAW = "openclaw"
+# Flags only `import-agent openclaw` understands, as (dest, value meaning "not passed").
+_OPENCLAW_ONLY_FLAGS = (("preset", None), ("migrate_secrets", False), ("no_backup", False),
+                        ("workspace_target", None), ("skill_conflict", None))
 
 _ANSI = {"green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m", "dim": "\033[2m",
          "magenta": "\033[35m"}
@@ -28,14 +38,38 @@ def _color(text: str, name: str) -> str:
 
 
 def _dirs_hint() -> str:
-    dirs = [f"~/{AGENT_DEFAULT_DIRS[a]}" for a in SUPPORTED_AGENTS]
+    dirs = ["~/.openclaw"] + [f"~/{AGENT_DEFAULT_DIRS[a]}" for a in SUPPORTED_AGENTS]
     return ", ".join(dirs[:-1]) + f" or {dirs[-1]}"
+
+
+def add_openclaw_migrate_flags(parser, *, defaults: bool) -> None:
+    """The ``claw migrate`` flags. ``defaults=False`` (import-agent) leaves the OpenClaw-only flags
+    at None/False so a use with another agent can be refused; openclaw.py fills the defaults."""
+    parser.add_argument(
+        "--preset", choices=["user-data", "full"], default="full" if defaults else None,
+        help="OpenClaw migration preset (default: full). Neither preset imports secrets — "
+             "pass --migrate-secrets to include API keys.")
+    parser.add_argument(
+        "--migrate-secrets", action="store_true",
+        help="OpenClaw: include allowlisted secrets (TELEGRAM_BOT_TOKEN, API keys, etc.). "
+             "Required even under --preset full.")
+    parser.add_argument(
+        "--no-backup", action="store_true",
+        help="OpenClaw: skip the pre-migration zip snapshot of the Hermes home (by default one "
+             "restore-point archive is written to its backups/ dir before apply; restorable with "
+             "'hermes import').")
+    parser.add_argument(
+        "--workspace-target", help="OpenClaw: absolute path to copy workspace instructions into")
+    parser.add_argument(
+        "--skill-conflict", choices=["skip", "overwrite", "rename"],
+        default="skip" if defaults else None,
+        help="OpenClaw: how to handle skill name conflicts (default: skip)")
 
 
 def setup_cli(parser) -> None:
     """Attach the ``import-agent`` arguments (same spelling core shipped)."""
     parser.add_argument(
-        "agent", nargs="?", choices=list(SUPPORTED_AGENTS),
+        "agent", nargs="?", choices=[OPENCLAW, *SUPPORTED_AGENTS],
         help=f"Which agent to import from (default: auto-detect {_dirs_hint()})")
     parser.add_argument(
         "--source", help=f"Path to the agent's config directory (default: {_dirs_hint()})")
@@ -51,10 +85,67 @@ def setup_cli(parser) -> None:
         help="Re-import every previously imported source whose files changed since the last "
              "import (registered in HERMES_HOME/import-sync.json). Runs without prompts; "
              "combine with --dry-run to preview.")
+    add_openclaw_migrate_flags(parser, defaults=False)
 
 
 def handle_cli(args) -> None:
     import_agent_command(args)
+
+
+def setup_claw_cli(parser) -> None:
+    """Attach ``claw migrate`` / ``claw cleanup`` (the spelling core shipped before the move)."""
+    sub = parser.add_subparsers(dest="claw_action")
+    migrate = sub.add_parser(
+        "migrate", help="Migrate from OpenClaw to Hermes (same as 'hermes import-agent openclaw')",
+        description="Import settings, memories, skills, and API keys from an OpenClaw installation. "
+                    "Always shows a preview before making changes.")
+    migrate.add_argument("--source", help="Path to OpenClaw directory (default: ~/.openclaw)")
+    migrate.add_argument("--dry-run", action="store_true",
+                         help="Preview only — stop after showing what would be migrated")
+    migrate.add_argument(
+        "--overwrite", action="store_true",
+        help="Overwrite existing files (default: refuse to apply when the plan has conflicts)")
+    add_openclaw_migrate_flags(migrate, defaults=True)
+    migrate.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
+    cleanup = sub.add_parser(
+        "cleanup", aliases=["clean"], help="Archive leftover OpenClaw directories after migration",
+        description="Scan for and archive leftover OpenClaw directories to prevent state fragmentation")
+    cleanup.add_argument("--source", help="Path to a specific OpenClaw directory to clean up")
+    cleanup.add_argument("--dry-run", action="store_true",
+                         help="Preview what would be archived without making changes")
+    cleanup.add_argument("--yes", "-y", action="store_true", help="Skip confirmation prompts")
+
+
+def handle_claw_cli(args) -> None:
+    from .openclaw import claw_command
+    claw_command(args)
+
+
+def _resolve_agent(args) -> Optional[str]:
+    """The agent named on the command line, else the one detected setup. None (reason printed)
+    when nothing is found, or several are and no --source picks one."""
+    from hermes_cli.cli_output import print_error, print_info
+
+    if args.agent:
+        return args.agent
+    from .openclaw import _find_openclaw_dirs
+    detected = ([OPENCLAW] if _find_openclaw_dirs() else []) + detect_agents()
+    if not detected:
+        print()
+        print_error(f"No supported agent setup found ({_dirs_hint()}).")
+        print_info("Specify one explicitly: hermes import-agent claude-code --source /path")
+        return None
+    if len(detected) > 1 and args.source is None:
+        print()
+        print_info("Multiple agent setups detected: " + ", ".join(detected))
+        print_info("Pick one: " + "   or   ".join(f"hermes import-agent {a}" for a in detected))
+        return None
+    return detected[0]
+
+
+def _openclaw_only_flags_passed(args) -> list[str]:
+    return ["--" + dest.replace("_", "-") for dest, unset in _OPENCLAW_ONLY_FLAGS
+            if getattr(args, dest, unset) != unset]
 
 
 def import_agent_command(args) -> None:
@@ -69,21 +160,19 @@ def import_agent_command(args) -> None:
         sync_imported_agents(args)
         return
 
-    agent, explicit_source, overwrite = args.agent, args.source, args.overwrite
-
+    agent = _resolve_agent(args)
     if agent is None:
-        detected = detect_agents()
-        if not detected:
-            print()
-            print_error(f"No supported agent setup found ({_dirs_hint()}).")
-            print_info("Specify one explicitly: hermes import-agent claude-code --source /path")
-            return
-        if len(detected) > 1 and explicit_source is None:
-            print()
-            print_info("Multiple agent setups detected: " + ", ".join(detected))
-            print_info("Pick one: " + "   or   ".join(f"hermes import-agent {a}" for a in detected))
-            return
-        agent = detected[0]
+        return
+    if agent == OPENCLAW:
+        from .openclaw import migrate_command
+        migrate_command(args)
+        return
+    if passed := _openclaw_only_flags_passed(args):
+        print()
+        print_error(f"{', '.join(passed)} only apply to OpenClaw imports; nothing was imported.")
+        print_info(f"Use them with: hermes import-agent openclaw {' '.join(passed)} ...")
+        return
+    explicit_source, overwrite = args.source, args.overwrite
     source_dir = Path(explicit_source or Path.home() / AGENT_DEFAULT_DIRS[agent])
 
     print()

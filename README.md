@@ -161,8 +161,8 @@ Catalog entries come in two tiers:
 <a href="agent-importers/"><img src="assets/agent-importers.jpg" alt="Agent Importers plugin"></a>
 <h3><a href="agent-importers/">Agent Importers</a></h3>
 <code>hermes plugins install agent-importers</code>
-<p><code>hermes import-agent</code> brings a Claude Code, Codex CLI or Cursor setup into Hermes in one command: instructions, Cursor rules and memories become memory entries, Bash permission rules become allow/deny lists, MCP servers land in <code>config.yaml</code> and skills are copied. Always previews first and never imports API keys; <code>--sync</code> re-imports sources that changed. Formerly built into Hermes core.</p>
-<p>CLI command · <code>hermes import-agent [claude-code|codex|cursor]</code></p>
+<p><code>hermes import-agent</code> brings an OpenClaw, Claude Code, Codex CLI or Cursor setup into Hermes in one command: instructions, Cursor rules and memories become memory entries, Bash permission rules become allow/deny lists, MCP servers land in <code>config.yaml</code> and skills are copied. Always previews first and never imports API keys (OpenClaw's allowlisted secrets only with <code>--migrate-secrets</code>); <code>--sync</code> re-imports sources that changed. The old <code>hermes claw migrate</code> / <code>hermes claw cleanup</code> spelling and the openclaw-migration skill come along. Formerly built into Hermes core.</p>
+<p>CLI command · <code>hermes import-agent [openclaw|claude-code|codex|cursor]</code></p>
 </td>
 <td width="50%" valign="top">
 <a href="mcp-serve/"><img src="assets/mcp-serve.jpg" alt="MCP Serve plugin"></a>
@@ -204,6 +204,7 @@ Most plugins here used to live somewhere else: Home Assistant and Spotify were b
 - **You used the built-in Home Assistant, Spotify, Langfuse or Singularity backend:** `hermes update`, or the first start after updating, installs the plugin from the catalog with your existing config, env vars and login.
 - **You installed it from the catalog:** the catalog now points here, so `hermes plugins update <name>` moves your install to this repo and keeps your files.
 - **You used the built-in `hermes import-agent`:** profiles that registered an import for `--sync` get the `agent-importers` plugin on update; anywhere else, running `hermes import-agent` prints the one-line install (`hermes plugins install agent-importers`).
+- **You used `hermes claw migrate` (OpenClaw):** it now comes with the same plugin. After `hermes plugins install agent-importers`, both `hermes import-agent openclaw` and the old `hermes claw migrate` / `hermes claw cleanup` work with the same flags.
 - **You ran `hermes mcp serve`:** install with `hermes plugins install mcp-serve` and change your MCP client's args from `["mcp", "serve"]` to `["mcp-serve"]`. MCP clients are configured outside Hermes, so this one is not installed for you.
 - **You installed it by URL** (for example `hermes plugins install NousResearch/hermes-homeassistant`): reinstall once from the catalog with `hermes plugins install <name> --force` to follow future updates. The old repos are archived and get no new fixes.
 
