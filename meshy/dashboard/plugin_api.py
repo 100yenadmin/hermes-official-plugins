@@ -33,6 +33,7 @@ import logging
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 import urllib.error
@@ -56,6 +57,11 @@ _MODEL_ENDPOINTS = (("text-to-3d", "/openapi/v2/text-to-3d"), ("image-to-3d", "/
                     ("multi-image-to-3d", "/openapi/v1/multi-image-to-3d"), ("remesh", "/openapi/v1/remesh"),
                     ("retexture", "/openapi/v1/retexture"), ("rigging", "/openapi/v1/rigging"),
                     ("animation", "/openapi/v1/animations"))
+_IMAGE_ENDPOINTS = (("text-to-image", "/openapi/v1/text-to-image"),
+                    ("image-to-image", "/openapi/v1/image-to-image"))
+# A record's ``type`` uses Meshy's API names, not the endpoint labels above.
+_TYPE_ENDPOINT = {"rig": "rigging", "animate": "animation",
+                  "text-to-3d-preview": "text-to-3d", "text-to-3d-refine": "text-to-3d"}
 
 
 # Defaults mirror plugin.json ``extensions.com.nousresearch.hermes.config_schema``; Settings ▸ Plugins
@@ -106,6 +112,16 @@ def _write_json(target: Path, value: object) -> None:
     tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.part")
     tmp.write_text(json.dumps(value, indent=1), encoding="utf-8")
     tmp.replace(target)
+
+
+def _asset_error(exc: Exception) -> HTTPException:
+    """CDN requests do not carry the API key: a denied signed URL is not an auth failure."""
+    if isinstance(exc, urllib.error.HTTPError):
+        if exc.code in (401, 403, 404, 410):
+            return HTTPException(status_code=410, detail="This asset is unavailable or its download link has expired. "
+                                 "Open a locally saved copy if you have one.")
+        return HTTPException(status_code=502, detail=f"Meshy asset download failed (HTTP {exc.code})")
+    return HTTPException(status_code=502, detail="Meshy asset download unreachable")
 
 
 def _data_root() -> Path:
@@ -178,7 +194,8 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
     if not key:
         return {"configured": False, "models": []}
     merged: list[dict] = []
-    for task_type, path in _MODEL_ENDPOINTS:
+    records: dict[str, tuple[str, dict]] = {}
+    for task_type, path in (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS):
         try:
             rows = _meshy_get(f"{path}?page_size={limit}&sort_by=-created_at", key)
         except urllib.error.HTTPError as exc:
@@ -190,21 +207,42 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
         for row in rows if isinstance(rows, list) else []:
             if row.get("status") != "SUCCEEDED":
                 continue
-            urls = _result_urls(row)
-            # A rig's bind-pose character sits still; its walking clip shows what the rig is for.
-            clips = [u for k, u in sorted(urls.items()) if k.startswith("glb:")]
-            glb = (clips[-1] if clips and task_type == "rigging" else None) or urls.get("glb") or next(iter(clips), None)
-            merged.append({"task_id": row.get("id"), "task_type": task_type, "prompt": row.get("prompt") or _clip_label(urls),
-                           "created_at": row.get("created_at"), "thumbnail_url": row.get("thumbnail_url"),
-                           "glb_url": glb})
+            task_id = row.get("id")
+            if not isinstance(task_id, str) or not task_id:
+                continue
+            # Some list endpoints overlap. Prefer the task's owning endpoint so a generic
+            # representation cannot hide its images or animation clips.
+            if task_id not in records or _TYPE_ENDPOINT.get(row.get("type"), row.get("type")) == task_type:
+                records[task_id] = (task_type, row)
+    for task_type, row in records.values():
+        owner = _TYPE_ENDPOINT.get(row.get("type"), row.get("type"))
+        label_type = owner if owner in {t for t, _ in (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS)} else task_type
+        urls = _result_urls(row)
+        # A rig's bind-pose character sits still; its walking clip shows what the rig is for.
+        clips = [u for k, u in sorted(urls.items()) if k.startswith("glb:")]
+        glb = (clips[-1] if clips and task_type == "rigging" else None) or urls.get("glb") or next(iter(clips), None)
+        images = [u for u in (row.get("image_urls") or []) if isinstance(u, str) and u]
+        expires = row.get("expires_at")
+        merged.append({"task_id": row.get("id"), "task_type": label_type, "prompt": row.get("prompt") or _clip_label(urls),
+                       "created_at": row.get("created_at"), "finished_at": row.get("finished_at"), "thumbnail_url": row.get("thumbnail_url"),
+                       "glb_url": glb, "kind": "image" if task_type in {t for t, _ in _IMAGE_ENDPOINTS} else "model",
+                       "image_urls": images, "expires_at": expires,
+                       "expired": isinstance(expires, (int, float)) and 0 < expires <= time.time() * 1000,
+                       "credits": row.get("consumed_credits")})
     merged.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
-    merged = merged[:limit]
     credits = _credits_by_task(key)
     prov = _load_prov()
+    saved = {}
+    for f in local(limit=200)["files"]:
+        if f.get("task") and f.get("kind", "model") == "model":
+            saved.setdefault(f["task"], f["path"])
     for m in merged:
-        m["credits"] = credits.get(m["task_id"])
+        if m["credits"] is None:
+            m["credits"] = credits.get(m["task_id"])
+        m["local_path"] = saved.get(m["task_id"]) if m["kind"] == "model" else None
         m["prompt"] = _label_for(m["task_id"], prov) or m["prompt"]
-    return {"configured": True, "models": merged}
+    visible = [m for m in merged if not m["expired"] or m["local_path"]]
+    return {"configured": True, "models": visible[:limit]}
 
 
 # Profile-scoped index of models this plugin served or saved, so files the agent wrote into a project
@@ -277,9 +315,14 @@ def local(limit: int = Query(50, ge=1, le=200)):
     out_dir = _data_root() / "meshy_output"
     seen: dict[str, dict] = {}
     for p in out_dir.rglob("*.glb") if out_dir.is_dir() else ():
-        st = p.stat()
+        try:
+            st = p.stat()
+        except OSError:  # a dangling link, or deleted since the scan
+            continue
         seen[str(p.resolve())] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
                                   "modified": int(st.st_mtime * 1000), "task": _local_task(p)}
+    for item in _saved_images():
+        seen[item["path"]] = item
     for row in _load_index():
         p = Path(row["path"])
         if p.suffix.lower() not in _INDEXED:
@@ -288,14 +331,17 @@ def local(limit: int = Query(50, ge=1, le=200)):
             if str(p) in seen and not seen[str(p)]["task"] and row.get("task_id"):
                 seen[str(p)]["task"] = row["task_id"]
             continue
-        st = p.stat()
+        try:
+            st = p.stat()
+        except OSError:
+            continue
         seen[str(p)] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
                         "modified": max(int(st.st_mtime * 1000), int(row.get("last_opened") or 0)),
                         "task": row.get("task_id") if isinstance(row.get("task_id"), str) else None}
     files = sorted(seen.values(), key=lambda f: f["modified"], reverse=True)[:limit]
     prov = _load_prov()
     for f in files:
-        f["prompt"] = (_label_for(f["task"], prov) if f["task"] else None) or _project_prompt(Path(f["path"]))
+        f["prompt"] = f.get("prompt") or (_label_for(f["task"], prov) if f["task"] else None) or _project_prompt(Path(f["path"]))
     return {"dir": str(out_dir), "files": files}
 
 
@@ -435,11 +481,12 @@ def _format_sort_key(key: str) -> tuple[int, str]:
     return (_FORMAT_ORDER.index(base) if base in _FORMAT_ORDER else 99, clip or "")
 
 
-def _task(task_id: str, key: str) -> dict:
+def _task(task_id: str, key: str, *, include_images: bool = False, images_only: bool = False) -> dict:
     """The task record (with signed ``model_urls``), found on whichever generation endpoint owns it."""
     if not _TASK_ID.match(task_id or ""):
         raise HTTPException(status_code=400, detail="task id required")
-    for _task_type, path in _MODEL_ENDPOINTS:
+    endpoints = _IMAGE_ENDPOINTS if images_only else (*_MODEL_ENDPOINTS, *(_IMAGE_ENDPOINTS if include_images else ()))
+    for _task_type, path in endpoints:
         try:
             row = _meshy_get(f"{path}/{task_id}", key)
         except urllib.error.HTTPError as exc:
@@ -532,9 +579,10 @@ def _download(url: str, dest: Path) -> None:
                 out.write(chunk)
         os.replace(part, dest)
     except (urllib.error.URLError, OSError) as exc:
-        raise _meshy_error(exc) from exc
+        raise _asset_error(exc) from exc
     finally:
-        part.unlink(missing_ok=True)
+        if part is not None:
+            part.unlink(missing_ok=True)
 
 
 @router.get("/formats")
@@ -543,13 +591,23 @@ def formats(task: str, beside: str | None = None):
     key = _api_key()
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
-    urls = _result_urls(_task(task, key))
+    row = _task(task, key)
+    urls = _result_urls(row)
     saved_rows = _saved_rows() if beside else {}
     out = []
     for fmt in sorted((k for k in urls if _split_format(k)[0] in _FORMAT_ORDER), key=_format_sort_key):
         saved, mine = _beside_dest(folder, stem, fmt, task, anchor, saved_rows)
         out.append({"format": fmt, "saved": str(saved) if mine else None})
-    return {"task": task, "formats": out}
+    kind = str(row.get("type") or "")
+    conversions = []
+    if urls and kind in ("text-to-3d-preview", "text-to-3d-refine", "image-to-3d", "multi-image-to-3d", "remesh", "retexture", "convert", "resize"):
+        for fmt in ("glb", "fbx", "obj", "stl", "usdz", "blend", "3mf"):
+            if fmt not in urls:
+                conversions.append({"format": fmt, "cost": 1,
+                                    "message": f'Meshy task {task}: convert it to {fmt.upper()} using meshy_convert '
+                                    f'with input_task_id "{task}" and target_formats ["{fmt}"] (1 credit), '
+                                    'then wait and download the converted task.'})
+    return {"task": task, "formats": out, "conversions": conversions, "is_preview": kind == "text-to-3d-preview"}
 
 
 @router.post("/save")
@@ -652,7 +710,7 @@ def remote(url: str):
         with urllib.request.urlopen(url, timeout=60) as resp:
             data = resp.read(_MAX_FILE_BYTES + 1)
     except (urllib.error.URLError, OSError) as exc:
-        raise _meshy_error(exc) from exc
+        raise _asset_error(exc) from exc
     if len(data) > _MAX_FILE_BYTES:
         raise HTTPException(status_code=413, detail="asset too large for the viewer")
     _log.debug("meshy remote asset %s: %d bytes in %.1fs", parts.path, len(data), time.monotonic() - started)
@@ -916,7 +974,7 @@ def details(task: str):
     row: dict = {}
     if key:
         try:
-            row = _task(task, key)
+            row = _task(task, key, include_images=True)
         except HTTPException as exc:
             if exc.status_code in (401, 403):
                 raise
@@ -966,3 +1024,114 @@ def details(task: str):
         "session_id": rec.get("session_id"),
         "recorded": bool(rec),
     }
+
+
+def _saved_assets_root() -> Path:
+    return _data_root() / "saved-assets"
+
+
+@router.get("/storage")
+def storage():
+    # Count known files once, including companion textures and copies saved by the MCP server.
+    paths = set()
+    for folder in (_saved_assets_root(), _data_root() / "meshy_output"):
+        for path in folder.rglob("*") if folder.is_dir() else ():
+            if path.is_file() and not path.is_symlink() and path.suffix != ".part":
+                paths.add(path.resolve())
+    for row in _load_index():
+        try:
+            paths.add(_resolve_readable(row["path"]))
+        except HTTPException:
+            continue
+    sizes = []
+    for path in paths:
+        try:
+            sizes.append(path.stat().st_size)
+        except OSError:
+            continue
+    return {"bytes": sum(sizes), "files": len(sizes), "directory": str(_data_root())}
+
+
+_IMAGE_SAVE_LOCKS: dict[str, threading.Lock] = {}  # one per task: unrelated sets download in parallel
+
+
+@router.post("/save-images")
+def save_images(body: dict):
+    """Explicitly download every image in a finished image task; never generate or convert."""
+    task = str(body.get("task") or "")
+    if not _TASK_ID.match(task):
+        raise HTTPException(status_code=400, detail="task id required")
+    key = _api_key()
+    if not key:
+        raise HTTPException(status_code=400, detail="no Meshy API key")
+    with _STATE_LOCK:
+        lock = _IMAGE_SAVE_LOCKS.setdefault(task, threading.Lock())
+    with lock:
+        row = _task(task, key, images_only=True)
+        urls = row.get("image_urls")
+        if not isinstance(urls, list) or not urls:
+            raise HTTPException(status_code=404, detail="this task has no generated images")
+        urls = [_asset_url(url) for url in urls]
+        root = _saved_assets_root()
+        folder = root / task
+        if root.is_symlink() or folder.is_symlink():
+            raise HTTPException(status_code=403, detail="image folder must not be a symlink")
+        folder.mkdir(parents=True, exist_ok=True)
+        if folder.resolve() != root.resolve() / task:
+            raise HTTPException(status_code=403, detail="image folder must not be a symlink")
+        outputs = []
+        for index, url in enumerate(urls):
+            ext = Path(urllib.parse.urlsplit(url).path).suffix.lower()
+            if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+                ext = ".png"
+            outputs.append((folder / f"image-{index + 1}{ext}", url))
+        for path, url in outputs:
+            if path.is_symlink():
+                raise HTTPException(status_code=403, detail="image file must not be a symlink")
+            if not path.is_file():
+                _download(url, path)
+            # Record partial successes too: a retry resumes, and already saved views stay usable.
+            names = [p.name for p, _ in outputs if p.is_file() and not p.is_symlink()]
+            record = {"task": task, "prompt": row.get("prompt"), "files": names, "complete": len(names) == len(outputs)}
+            target = folder / "images.json"
+            part = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder,
+                                                 prefix=".images.", suffix=".part", delete=False) as out:
+                    part = Path(out.name)
+                    json.dump(record, out)
+                part.replace(target)
+            finally:
+                if part is not None:
+                    part.unlink(missing_ok=True)
+        paths = [str(path) for path, _ in outputs]
+        return {"paths": paths, "directory": str(folder), "bytes": sum(path.stat().st_size for path, _ in outputs)}
+
+
+def _saved_images() -> list[dict]:
+    out = []
+    for manifest in _saved_assets_root().glob("*/images.json"):
+        try:
+            row = json.loads(manifest.read_text(encoding="utf-8"))
+            task = row.get("task")
+            if not isinstance(task, str) or not _TASK_ID.match(task) or task != manifest.parent.name:
+                continue
+            prompt = row.get("prompt") if isinstance(row.get("prompt"), str) else None
+            paths = []
+            for name in row.get("files", []):
+                if not isinstance(name, str) or Path(name).name != name:
+                    continue
+                try:
+                    path = _resolve_readable(str(manifest.parent / name))
+                except HTTPException:
+                    continue
+                if path.is_relative_to(_saved_assets_root().resolve()) and path.suffix.lower() in (".png", ".jpg", ".jpeg", ".webp"):
+                    paths.append(path)
+            if paths:
+                out.append({"path": str(paths[0]), "images": [str(p) for p in paths], "name": paths[0].name,
+                            "task": task, "kind": "image", "prompt": prompt, "project": "Saved images",
+                            "download_incomplete": not row.get("complete", True) or len(paths) != len(row.get("files", [])),
+                            "bytes": sum(p.stat().st_size for p in paths), "modified": max(int(p.stat().st_mtime * 1000) for p in paths)})
+        except (OSError, ValueError, AttributeError, TypeError):
+            continue
+    return out

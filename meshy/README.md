@@ -127,13 +127,39 @@ you get, rendered with stock three.js:
   show what Meshy and the download folder still know.
 - **Credit chip** in the status bar, refreshed after every Meshy tool call.
 
+### Images and saved assets
+
+Use **All / Images / Models** to filter the gallery. Image previews support switching between
+views, **Download image** / **Download all N images**, and **Next** actions for 3D generation,
+image edits, and additional views through chat. **Copy ID** copies the task ID for follow-up requests.
+
+API assets normally expire after three days. Viewing does not save them: use **Download** to
+keep a local copy. Expired entries without local copies are hidden. Image sets are saved under
+`saved-assets/<task-id>/` in the plugin's data directory; interrupted sets offer **Retry image download**.
+The gallery footer shows known local storage usage and a folder link; it does not scan arbitrary
+files elsewhere on disk.
+
+Model downloads list available exports for free. Missing formats have separate **Convert** actions
+that request a paid conversion through chat.
+
 The renderer never reads files or holds the key. `dashboard/plugin_api.py` (mounted at
 `/api/plugins/meshy/` once the plugin is enabled) answers the viewer: the balance and recent tasks
 from Meshy's API, `.glb`/`.gltf`/image bytes from your home directory or the plugin's output folder
 (nothing else, symlinks resolved first), and signed `assets.meshy.ai` downloads. Cards load on
 click, render only while on screen, and free their WebGL context when unmounted, so a long chat
-of models stays light. Build the bundle with `npm ci && npm run build` (output:
-`desktop/plugin.js`, committed).
+of models stays light.
+
+### Development
+
+From `meshy/`, run the backend regression tests against a sibling Hermes checkout:
+
+```bash
+PYTHONPATH=../../hermes-agent python -m pytest tests/test_plugin_api.py -q
+```
+
+Use the latest patched Node.js 24 LTS release, supported by Hermes Desktop.
+Run `npm ci`, `npm run test:gallery`, and `npm run typecheck`.
+After renderer changes, run `npm run build` and commit the generated `desktop/plugin.js`.
 
 ## Tools
 

@@ -96,6 +96,57 @@ def test_remote_fetches_only_https_assets_meshy_ai(api):
     assert _status(api.remote, "https://assets.meshy.ai/x/secrets.env") == 415
 
 
+@pytest.mark.parametrize("status", [401, 403, 404, 410, 429, 503])
+@pytest.mark.parametrize("operation", ["preview", "download"])
+def test_asset_failures_never_claim_the_api_key_was_rejected(api, monkeypatch, status, operation):
+    url = "https://assets.meshy.ai/model.glb"
+
+    def fail(*_args, **_kwargs):
+        raise urllib.error.HTTPError(url, status, "asset error", {}, None)
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail)
+    with pytest.raises(HTTPException) as err:
+        if operation == "preview":
+            api.remote(url)
+        else:
+            api._download(url, api.data / "model.glb")
+    assert "key" not in err.value.detail.lower()
+    assert err.value.status_code == (410 if status in (401, 403, 404, 410) else 502)
+    if status == 403:
+        # API authentication remains a different failure from a denied CDN signature.
+        assert "API key" in api._meshy_error(urllib.error.HTTPError(url, status, "", {}, None)).detail
+
+
+def test_gallery_includes_image_sets_expiry_and_local_fallback(api, monkeypatch):
+    image_id = "01a15965-4a40-718b-8912-4046ede4837f"
+    image2_id = "01a15965-4a40-718b-8912-4046ede48380"
+    local = api.data / "ship.glb"
+    local.write_bytes(b"local copy")
+    api.file(str(local), task=_TASK)
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api.time, "time", lambda: 1000)
+    records = {
+        "/openapi/v1/image-to-3d": [{"id": _TASK, "status": "SUCCEEDED", "created_at": 100,
+                                    "expires_at": 999000, "consumed_credits": 15,
+                                    "model_urls": {"glb": "https://assets.meshy.ai/ship.glb"}}],
+        "/openapi/v1/text-to-image": [{"id": image_id, "status": "SUCCEEDED", "created_at": 200,
+                                      "expires_at": 1100000, "consumed_credits": 3,
+                                      "image_urls": ["https://assets.meshy.ai/front.png", "https://assets.meshy.ai/back.png"]}],
+        "/openapi/v1/image-to-image": [{"id": image2_id, "status": "SUCCEEDED", "created_at": 300,
+                                       "expires_at": 0, "image_urls": ["https://assets.meshy.ai/edit.png"]}],
+    }
+    monkeypatch.setattr(api, "_meshy_get", lambda path, *_a, **_k: records.get(path.split("?")[0], []))
+    result = api.models(limit=10)["models"]
+    assert [r["task_id"] for r in result] == [image2_id, image_id, _TASK]
+    model, image, edited = result[2], result[1], result[0]
+    assert model["kind"] == "model" and model["expired"]
+    assert Path(model["local_path"]) == local.resolve()
+    assert model["credits"] == 15  # available without the team-only Usage API
+    assert image["kind"] == "image" and not image["expired"]
+    assert len(image["image_urls"]) == 2 and image["glb_url"] is None
+    assert not edited["expired"]  # zero/absent expiry is not evidence of expiration
+
+
 def test_asset_index_records_only_allowed_model_paths_and_never_urls(api):
     project = Path.home() / "projects" / "demo" / "ship.glb"
     project.parent.mkdir(parents=True)
@@ -170,6 +221,181 @@ def test_provenance_keeps_what_made_a_model_and_never_a_signed_url(api, monkeypa
     assert [p["task_id"] for p in d["parents"]] == [parent]
     assert [c["task_id"] for c in api.details(parent)["children"]] == [child]
     assert api.details(parent)["session_id"] == "sess-1"
+
+
+def test_image_details_recovers_provider_prompt_without_local_provenance(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    def get(path, *_a, **_k):
+        if path == f"/openapi/v1/text-to-image/{_TASK}":
+            return {"id": _TASK, "type": "text-to-image", "prompt": "low poly mech concept"}
+        raise urllib.error.HTTPError(path, 404, "missing", {}, None)
+    monkeypatch.setattr(api, "_meshy_get", get)
+    assert api.details(_TASK)["prompt"] == "low poly mech concept"
+
+
+def test_gallery_hides_expired_unsaved_assets_and_deduplicates_tasks(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api.time, "time", lambda: 1000)
+    current = {"id": _TASK, "type": "image-to-image", "status": "SUCCEEDED", "created_at": 100,
+               "expires_at": 2000000, "image_urls": ["https://assets.meshy.ai/current.png"]}
+    old = {**current, "id": "01a15965-4a40-718b-8912-4046ede4837f", "created_at": 200,
+           "expires_at": 999000}
+    def get(path, *_a, **_k):
+        if path.split("?")[0] in {"/openapi/v1/text-to-image", "/openapi/v1/image-to-image"}:
+            return [old, current]
+        return []
+    monkeypatch.setattr(api, "_meshy_get", get)
+    result = api.models(limit=1)["models"]
+    assert len(result) == 1  # expired rows must not consume the visible limit
+    assert result[0]["task_id"] == _TASK
+    assert result[0]["task_type"] == "image-to-image"
+
+
+def test_gallery_dedup_prefers_owning_endpoint_animation_outputs(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    generic = {"id": _TASK, "type": "rig", "status": "SUCCEEDED", "created_at": 100,
+               "model_urls": {"glb": "https://assets.meshy.ai/bind-pose.glb"}}
+    rig = {**generic, "model_urls": None,
+           "result": {"rigged_character_glb_url": "https://assets.meshy.ai/bind-pose.glb",
+                      "basic_animations": {"walking_glb_url": "https://assets.meshy.ai/walking.glb"}}}
+
+    def get(path, *_a, **_k):
+        endpoint = path.split("?")[0]
+        if endpoint == "/openapi/v2/text-to-3d":
+            return [generic]
+        if endpoint == "/openapi/v1/rigging":
+            return [rig]
+        return []
+
+    monkeypatch.setattr(api, "_meshy_get", get)
+    rows = api.models(limit=10)["models"]
+    assert len(rows) == 1
+    assert rows[0]["task_type"] == "rigging"
+    assert rows[0]["glb_url"] == "https://assets.meshy.ai/walking.glb"
+
+
+def test_dangling_model_link_does_not_break_the_gallery(api, monkeypatch):
+    folder = api.data / "meshy_output" / "project"
+    folder.mkdir(parents=True)
+    (folder / "gone.glb").symlink_to(folder / "missing.glb")
+    (folder / "model.glb").write_bytes(b"model")
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api, "_meshy_get", lambda *_a, **_k: [])
+    assert [f["name"] for f in api.local(limit=50)["files"]] == ["model.glb"]
+    assert api.models(limit=10)["models"] == []
+
+
+def test_storage_counts_companions_and_indexed_files_once_without_network(api):
+    folder = api.data / "meshy_output" / "project"
+    folder.mkdir(parents=True)
+    model = folder / "model.glb"
+    model.write_bytes(b"model")
+    (folder / "texture.png").write_bytes(b"texture")
+    (folder / "interrupted.part").write_bytes(b"partial")
+    api._record_asset(model, _TASK)
+    summary = api.storage()
+    assert summary["files"] == 2 and summary["bytes"] == 12
+    assert Path(summary["directory"]) == api.data
+
+
+@pytest.mark.parametrize("task", ["", "../outside", "https://assets.meshy.ai/x.png"])
+def test_image_download_validates_task_before_network(api, task):
+    assert _status(api.save_images, {"task": task}) == 400
+
+
+def test_image_download_saves_all_views_and_reuses_files_offline(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    urls = ["https://assets.meshy.ai/front.png?Signature=SECRET", "https://assets.meshy.ai/back.webp"]
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"prompt": "Mech", "image_urls": urls})
+    calls = []
+    def download(url, dest):
+        calls.append(url)
+        dest.write_bytes(b"image")
+    monkeypatch.setattr(api, "_download", download)
+    result = api.save_images({"task": _TASK})
+    assert result["bytes"] == 10 and len(result["paths"]) == 2
+    api.save_images({"task": _TASK})
+    assert len(calls) == 2
+    record = Path(result["directory"]) / "images.json"
+    assert "SECRET" not in record.read_text() and "https://" not in record.read_text()
+    monkeypatch.setattr(api, "_api_key", lambda: None)
+    local = api.local(limit=200)["files"]
+    assert len(local) == 1 and local[0]["task"] == _TASK
+    assert local[0]["images"] == result["paths"]
+    assert api.file(local[0]["path"])["bytes"] == 5
+
+
+def test_image_download_partial_success_is_preserved_and_retry_resumes(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": ["https://assets.meshy.ai/a.png", "https://assets.meshy.ai/b.png"]})
+    def download(url, dest):
+        if url.endswith("b.png"):
+            raise HTTPException(status_code=502, detail="Temporary failure")
+        dest.write_bytes(b"first")
+    monkeypatch.setattr(api, "_download", download)
+    assert _status(api.save_images, {"task": _TASK}) == 502
+    assert len(api.local(limit=200)["files"][0]["images"]) == 1
+    assert api.local(limit=200)["files"][0]["download_incomplete"]
+    monkeypatch.setattr(api, "_download", lambda _url, dest: dest.write_bytes(b"second"))
+    saved = api.save_images({"task": _TASK})
+    assert len(api.local(limit=200)["files"][0]["images"]) == 2
+    assert not api.local(limit=200)["files"][0]["download_incomplete"]
+    assert Path(saved["paths"][0]).read_bytes() == b"first"
+
+
+@pytest.mark.parametrize("urls,expected", [([], 404), (["https://example.com/image.png"], 502)])
+def test_image_download_rejects_missing_outputs_and_foreign_hosts_before_writing(api, monkeypatch, urls, expected):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": urls})
+    assert _status(api.save_images, {"task": _TASK}) == expected
+    assert not api._saved_assets_root().exists()
+
+
+def test_image_lookup_uses_image_endpoint_response(api, monkeypatch):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    def get(path, *_a, **_k):
+        assert path.startswith("/openapi/v1/text-to-image/")
+        return {"id": _TASK, "image_urls": ["https://assets.meshy.ai/a.png"]}
+    monkeypatch.setattr(api, "_meshy_get", get)
+    monkeypatch.setattr(api, "_download", lambda _url, dest: dest.write_bytes(b"image"))
+    assert len(api.save_images({"task": _TASK})["paths"]) == 1
+
+
+
+def test_image_download_ignores_preexisting_temporary_symlinks(api, monkeypatch):
+    import io
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": ["https://assets.meshy.ai/a.png"]})
+    folder = api._saved_assets_root() / _TASK
+    folder.mkdir(parents=True)
+    victim = api.tmp / "outside" / "keep.txt"
+    victim.write_text("unchanged")
+    try:
+        (folder / "image-1.png.part").symlink_to(victim)
+        (folder / "images.json.part").symlink_to(victim)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: io.BytesIO(b"image"))
+    saved = api.save_images({"task": _TASK})
+    assert victim.read_text() == "unchanged"
+    assert Path(saved["paths"][0]).read_bytes() == b"image"
+    assert json.loads((folder / "images.json").read_text())["complete"]
+
+
+
+@pytest.mark.parametrize("kind,formats,preview", [
+    ("image-to-3d", {"glb": "https://assets.meshy.ai/a.glb"}, False),
+    ("text-to-3d-preview", {"glb": "https://assets.meshy.ai/a.glb"}, True),
+    ("text-to-3d-refine", {"glb": "https://assets.meshy.ai/a.glb", "fbx": "https://assets.meshy.ai/a.fbx"}, False),
+])
+def test_formats_separates_existing_downloads_from_priced_conversions(api, monkeypatch, kind, formats, preview):
+    monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
+    monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"id": _TASK, "type": kind, "model_urls": formats})
+    result = api.formats(_TASK)
+    assert {r["format"] for r in result["formats"]} == set(formats)
+    assert result["is_preview"] == preview
+    assert {r["format"] for r in result["conversions"]} == {"glb", "fbx", "obj", "stl", "usdz", "blend", "3mf"} - set(formats)
+    assert all(r["cost"] == 1 and "meshy_convert" in r["message"] and _TASK in r["message"] for r in result["conversions"])
 
 
 def test_parallel_writes_keep_every_record_and_tasks_get_their_own_folder(api):
