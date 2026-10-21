@@ -91,8 +91,28 @@ def import_any(path: str) -> None:
         raise RuntimeError(f"unsupported input type {ext!r} (use .glb, .gltf, .fbx or .blend)")
 
 
+def display_helpers() -> set:
+    """Importer-made bone-display widgets (not asset geometry): the glTF importer puts an Icosphere in a
+    hidden 'glTF_not_exported' collection and uses it as the bones' custom shape. Exported unfiltered it
+    lands in an FBX as a visible ~2 m sphere over the character."""
+    out = {o for o in bpy.context.scene.objects
+           if any(c.name.startswith("glTF_not_exported") for c in o.users_collection)}
+    for arm in bpy.context.scene.objects:
+        if arm.type == "ARMATURE" and arm.pose:
+            out.update(pb.custom_shape for pb in arm.pose.bones if pb.custom_shape)
+    return out
+
+
 def mesh_objects() -> list:
-    return [o for o in bpy.context.scene.objects if o.type == "MESH"]
+    helpers = display_helpers()
+    return [o for o in bpy.context.scene.objects if o.type == "MESH" and o not in helpers]
+
+
+def select_asset_objects() -> None:
+    """Select everything but display helpers, so exports carry only the asset (meshes, rig, empties)."""
+    helpers = display_helpers()
+    for o in bpy.context.view_layer.objects:
+        o.select_set(o not in helpers)
 
 
 def tri_count(obj, evaluated: bool = True) -> int:
@@ -132,6 +152,7 @@ def stats(path: str | None = None) -> dict:
                 "fake_user": a.use_fake_user} for a in bpy.data.actions]
     fps = scene.render.fps / (scene.render.fps_base or 1.0)
     out = {"triangles": tris, "vertices": verts, "mesh_objects": len(meshes),
+           "mesh_names": sorted(o.name for o in meshes),
            "materials": len(mats), "material_names": mats,
            "images": len(images), "image_list": images,
            "armatures": [{"name": a.name, "bones": len(a.data.bones)} for a in arms],
@@ -233,13 +254,15 @@ def parse_lods(spec: str) -> list:
 # ---------------------------------------------------------------- exports
 
 def export_glb(path: str) -> None:
-    bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_selection=False)
+    select_asset_objects()
+    bpy.ops.export_scene.gltf(filepath=path, export_format="GLB", use_selection=True)
 
 
 def export_fbx(path: str) -> None:
     # Textures copied INTO the .fbx; -Z forward / Y up; FBX_SCALE_UNITS bakes Blender's metres so
     # Unity/Unreal import at scale 1 (check "Convert Units" in Unity if it comes in 100x).
-    bpy.ops.export_scene.fbx(filepath=path, use_selection=False, path_mode="COPY", embed_textures=True,
+    select_asset_objects()  # never the importer's bone-display helper mesh
+    bpy.ops.export_scene.fbx(filepath=path, use_selection=True, path_mode="COPY", embed_textures=True,
                              axis_forward="-Z", axis_up="Y", apply_scale_options="FBX_SCALE_UNITS",
                              object_types={"MESH", "ARMATURE", "EMPTY"}, mesh_smooth_type="FACE",
                              add_leaf_bones=False, bake_anim=True)
@@ -460,6 +483,9 @@ def main() -> None:
     ok = all(v.get("pass") for v in verify.values()) if verify else True
     warnings = []
     for k, v in verify.items():
+        if v.get("pass") and v.get("mesh_objects") != result_scene["mesh_objects"]:
+            warnings.append(f"{k}: reopened with mesh objects {v.get('mesh_names')}, saved "
+                            f"{result_scene['mesh_names']}")
         if not k.startswith("lod") and v.get("triangles") not in (None, result_scene["triangles"]):
             warnings.append(f"{k}: reopened with {v.get('triangles')} triangles, saved {result_scene['triangles']}")
         if v.get("images", 0) < result_scene["images"]:
