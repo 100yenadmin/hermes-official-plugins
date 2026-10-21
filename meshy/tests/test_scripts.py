@@ -54,7 +54,7 @@ def test_render_preview_refuses_an_output_that_is_the_source(tmp_path):
     alias = tmp_path / "model.mp4"
     os.link(src, alias)  # a hard link: a different name for the same file
     before = src.read_bytes()
-    r = subprocess.run(["node", str(SCRIPTS / "render_preview.mjs"), str(src), "--out", str(alias)],
+    r = subprocess.run(check=False, args=["node", str(SCRIPTS / "render_preview.mjs"), str(src), "--out", str(alias)],
                        capture_output=True, text=True, timeout=60, env={**os.environ, "HERMES_HOME": str(tmp_path)})
     result = json.loads(r.stdout.strip().splitlines()[-1])
     assert r.returncode == 1 and not result["ok"] and "refusing to overwrite the source" in result["error"]
