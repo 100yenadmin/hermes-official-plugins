@@ -361,8 +361,18 @@ def render_preview(src: str, png: str) -> None:
     scene.render.resolution_x = scene.render.resolution_y = 768
     scene.render.film_transparent = False
     scene.render.image_settings.file_format = "PNG"
-    scene.render.filepath = png
-    bpy.ops.render.render(write_still=True)
+    # Render to a private file beside the target, then rename it into place: never write through an
+    # existing PNG path (it could be a hard link to the source).
+    os.makedirs(os.path.dirname(png), exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".render-", suffix=".png", dir=os.path.dirname(png))
+    os.close(fd)
+    try:
+        scene.render.filepath = tmp
+        bpy.ops.render.render(write_still=True)
+        os.replace(tmp, png)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
     emit("HANDOFF_RENDER", {"ok": True, "png": png, "triangles": sum(tri_count(o) for o in meshes)})
 
 
@@ -388,6 +398,10 @@ def main() -> None:
     if a.render:
         if not a.png:
             fail("--render needs --png", tag="HANDOFF_RENDER")
+        rsrc, rpng = os.path.realpath(a.render), os.path.realpath(a.png)
+        if rpng == rsrc or (os.path.exists(rpng) and os.path.exists(rsrc) and os.path.samefile(rpng, rsrc)):
+            fail(f"refusing to overwrite the source file {rsrc} with the preview; pick another --png",
+                 tag="HANDOFF_RENDER")
         try:
             render_preview(os.path.abspath(a.render), os.path.abspath(a.png))
         except Exception as exc:  # noqa: BLE001

@@ -332,10 +332,17 @@ function ffprobeInfo(ffmpeg, file) {
   } catch { return null }
 }
 
+// The same file by path, symlink or hard link (stat follows links; ino+dev identify the inode).
+const sameFile = (x, y) => {
+  if (path.resolve(x) === path.resolve(y)) return true
+  try { const s = fs.statSync(x), t = fs.statSync(y); return s.ino === t.ino && s.dev === t.dev } catch { return false }
+}
+
 async function main() {
   const a = parseArgs(process.argv.slice(2))
   if (!fs.existsSync(a.input)) die(`no such file: ${a.input}`)
   if (!/\.glb$/i.test(a.input)) die('input must be a .glb (download the GLB from Meshy first)')
+  if (a.out && sameFile(a.out, a.input)) die(`refusing to overwrite the source file ${a.input}; pick another --out`)
   const chrome = findChrome(a.chrome)
   if (!chrome) die('no Chromium/Chrome found; install one (e.g. `npx -y playwright@1.56.1 install chromium-headless-shell`) or pass --chrome PATH')
   const ffmpeg = findFfmpeg()
@@ -403,22 +410,29 @@ async function main() {
     }
     const out = path.resolve(a.out || outDefault)
     fs.mkdirSync(path.dirname(out), { recursive: true })
+    if (sameFile(out, a.input)) throw new Error(`refusing to overwrite the source file ${a.input}; pick another --out`)
     if (!ffmpeg) {
       const keep = out.replace(/\.mp4$/i, '') + '_frames'
       fs.rmSync(keep, { recursive: true, force: true }); fs.cpSync(framesDir, keep, { recursive: true })
       console.log(JSON.stringify({ ok: false, error: 'ffmpeg not found: wrote PNG frames instead', frames_dir: keep, frames, fps: a.fps }))
       return
     }
+    // Encode into a private file we create beside the target, then rename it into place: ffmpeg -y
+    // never writes through an existing output path (which could be a hard link to the source).
+    const tmp = path.join(path.dirname(out), `.${path.basename(out, path.extname(out))}.${process.pid}-${createHash('sha1').update(String(Math.random())).digest('hex').slice(0, 8)}.part.mp4`)
+    fs.closeSync(fs.openSync(tmp, 'wx'))
+    process.on('exit', () => { try { fs.rmSync(tmp, { force: true }) } catch {} })
     const enc = (extra) => execFileSync(ffmpeg, ['-y', '-loglevel', 'error', '-framerate', String(a.fps), '-i', path.join(framesDir, 'f%05d.png'),
-      '-an', '-c:v', 'libx264', '-preset', 'medium', '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-movflags', '+faststart', ...extra, out])
+      '-an', '-c:v', 'libx264', '-preset', 'medium', '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-movflags', '+faststart', ...extra, tmp])
     const cap = a.maxMb * 1024 * 1024
     let mode = 'crf20'
     enc(['-crf', '20'])
-    if (fs.statSync(out).size > cap) {
+    if (fs.statSync(tmp).size > cap) {
       const kbps = Math.floor(cap * 8 * 0.9 / seconds / 1000)
       mode = `${kbps}k`
       enc(['-b:v', `${kbps}k`, '-maxrate', `${kbps}k`, '-bufsize', `${kbps * 2}k`])
     }
+    fs.renameSync(tmp, out)
     const bytes = fs.statSync(out).size
     console.log(JSON.stringify({ ok: true, out, bytes, mb: +(bytes / 1048576).toFixed(2), seconds: +seconds.toFixed(2), fps: a.fps, frames, size: a.size,
       clip: info.clip, clips: info.clips.map(c => c.name), triangles: info.triangles, encode: mode,
