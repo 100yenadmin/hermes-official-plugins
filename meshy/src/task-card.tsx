@@ -5,7 +5,7 @@
  */
 
 import { Button, Codicon } from '@hermes/plugin-sdk'
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import { stageWord } from './progress.tsx'
 import { ActionMenu, errorText, type FilePayload, FormatMenu, ModelViewer, type Os, type Rest, type Source, V } from './views.tsx'
@@ -96,6 +96,7 @@ export function TaskCard({
   // Busy and failure are separate: a failed download shows its reason but leaves View/Open clickable to retry.
   const [opening, setOpening] = useState(false)
   const [openError, setOpenError] = useState<null | string>(null)
+  const busy = useRef(false) // state lags a render: two clicks in one task would both pass an `opening` check
   const name = title || info?.prompt || `Meshy task ${task.slice(0, 8)}`
   const done = info?.status === 'SUCCEEDED'
 
@@ -105,9 +106,10 @@ export function TaskCard({
       then(source)
       return
     }
-    if (opening) {
+    if (busy.current) {
       return
     }
+    busy.current = true
     setOpening(true)
     setOpenError(null)
     try {
@@ -118,6 +120,7 @@ export function TaskCard({
     } catch (e) {
       setOpenError(`Could not download the model: ${errorText(e)}. Click to try again.`)
     } finally {
+      busy.current = false
       setOpening(false)
     }
   }

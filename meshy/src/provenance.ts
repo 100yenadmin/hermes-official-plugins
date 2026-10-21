@@ -95,7 +95,9 @@ const profileKey = (p: unknown) => String(p ?? '').trim() || 'default'
  * ctx.rest reaches whichever profile/connection is in front, and a background completion can belong to another
  * one. The full record (prompt, input URLs) therefore goes only to a backend that has just said it owns the chat:
  *
- * 1. An event tagged with another profile/connection than the active one is not sent anywhere; it waits here.
+ * 1. An event tagged with another profile/connection than the active one is not sent right away; it waits here.
+ *    Tags only delay a send, never exclude a backend: core stamps primary-path events with whatever is in front,
+ *    so a tag can be wrong, and step 2 already keeps the arguments from a backend that does not own the chat.
  * 2. Otherwise an ID-only record (task id, tool name, session id; no arguments) goes first. The backend keeps a
  *    row only for its own chats and answers 409 for anyone else's, so a foreign backend learns no prompt.
  * 3. Only after that succeeds, and only if the profile/connection did not change meanwhile (same request scope),
@@ -142,8 +144,8 @@ export function createProvenanceWriter(post: (body: unknown) => Promise<unknown>
     }
   }
 
-  const attempt = (row: { body: ProvenanceRecord; origin?: EventOrigin }) => {
-    if (foreign(row.origin)) {
+  const attempt = (row: { body: ProvenanceRecord; origin?: EventOrigin }, honorTags: boolean) => {
+    if (honorTags && foreign(row.origin)) {
       keep(row)
       return
     }
@@ -166,7 +168,7 @@ export function createProvenanceWriter(post: (body: unknown) => Promise<unknown>
     }
     const rows = pending
     pending = []
-    rows.forEach(attempt)
+    rows.forEach(row => attempt(row, false))
   }
 
   const onScope = () => {
@@ -178,7 +180,7 @@ export function createProvenanceWriter(post: (body: unknown) => Promise<unknown>
   const offs = [host.state?.profile?.subscribe(onScope), host.state?.connectionId?.subscribe(onScope)]
   return {
     record(body: ProvenanceRecord, origin?: EventOrigin) {
-      attempt({ body, origin })
+      attempt({ body, origin }, true)
     },
     dispose() {
       disposed = true
