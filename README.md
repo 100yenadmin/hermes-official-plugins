@@ -165,20 +165,31 @@ Catalog entries come in two tiers:
 <p>CLI command · <code>hermes import-agent [claude-code|codex|cursor]</code></p>
 </td>
 <td width="50%" valign="top">
+<a href="mcp-serve/"><img src="assets/mcp-serve.jpg" alt="MCP Serve plugin"></a>
+<h3><a href="mcp-serve/">MCP Serve</a></h3>
+<code>hermes plugins install mcp-serve</code>
+<p>Run Hermes as an MCP server: <code>hermes mcp-serve</code> gives Claude Code, Claude Desktop, Cursor, Codex or any MCP client your messaging conversations across every connected platform, live new-message events and sending. <code>--tools</code> (off by default) adds Hermes' web, browser, vision, image generation, skills and TTS tools; terminal, file and kanban tools are never exposed. Formerly <code>hermes mcp serve</code> in core.</p>
+<p>stdio MCP server · 10 conversation tools, +17 with <code>--tools</code></p>
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 <h3>More on the way</h3>
 <p>Official plugins move in here as they leave Hermes core or join from their own repos. Browse everything else, from Nous, vendors and the community, in the <a href="https://hermes-agent.nousresearch.com/docs/plugins">plugin catalog</a>. Experimental plugins we built but don't support live in <a href="https://github.com/NousResearch/hermes-labs-plugins">hermes-labs-plugins</a>.</p>
 </td>
+<td width="50%" valign="top"></td>
 </tr>
 </table>
 
 
 ### Already used one of these?
 
-Most plugins here used to live somewhere else: Home Assistant and Spotify were built into Hermes core and then briefly had their own repos, Langfuse shipped bundled with core as `observability/langfuse`, the Singularity/Apptainer terminal backend was built into core, and the rest each had a standalone `NousResearch/hermes-*` repo. **You don't need to do anything.**
+Most plugins here used to live somewhere else: Home Assistant and Spotify were built into Hermes core and then briefly had their own repos, Langfuse shipped bundled with core as `observability/langfuse`, the Singularity/Apptainer terminal backend was built into core, MCP Serve was core's `hermes mcp serve`, and the rest each had a standalone `NousResearch/hermes-*` repo. **Except for MCP Serve, you don't need to do anything.**
 
 - **You used the built-in Home Assistant, Spotify, Langfuse or Singularity backend:** `hermes update`, or the first start after updating, installs the plugin from the catalog with your existing config, env vars and login.
 - **You installed it from the catalog:** the catalog now points here, so `hermes plugins update <name>` moves your install to this repo and keeps your files.
 - **You used the built-in `hermes import-agent`:** profiles that registered an import for `--sync` get the `agent-importers` plugin on update; anywhere else, running `hermes import-agent` prints the one-line install (`hermes plugins install agent-importers`).
+- **You ran `hermes mcp serve`:** install with `hermes plugins install mcp-serve` and change your MCP client's args from `["mcp", "serve"]` to `["mcp-serve"]`. MCP clients are configured outside Hermes, so this one is not installed for you.
 - **You installed it by URL** (for example `hermes plugins install NousResearch/hermes-homeassistant`): reinstall once from the catalog with `hermes plugins install <name> --force` to follow future updates. The old repos are archived and get no new fixes.
 
 ## Repository layout
