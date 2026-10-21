@@ -132,7 +132,8 @@ const plugin: HermesPlugin = {
       if (isMeshyCall(payload.name, payload.args)) {
         refreshBalance()
         for (const rec of creationsFrom(payload.name, payload.args, payload.result)) {
-          provenance.record({ ...rec, session_id: event.session_id })
+          // The renderer's source tags let a completion from a background profile/connection wait locally.
+          provenance.record({ ...rec, session_id: event.session_id }, { profile: event.profile, connectionId: event.connectionId })
         }
       }
     })
