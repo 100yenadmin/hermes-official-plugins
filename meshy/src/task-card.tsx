@@ -93,7 +93,9 @@ export function TaskCard({
   const { info, error } = useTask(rest, task)
   const thumb = useThumbnail(rest, info?.thumbnail)
   const [source, setSource] = useState<null | Source>(null)
-  const [opening, setOpening] = useState<null | string>(null)
+  // Busy and failure are separate: a failed download shows its reason but leaves View/Open clickable to retry.
+  const [opening, setOpening] = useState(false)
+  const [openError, setOpenError] = useState<null | string>(null)
   const name = title || info?.prompt || `Meshy task ${task.slice(0, 8)}`
   const done = info?.status === 'SUCCEEDED'
 
@@ -103,15 +105,20 @@ export function TaskCard({
       then(source)
       return
     }
-    setOpening('Downloading the model…')
+    if (opening) {
+      return
+    }
+    setOpening(true)
+    setOpenError(null)
     try {
       const r = await rest<{ path: string }>('save', { method: 'POST', body: { task, format: 'glb' }, timeoutMs: 180_000 })
       const s: Source = { kind: 'file', path: r.path, task }
       setSource(s)
-      setOpening(null)
       then(s)
     } catch (e) {
-      setOpening(`Could not download the model: ${errorText(e)}`)
+      setOpenError(`Could not download the model: ${errorText(e)}. Click to try again.`)
+    } finally {
+      setOpening(false)
     }
   }
 
@@ -141,13 +148,15 @@ export function TaskCard({
     body = (
       <button
         data-meshy-task-poster
-        disabled={streaming || !!opening}
+        disabled={streaming || opening}
         onClick={() => void open(s => setSource(s))}
         style={{ ...V.poster, ...(thumb ? { backgroundImage: `url(${thumb})`, ...V.posterImage } : {}) }}
         type="button"
       >
         <Codicon name="play-circle" size={28} />
-        <span style={thumb ? V.posterLabel : undefined}>{opening ?? (streaming ? 'Waiting for the reply to finish…' : 'View in 3D')}</span>
+        <span data-meshy-task-error={openError ? '' : undefined} style={{ ...(thumb ? V.posterLabel : {}), ...(openError ? V.error : {}) }}>
+          {opening ? 'Downloading the model…' : streaming ? 'Waiting for the reply to finish…' : (openError ?? 'View in 3D')}
+        </span>
       </button>
     )
   } else {
@@ -164,7 +173,7 @@ export function TaskCard({
         {done && !streaming && <ActionMenu rest={rest} task={task} />}
         {done && info?.has_model && !streaming && <FormatMenu os={os} rest={rest} task={task} />}
         {done && info?.has_model && (
-          <Button disabled={!!opening} onClick={() => void open(s => openInWorkspace(s, name))} size="sm" variant="ghost">
+          <Button disabled={opening} onClick={() => void open(s => openInWorkspace(s, name))} size="sm" variant="ghost">
             <Codicon name="link-external" /> Open
           </Button>
         )}
