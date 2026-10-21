@@ -238,7 +238,7 @@ def test_save_downloads_a_file_once_and_a_retry_finishes_failed_companions(api, 
 
 def test_a_beside_export_is_reused_only_for_the_task_that_saved_it(api, monkeypatch):
     """A project file regenerated as a new task keeps its name; the old task's robot.stl beside it is never
-    served or listed as the new task's export."""
+    served or listed as the new task's export, and a file the user made there is never overwritten."""
     old, new = "01a15976-d838-7532-99d8-000000000050", _TASK
     a = "https://assets.meshy.ai/"
     rows = {old: {"id": old, "model_urls": {"stl": a + "old.stl"}}, new: {"id": new, "model_urls": {"stl": a + "new.stl"}}}
@@ -257,3 +257,12 @@ def test_a_beside_export_is_reused_only_for_the_task_that_saved_it(api, monkeypa
     api.save({"task": new, "format": "stl", "beside": str(anchor)})
     assert hits["new.stl"] == 1  # this task's own export is reused
     assert [f["name"] for f in api.local(limit=50)["files"]] == []  # exports are indexed, not gallery models
+
+    # A sibling Hermes never saved is the user's: never overwritten. The card's own model is this task's file.
+    tank = anchor.with_name("tank.glb")
+    tank.write_bytes(b"glTF-tank")
+    mine = tank.with_suffix(".stl")
+    mine.write_bytes(b"USER MADE THIS")
+    other = Path(api.save({"task": new, "format": "stl", "beside": str(tank)})["path"])
+    assert mine.read_bytes() == b"USER MADE THIS" and other.name == f"tank-{new[-8:]}.stl"
+    assert other.read_bytes() == b"NEW TASK STL"

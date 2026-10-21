@@ -457,15 +457,29 @@ def _asset_url(url: object) -> str:
     return str(url)
 
 
-def _save_target(task_id: str, beside: str | None) -> tuple[Path, str]:
-    """Folder + file stem for a saved format: next to the model the card shows, else meshy_output/<task>.
-    Validates both inputs, so callers run it BEFORE spending a Meshy API call on a bad request."""
+def _save_target(task_id: str, beside: str | None) -> tuple[Path, str, Path | None]:
+    """Folder + file stem for a saved format (+ the anchor): next to the model the card shows, else
+    meshy_output/<task>. Validates both inputs, so callers run it BEFORE spending a Meshy API call."""
     if not _TASK_ID.match(task_id or ""):
         raise HTTPException(status_code=400, detail="task id required")
     if beside:
         anchor = _resolve_readable(beside)
-        return anchor.parent, anchor.stem
-    return _data_root() / "meshy_output" / task_id, "model"  # full id: UUIDv7 prefixes repeat within ms
+        return anchor.parent, anchor.stem, anchor
+    return _data_root() / "meshy_output" / task_id, "model", None  # full id: UUIDv7 prefixes repeat within ms
+
+
+def _beside_dest(folder: Path, stem: str, fmt: str, task_id: str, anchor: Path | None,
+                 saved_by: dict[str, str | None]) -> tuple[Path, bool]:
+    """Where a format of ``task_id`` goes, and whether a file already there is this task's.
+    Beside a project file only our own saves are replaceable: a sibling an earlier task saved is
+    refreshed, but a file Hermes never saved (the user's own robot.stl) is never overwritten, so the
+    export takes a task-suffixed name instead. The anchor itself is the card's model, i.e. this task's."""
+    dest = folder / _saved_name(stem, fmt)
+    if anchor is None or dest == anchor:
+        return dest, dest.is_file()
+    if dest.is_file() and str(dest) not in saved_by:
+        dest = folder / _saved_name(f"{stem}-{task_id[-8:]}", fmt)
+    return dest, dest.is_file() and saved_by.get(str(dest)) == task_id
 
 
 def _staging(dest: Path) -> tuple[int, Path]:
@@ -495,17 +509,15 @@ def _download(url: str, dest: Path) -> None:
 
 @router.get("/formats")
 def formats(task: str, beside: str | None = None):
-    folder, stem = _save_target(task, beside)
+    folder, stem, anchor = _save_target(task, beside)
     key = _api_key()
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
     urls = _result_urls(_task(task, key))
-    # Beside a project file a same-named sibling may be another task's export: it counts only if this task saved it.
     saved_by = {r["path"]: r.get("task_id") for r in _load_index()} if beside else {}
     out = []
     for fmt in sorted((k for k in urls if _split_format(k)[0] in _FORMAT_ORDER), key=_format_sort_key):
-        saved = folder / _saved_name(stem, fmt)
-        mine = saved.is_file() and (not beside or saved_by.get(str(saved)) == task)
+        saved, mine = _beside_dest(folder, stem, fmt, task, anchor, saved_by)
         out.append({"format": fmt, "saved": str(saved) if mine else None})
     return {"task": task, "formats": out}
 
@@ -519,7 +531,7 @@ def save(body: dict):
     if base not in _FORMAT_ORDER or (clip is not None and not _VARIANT.match(clip)):
         raise HTTPException(status_code=400, detail="unknown format")
     beside = body.get("beside") or None
-    folder, stem = _save_target(task_id, beside)
+    folder, stem, anchor = _save_target(task_id, beside)
     key = _api_key()
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
@@ -530,15 +542,14 @@ def save(body: dict):
     folder.mkdir(parents=True, exist_ok=True)
     if not beside:
         (folder / _TASK_SIDECAR).write_text(task_id, encoding="utf-8")
-    dest = folder / _saved_name(stem, fmt)
     # Two clicks (or two windows) saving one file: the second waits, then finds it saved.
     with _STATE_LOCK:
-        dest_lock = _SAVE_LOCKS.setdefault(str(dest), threading.Lock())
+        dest_lock = _SAVE_LOCKS.setdefault(str(folder / _saved_name(stem, fmt)), threading.Lock())
     with dest_lock:
-        # Beside a project file, a same-named sibling may be an earlier task's export (the project file was
-        # regenerated as a new task): reuse it only when the index says THIS task saved it, else replace it.
         saved_by = {r["path"]: r.get("task_id") for r in _load_index()} if beside else {}
-        fresh = not dest.is_file() or (bool(beside) and saved_by.get(str(dest)) != task_id)
+        dest, mine = _beside_dest(folder, stem, fmt, task_id, anchor, saved_by)
+        stem = dest.name[: -len(_saved_name("", fmt))] if beside else stem  # OBJ companions follow a suffixed name
+        fresh = not mine
         if fresh:
             _download(urls[fmt], dest)
             _record_asset(dest, task_id, export=True)
