@@ -191,6 +191,8 @@ the file is for, then:
 - **Rigging / animation tasks are not saved:** `meshy_download_model` returns signed GLB/FBX links
   (rig: character + free walk/run clips; animation: GLB, FBX, sometimes USDZ). To keep one, fetch
   the link into the target folder (for example `curl -L -o <abs path>.fbx '<url>'`).
+- **Images** (text-to-image / image-to-image): `meshy_download_model` saves their own PNGs; omit
+  `format`. It only takes 3D formats, so `format: "png"` fails validation before the call runs.
 - **More than one type** (engine FBX plus a GLB to preview): one download call per type.
 - **Never call a download "game-ready" or "Unity-ready":** it has no LODs, collision mesh or
   hand retopology, and scale/pivot may need fixing; say so when handing it to a game project
