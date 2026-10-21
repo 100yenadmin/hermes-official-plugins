@@ -184,7 +184,9 @@ export function ModelViewer({
     const bg = getComputedStyle(el).getPropertyValue('--meshy-stage-bg').trim() || '#1b1d22'
     const stage = createStage(el, bg)
     stageRef.current = stage
+    // A new model gets a new stage: carry the toolbar's current view settings over to it.
     stage.setAutoRotate(spin)
+    stage.setGrid(grid)
     let live = true
     setState({ phase: 'loading' })
     setStats(null)

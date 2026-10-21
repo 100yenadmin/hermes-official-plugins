@@ -211,7 +211,7 @@ const plugin: HermesPlugin = {
           keywords: ['meshy', '3d', 'glb', 'gltf', 'open', 'file'],
           run: () => {
             void ctx.os
-              .pickOpenPath({ title: 'Open a 3D model', filters: [{ name: '3D models', extensions: ['glb', 'gltf'] }] })
+              .pickOpenPath({ title: 'Open a 3D model', filters: [{ name: '3D models (.glb, self-contained .gltf)', extensions: ['glb', 'gltf'] }] })
               .then(path => {
                 if (path) {
                   openGallery({ kind: 'file', path }, path.split(/[\\/]/).pop() || 'model')

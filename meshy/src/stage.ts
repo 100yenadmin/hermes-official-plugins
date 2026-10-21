@@ -232,6 +232,11 @@ export function createStage(host: HTMLElement, background: string): Stage {
 
   return {
     async load(bytes) {
+      if (externalResources(bytes).length) {
+        // The viewer receives one file's bytes from the backend, so sibling .bin/texture files cannot load (they
+        // would resolve against the app page). Say so instead of failing with a fetch error.
+        throw new Error('This .gltf references external files. Open the .glb, or a .gltf with embedded data.')
+      }
       const gltf = await new GLTFLoader().parseAsync(bytes, '')
       if (disposed) {
         throw new Error('viewer closed')
@@ -383,4 +388,25 @@ export function dataUrlToBuffer(dataUrl: string): ArrayBuffer {
     out[i] = bin.charCodeAt(i)
   }
   return out.buffer
+}
+
+/** URIs of buffers/images a glTF (JSON or GLB) loads from outside its own bytes; `data:` URIs are embedded. */
+export function externalResources(bytes: ArrayBuffer): string[] {
+  let json: unknown
+  try {
+    const view = new DataView(bytes)
+    if (bytes.byteLength >= 20 && view.getUint32(0, true) === 0x46546c67) {
+      // GLB: 12-byte header, then the JSON chunk (length, type 'JSON', data).
+      const length = view.getUint32(12, true)
+      json = JSON.parse(new TextDecoder().decode(new Uint8Array(bytes, 20, Math.min(length, bytes.byteLength - 20))))
+    } else {
+      json = JSON.parse(new TextDecoder().decode(bytes))
+    }
+  } catch {
+    return [] // not parseable here: let the loader report it
+  }
+  const doc = json as { buffers?: Array<{ uri?: unknown }>; images?: Array<{ uri?: unknown }> }
+  return [...(Array.isArray(doc?.buffers) ? doc.buffers : []), ...(Array.isArray(doc?.images) ? doc.images : [])]
+    .map(entry => entry?.uri)
+    .filter((uri): uri is string => typeof uri === 'string' && !/^data:/i.test(uri))
 }
