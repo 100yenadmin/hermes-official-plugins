@@ -50,6 +50,7 @@ function parseArgs(argv) {
     else rest.push(k)
   }
   if (rest.length !== 1) die('usage: node render_preview.mjs <model.glb> [--out file.mp4] [--clip NAME]')
+  if (a.out && !/\.mp4$/i.test(a.out)) die('--out must end in .mp4 (the encoder writes H.264 MP4)')
   a.input = path.resolve(rest[0])
   a.size = Math.max(256, Math.min(1080, Math.round(a.size / 2) * 2))
   a.fps = Math.max(10, Math.min(60, Math.round(a.fps) || 30))

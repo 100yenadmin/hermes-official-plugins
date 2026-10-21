@@ -48,9 +48,10 @@ def stats(path: str) -> dict:
         seen.add(i)
         node = nodes[i]
         todo += node.get("children", [])
-        if "mesh" in node and "skin" in node and 0 <= node["skin"] < len(skins) and any(
+        mesh, skin = node.get("mesh"), node.get("skin")
+        if isinstance(mesh, int) and isinstance(skin, int) and 0 <= skin < len(skins) and 0 <= mesh < len(meshes) and any(
                 {"JOINTS_0", "WEIGHTS_0"} <= set(p.get("attributes", {}))
-                for p in meshes[node["mesh"]].get("primitives", [])):
+                for p in meshes[mesh].get("primitives", [])):
             skinned += 1
     clips = [a.get("name") or f"clip {i + 1}" for i, a in enumerate(doc.get("animations", []))]
     return {"path": path, "triangles": tris, "vertices": verts, "meshes": len(doc.get("meshes", [])),
