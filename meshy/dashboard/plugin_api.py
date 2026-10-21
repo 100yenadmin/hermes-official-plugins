@@ -526,10 +526,12 @@ def save(body: dict):
     with _STATE_LOCK:
         dest_lock = _SAVE_LOCKS.setdefault(str(dest), threading.Lock())
     with dest_lock:
-        if not dest.is_file():
+        fresh = not dest.is_file()
+        if fresh:
             _download(urls[fmt], dest)
-            if fmt == "obj" and urls.get("mtl"):
-                _save_obj_material(row, urls["mtl"], folder, stem)
+        # The .mtl is published last: an OBJ without one is a save whose companions failed, so finish them now.
+        if fmt == "obj" and urls.get("mtl") and (fresh or not (folder / f"{stem}.mtl").is_file()):
+            _save_obj_material(row, urls["mtl"], folder, stem)
     if fmt in ("glb", "gltf"):
         _record_asset(dest, task_id)
     return {"path": str(dest), "bytes": dest.stat().st_size}
@@ -555,19 +557,11 @@ def _save_obj_material(row: dict, mtl_url: str, folder: Path, stem: str) -> None
     if base:
         _download(base, folder / f"{stem}_texture.png")
         mtl = re.sub(r"(?m)^(\s*map_Kd\s+).*$", rf"\g<1>{stem}_texture.png", mtl)
-    mtl_path = folder / f"{stem}.mtl"
-    fd, tmp = _staging(mtl_path)
-    try:
-        with open(fd, "w", encoding="utf-8") as out:
-            out.write(mtl)
-        os.replace(tmp, mtl_path)
-    finally:
-        tmp.unlink(missing_ok=True)
     # Repoint ``mtllib`` (a header line) by streaming: the OBJ is ~180 MB, never read it whole.
     obj = folder / f"{stem}.obj"
     fd, tmp = _staging(obj)
     try:
-        with open(obj, "rb") as src, open(fd, "wb") as dst:
+        with open(fd, "wb") as dst, open(obj, "rb") as src:
             for _ in range(64):
                 line = src.readline()
                 if not line:
@@ -575,6 +569,15 @@ def _save_obj_material(row: dict, mtl_url: str, folder: Path, stem: str) -> None
                 dst.write(f"mtllib {stem}.mtl\n".encode() if line.startswith(b"mtllib ") else line)
             shutil.copyfileobj(src, dst, 1 << 20)
         os.replace(tmp, obj)
+    finally:
+        tmp.unlink(missing_ok=True)
+    # Last, so /save treats an OBJ without its .mtl as unfinished and retries the companions.
+    mtl_path = folder / f"{stem}.mtl"
+    fd, tmp = _staging(mtl_path)
+    try:
+        with open(fd, "w", encoding="utf-8") as out:
+            out.write(mtl)
+        os.replace(tmp, mtl_path)
     finally:
         tmp.unlink(missing_ok=True)
 

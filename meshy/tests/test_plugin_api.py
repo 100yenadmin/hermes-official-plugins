@@ -189,3 +189,48 @@ def test_parallel_writes_keep_every_record_and_tasks_get_their_own_folder(api):
     assert set(ids) <= set(api._load_prov())
     assert {str(m.resolve()) for m in models} <= {r["path"] for r in api._load_index()}
     assert api._save_target(ids[0], None)[0] != api._save_target(ids[1], None)[0]
+
+
+def _fake_assets(monkeypatch, api, files: dict[str, bytes | int], delay: float = 0.0) -> dict[str, int]:
+    """Serve ``https://assets.meshy.ai/<name>`` from ``files`` (an int = that HTTP error); count each fetch."""
+    import io
+    import threading
+    import time
+    import urllib.error
+    hits: dict[str, int] = {}
+    lock = threading.Lock()
+
+    def urlopen(url, timeout=None):
+        name = str(url).rsplit("/", 1)[-1]
+        with lock:
+            hits[name] = hits.get(name, 0) + 1
+        time.sleep(delay)  # long enough for a second request to overlap the first
+        if isinstance(files[name], int):
+            raise urllib.error.HTTPError(str(url), files[name], "fixture", {}, None)
+        return io.BytesIO(files[name])
+
+    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    return hits
+
+
+def test_save_downloads_a_file_once_and_a_retry_finishes_failed_companions(api, monkeypatch):
+    """Two clicks on one export download it once (both succeed), and an OBJ whose .mtl failed is completed
+    by the retry instead of being reported saved without its material."""
+    from concurrent.futures import ThreadPoolExecutor
+    a = "https://assets.meshy.ai/"
+    row = {"id": _TASK, "model_urls": {"fbx": a + "m.fbx", "obj": a + "m.obj", "mtl": a + "m.mtl"}}
+    monkeypatch.setattr(api, "_task", lambda _t, _k: row)
+    files = {"m.fbx": b"FBX" * 1000, "m.obj": b"mtllib material.mtl\nv 0 0 0\n", "m.mtl": 503}
+    hits = _fake_assets(monkeypatch, api, files, delay=0.2)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        saved = list(pool.map(lambda _: api.save({"task": _TASK, "format": "fbx"}), range(2)))
+    assert [s["bytes"] for s in saved] == [3000, 3000] and hits["m.fbx"] == 1
+
+    folder = api.data / "meshy_output" / _TASK
+    with pytest.raises(Exception):
+        api.save({"task": _TASK, "format": "obj"})
+    files["m.mtl"] = b"newmtl material\n"
+    api.save({"task": _TASK, "format": "obj"})
+    assert (folder / "model.mtl").read_text(encoding="utf-8") == "newmtl material\n" and hits["m.mtl"] == 2
+    assert (folder / "model.obj").read_bytes().startswith(b"mtllib model.mtl\n")
+    assert not list(folder.glob("*.part"))  # no staging file left behind
