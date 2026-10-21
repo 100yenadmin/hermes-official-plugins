@@ -64,6 +64,13 @@ mcp_servers:
       MESHY_API_KEY: ${MESHY_API_KEY}
 ```
 
+On Hermes builds with MCP tool costs, the plugin also declares what each Meshy tool costs (Meshy's
+API price list; ranges where the model or texture size changes the price) and a 200-credit spend
+limit per chat. The approval prompt then reads "Costs about 5–25 credits" plus what the chat has
+spent, and once a chat would pass the limit Hermes asks again even with the prompts skipped as above
+(your override keeps the plugin's costs unless it sets `tool_costs` / `spend_limit` itself;
+`spend_limit: 0` turns the limit off). Older Hermes builds ignore the declaration.
+
 ## Where files go
 
 `meshy_download_model` saves to the absolute `save_to` path the agent passes (the skill asks
