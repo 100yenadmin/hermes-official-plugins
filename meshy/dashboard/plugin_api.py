@@ -806,7 +806,8 @@ _ACTIONS = (
       "say so and stop if it is not.")),
     ("animate", "Animate", 3, ("rig",),
      ("animate this rig with meshy_animate (3 credits per action). Look up action ids with "
-      "meshy_list_animations (free) and ask me which ones.")),
+      "meshy_list_animations (free) and ask me which ones, and whether my game moves the character "
+      "(then use the in-place variants: search \"inplace\").")),
     ("resize", "Resize", 1, (*_GENERATED, "remesh", "retexture"),
      "resize it to real-world size with meshy_resize (1 credit). Ask me for the height."),
     ("printability", "Check printability", 0, ("text-to-3d-preview", *_GENERATED, "remesh", "retexture"),

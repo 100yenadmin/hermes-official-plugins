@@ -236,7 +236,9 @@ download result gave one), and that a saved file is permanent.
 - A text-to-3d preview has no textures: refine it (10 credits) or use the image route, which
   is textured in one task.
 - Rigging needs a textured humanoid at ≤300K faces; remesh first if it is denser.
-- Animation `action_id`s come from `meshy_list_animations`; never invent one.
+- Animation `action_id`s come from `meshy_list_animations`; never invent one. In-place variants
+  (`search: "inplace"`) exist for games that move the character: some library clips travel,
+  the rig's free walk/run don't.
 - UV unwrap needs a GLB with ≤40,000 faces.
 - `meshy_cancel_task` on a finished task DELETES it (and needs `confirm_delete: true`);
   confirm with the user before calling it.
