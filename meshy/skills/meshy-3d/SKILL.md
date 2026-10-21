@@ -101,7 +101,8 @@ user's goal before the first paid call.
    (refine, rig, convert reuse it instead of regenerating). **Describe what the file holds, not what
    the task claims:** a SUCCEEDED rig or animation task was billed, which doesn't prove the skeleton or
    clips landed in the file. Run `python3 scripts/glb_stats.py <saved .glb>` (this skill's folder) and
-   say "rigged" only when `skins`/`joints` > 0, and "animated" only by naming the `clips` it lists.
+   say "rigged" only when `skinned_mesh_nodes` > 0 (`skins`/`joints` can be unused definitions), and
+   "animated" only by naming the `clips` it lists.
 7b. **Offer the optional Blender copy, before step 8** (local, no additional Meshy credits) after a `.glb` download or
    when showing a local Meshy model. First run `hermes config get plugins.entries.meshy.settings.blender_handoff`
    ("not set" means `ask`). Unless it is `never`, find Blender: `hermes config get plugins.entries.meshy.settings.blender_path` first, then PATH and the per-OS folders in [blender](references/blender.md) §2.

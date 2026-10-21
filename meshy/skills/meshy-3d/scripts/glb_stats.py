@@ -4,8 +4,10 @@
     python3 glb_stats.py model.glb [more.glb ...]
 
 One JSON line per file: {"path", "triangles", "vertices", "meshes", "primitives", "textures", "skins",
-"joints", "clips", "bytes"}. Counts every triangle primitive (mode 4) of every mesh, once per mesh (not per
-instance). ``skins``/``joints`` > 0 means the mesh is bound to a skeleton; ``clips`` names every animation.
+"joints", "skinned_mesh_nodes", "clips", "bytes"}. Counts every triangle primitive (mode 4) of every mesh,
+once per mesh (not per instance). ``skins``/``joints`` count skin DEFINITIONS, which a file can carry unused;
+``skinned_mesh_nodes`` > 0 (scene nodes with a mesh AND a skin whose primitives carry JOINTS_0/WEIGHTS_0)
+is what means the mesh is bound to a skeleton. ``clips`` names every animation.
 """
 from __future__ import annotations
 
@@ -36,10 +38,25 @@ def stats(path: str) -> dict:
             elif mode in (5, 6):  # strip / fan
                 tris += max(n_idx - 2, 0)
     skins = doc.get("skins", [])
+    nodes, meshes = doc.get("nodes", []), doc.get("meshes", [])
+    roots = [n for s in doc.get("scenes", []) for n in s.get("nodes", [])] or list(range(len(nodes)))
+    seen, todo, skinned = set(), list(roots), 0
+    while todo:  # nodes reachable from a scene: what a viewer or engine actually shows
+        i = todo.pop()
+        if i in seen or not 0 <= i < len(nodes):
+            continue
+        seen.add(i)
+        node = nodes[i]
+        todo += node.get("children", [])
+        if "mesh" in node and "skin" in node and 0 <= node["skin"] < len(skins) and any(
+                {"JOINTS_0", "WEIGHTS_0"} <= set(p.get("attributes", {}))
+                for p in meshes[node["mesh"]].get("primitives", [])):
+            skinned += 1
     clips = [a.get("name") or f"clip {i + 1}" for i, a in enumerate(doc.get("animations", []))]
     return {"path": path, "triangles": tris, "vertices": verts, "meshes": len(doc.get("meshes", [])),
             "primitives": prims, "textures": len(doc.get("images", [])), "skins": len(skins),
-            "joints": len({j for s in skins for j in s.get("joints", [])}), "clips": clips,
+            "joints": len({j for s in skins for j in s.get("joints", [])}), "skinned_mesh_nodes": skinned,
+            "clips": clips,
             "bytes": os.path.getsize(path)}
 
 
