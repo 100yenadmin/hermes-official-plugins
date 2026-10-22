@@ -524,6 +524,7 @@ class Capture:
         self.pending = ''
         self.decoder = codecs.getincrementaldecoder('utf-8')()
         self.arguments = {}
+        self.unparsed = []
 
     def feed(self, chunk):
         self.pending += self.decoder.decode(chunk)
@@ -568,13 +569,21 @@ class Capture:
         if index in self.arguments:
             # A no-argument tool call streams one input_json_delta with an empty partial_json.
             raw = self.arguments.pop(index)
-            self.message['content'][index]['input'] = json.loads(raw) if raw.strip() else {}
+            try:
+                self.message['content'][index]['input'] = json.loads(raw) if raw.strip() else {}
+            except ValueError:
+                # Streamed tool input is not validated (``eager_input_streaming``): a reply cut off at
+                # max_tokens ends mid-argument. The call is dropped at message_stop, never run with guessed
+                # arguments, and the stop reason (finish ``length``) tells Hermes the reply was cut short.
+                self.unparsed.append(index)
 
     def _delta(self, event):
         self.message.update(event.get('delta', {}))
         self.message['usage'].update(event.get('usage', {}))
 
     def _stop(self, event):
+        for index in sorted(self.unparsed, reverse=True):
+            del self.message['content'][index]
         self.complete = bool(self.message and self.message.get('stop_reason') and not self.arguments)
 
 
