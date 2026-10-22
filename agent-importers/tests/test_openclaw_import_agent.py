@@ -61,3 +61,24 @@ def test_openclaw_only_flags_with_another_agent_import_nothing(tmp_path, capsys)
     out = capsys.readouterr().out
     assert "--preset, --migrate-secrets only apply to OpenClaw imports" in out
     assert _snapshot(tmp_path / ".hermes") == before
+
+
+def test_fresh_home_takes_the_openclaw_persona_but_a_written_soul_is_kept(tmp_path, capsys):
+    """Hermes seeds a default SOUL.md into every new home; replacing it is no conflict. A SOUL.md the
+    user wrote still is one, and the apply is refused."""
+    from hermes_cli.default_soul import DEFAULT_SOUL_MD
+
+    hermes_home = tmp_path / ".hermes"
+    (hermes_home / "SOUL.md").write_text(DEFAULT_SOUL_MD, encoding="utf-8")  # what a new home holds
+    _fixture_openclaw(tmp_path)
+
+    _run(["openclaw", "--yes", "--no-backup"])
+
+    assert (hermes_home / "SOUL.md").read_text(encoding="utf-8") == "You are a careful assistant.\n"
+    assert "Refusing to apply" not in capsys.readouterr().out
+
+    (hermes_home / "SOUL.md").write_text("My own persona.\n", encoding="utf-8")
+    _run(["openclaw", "--yes", "--no-backup"])
+
+    assert "Refusing to apply" in capsys.readouterr().out
+    assert (hermes_home / "SOUL.md").read_text(encoding="utf-8") == "My own persona.\n"

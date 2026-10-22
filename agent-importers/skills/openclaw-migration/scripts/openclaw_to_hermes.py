@@ -317,6 +317,18 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
+def is_hermes_seeded_soul(text: str) -> bool:
+    """Hermes writes its default SOUL.md into every new home, so a fresh install always has one. Still
+    holding that default (or an older seed), it carries nothing the user wrote and OpenClaw's persona
+    can replace it. Outside Hermes (the script run on its own) nothing counts as seeded."""
+    try:
+        from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
+    except ImportError:
+        return False
+    normalized = text.replace("\r\n", "\n").lstrip("\ufeff").strip()
+    return normalized == DEFAULT_SOUL_MD.strip() or is_legacy_template_soul(text)
+
+
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", text.strip())
 
@@ -1251,7 +1263,9 @@ class Migrator:
         return path
 
     def copy_file(self, source: Path, destination: Path, kind: str,
-                  transform: Optional[Any] = None) -> None:
+                  transform: Optional[Any] = None, replaceable: bool = False) -> None:
+        """*replaceable*: the existing target holds nothing the user wrote, so it is replaced (with a
+        backup) without --overwrite."""
         if not source or not source.exists():
             return
 
@@ -1259,7 +1273,7 @@ class Migrator:
             if not transform and sha256_file(source) == sha256_file(destination):
                 self.record(kind, source, destination, "skipped", "Target already matches source")
                 return
-            if not self.overwrite:
+            if not self.overwrite and not replaceable:
                 self.record(kind, source, destination, "conflict", "Target exists and overwrite is disabled")
                 return
 
@@ -1282,7 +1296,9 @@ class Migrator:
         if not source:
             self.record("soul", None, self.target_root / "SOUL.md", "skipped", "No OpenClaw SOUL.md found")
             return
-        self.copy_file(source, self.target_root / "SOUL.md", kind="soul", transform=rebrand_text)
+        destination = self.target_root / "SOUL.md"
+        self.copy_file(source, destination, kind="soul", transform=rebrand_text,
+                       replaceable=destination.is_file() and is_hermes_seeded_soul(read_text(destination)))
 
     def migrate_workspace_agents(self) -> None:
         source = self.source_candidate(
