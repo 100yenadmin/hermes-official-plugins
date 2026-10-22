@@ -39,5 +39,6 @@ def test_reasoning_off_effort_coexists_with_a_structured_output_format():
 
 def test_reasoning_enabled_effort_is_unchanged():
     body = reasoning_off_body('haiku', {'enabled': True, 'effort': 'high'})
-    assert body['thinking'] == {'type': 'adaptive'}
+    # #32 (in this fork) asks for summarized thinking display on adaptive routes.
+    assert body['thinking'] == {'type': 'adaptive', 'display': 'summarized'}
     assert body['output_config'] == {'effort': 'high'}
