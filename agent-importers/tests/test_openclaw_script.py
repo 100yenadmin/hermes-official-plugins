@@ -329,7 +329,8 @@ def test_a_workspace_inside_the_openclaw_dir_is_not_made_the_working_directory(t
     """``~/.openclaw/workspace`` (OpenClaw's default, spelled with ``~``) stays OpenClaw's: Hermes would
     otherwise run in the old workspace and pick up its AGENTS.md / MEMORY.md."""
     mod = load_module()
-    monkeypatch.setenv("HOME", str(tmp_path))  # what ``~`` expands to
+    monkeypatch.setenv("HOME", str(tmp_path))  # what ``~`` expands to (POSIX)
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))  # ... and on Windows
     source, target = tmp_path / ".openclaw", tmp_path / "hermes-target"
     source.mkdir()
     target.mkdir()
