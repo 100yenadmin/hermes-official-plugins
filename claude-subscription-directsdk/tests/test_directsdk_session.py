@@ -106,7 +106,7 @@ def query():
         out({'type':'assistant','error':'rate_limit' if error.code == 429 else 'unknown','message':{'role':'assistant','model':'<synthetic>','content':[{'type':'text','text':'API Error: %d' % error.code}]}})
         out({'type':'result','subtype':'success','is_error':True,'num_turns':1})
         return
-    message = None
+    message, cut = None, set()
     for frame in raw.split('\n\n'):
         if frame.startswith('data: '):
             event = json.loads(frame[6:])
@@ -118,7 +118,7 @@ def query():
                 try:
                     message['content'][event['index']]['input'] = json.loads(event['delta']['partial_json'] or '{}')
                 except ValueError:
-                    pass  # A call cut off mid-argument (max_tokens): native keeps it in its transcript as streamed.
+                    cut.add(event['index'])  # A call cut off mid-argument (max_tokens): kept in the transcript, never run.
             elif event['type'] == 'message_delta':
                 message.update(event['delta'])
     for block in message['content']:
@@ -127,7 +127,8 @@ def query():
         out({'type':'assistant','message':dict(message, content=[block])})
     out({'type':'stream_event','event':{'type':'message_stop'}})
     history.append({'role':'assistant','content':message['content']})
-    tools = [b for b in message['content'] if b['type'] == 'tool_use'] if message.get('stop_reason') == 'tool_use' else []
+    # Native runs a turn's complete calls whatever stopped it (a max_tokens cut included).
+    tools = [b for i, b in enumerate(message['content']) if b['type'] == 'tool_use' and i not in cut] if message.get('stop_reason') in ('tool_use', 'max_tokens') else []
     if tools:
         queue.extend(tools[::-1] if os.environ.get('FAKE_REVERSE_CALLS') else tools)  # parallel calls can dispatch in any order
         call_next()
@@ -768,6 +769,42 @@ def test_a_tool_call_cut_off_mid_argument_retires_the_session(rig):
     assert second.choices[0].message.content == 'echo continue'
     sent = [b for m in rig.upstream.bodies[-1]['messages'] for b in (m['content'] if isinstance(m['content'], list) else [])]
     assert not any(b.get('type') == 'tool_use' for b in sent)
+
+
+@pytest.mark.parametrize('cut', [False, True])
+def test_complete_calls_of_a_turn_cut_off_at_max_tokens_end_the_step(rig, cut):
+    """Native runs a turn's complete calls whatever stopped it, so they park on the hermes MCP server as at a tool_use
+    stop: the step returns them at once instead of waiting for a result native never sends, and the next step replays."""
+    blocks = [{'type': 'text', 'text': 'writing'}, {'type': 'tool_use', 'id': 'toolu_whole', 'name': 'mcp__hermes__probe', 'input': {'key': 'a'}}]
+    events = [{'type': 'message_start', 'message': {'id': 'm1', 'role': 'assistant', 'model': 'sonnet', 'content': [], 'usage': dict(USAGE)}}]
+    for index, block in enumerate(blocks):
+        if block['type'] == 'tool_use':
+            events += [{'type': 'content_block_start', 'index': index, 'content_block': dict(block, input={})},
+                       {'type': 'content_block_delta', 'index': index, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])}}]
+        else:
+            events += [{'type': 'content_block_start', 'index': index, 'content_block': {'type': 'text', 'text': ''}},
+                       {'type': 'content_block_delta', 'index': index, 'delta': {'type': 'text_delta', 'text': block['text']}}]
+        events.append({'type': 'content_block_stop', 'index': index})
+    if cut:
+        events += [{'type': 'content_block_start', 'index': 2, 'content_block': {'type': 'tool_use', 'id': 'toolu_cut', 'name': 'mcp__hermes__probe', 'input': {}}},
+                   {'type': 'content_block_delta', 'index': 2, 'delta': {'type': 'input_json_delta', 'partial_json': '{"key":'}},
+                   {'type': 'content_block_stop', 'index': 2}]
+    events += [{'type': 'message_delta', 'delta': {'stop_reason': 'max_tokens'}, 'usage': dict(USAGE)}, {'type': 'message_stop'}]
+    rig.upstream.reply = lambda n, body: ''.join('data: ' + json.dumps(e) + '\n\n' for e in events).encode()
+    messages = [{'role': 'user', 'content': 'write the files'}]
+    started = time.monotonic()
+    first = step(rig.client(), messages)
+    rig.upstream.reply = None
+    assert time.monotonic() - started < 10
+    (call,) = first.choices[0].message.tool_calls
+    assert first.choices[0].finish_reason == 'tool_calls' and json.loads(call.function.arguments) == {'key': 'a'}
+    assert not directsdk._session_pool
+    messages += [as_history(first), {'role': 'tool', 'tool_call_id': call.id, 'content': 'APPLE'}]
+    second = step(rig.client(), messages)
+    assert second.usage.model_dump()['native_admission']['session'] == 'cold'
+    assert second.choices[0].message.content == 'got APPLE'
+    sent = [b for m in rig.upstream.bodies[-1]['messages'] for b in (m['content'] if isinstance(m['content'], list) else [])]
+    assert [b['id'] for b in sent if b.get('type') == 'tool_use'] == ['toolu_whole']
 
 
 @pytest.mark.parametrize('trigger, offered', [('ghost', 'mcp__hermes__ghost'), ('bare', 'mcp__hermes__probe')])

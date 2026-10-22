@@ -1189,8 +1189,10 @@ class Client:
                     elif native['type'] == 'message_stop':
                         capture = session.admission.capture
                         # Native now calls the hermes MCP tools; they park until the next step brings results.
+                        # It runs the complete calls of a turn cut off at max_tokens too, so that turn ends the step.
                         # A refusal ends the step too: its session is never reused (below).
-                        if capture.complete and capture.message.get('stop_reason') in ('tool_use', 'refusal'):
+                        if capture.complete and (capture.message.get('stop_reason') in ('tool_use', 'refusal')
+                                                 or any(b.get('type') == 'tool_use' for b in capture.message['content'])):
                             break
             admission = session.admission
             if native_error_code == 'authentication_failed' and not admission.used:
@@ -1221,6 +1223,9 @@ class Client:
             # so the session cannot continue.
             calls, offered = tool_calls(assistant['content'], hermes_names)
             poisoned = poisoned or not offered
+            # Calls from a turn that stopped for another reason (max_tokens): native's handling of a cut turn is its
+            # own, so answer, then replay next step.
+            poisoned = poisoned or (bool(calls) and assistant.get('stop_reason') != 'tool_use')
             usage = assistant['usage']
             # Native reports cost only per whole native turn; a step has no list-price figure of its own.
             tail, message, chunk = self._response(kwargs['model'], [assistant], calls, emitted, usage, admission,
