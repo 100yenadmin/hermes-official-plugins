@@ -115,7 +115,10 @@ def query():
             elif event['type'] == 'content_block_start':
                 message['content'].append(event['content_block'])
             elif event['type'] == 'content_block_delta' and event['delta']['type'] == 'input_json_delta':
-                message['content'][event['index']]['input'] = json.loads(event['delta']['partial_json'] or '{}')
+                try:
+                    message['content'][event['index']]['input'] = json.loads(event['delta']['partial_json'] or '{}')
+                except ValueError:
+                    pass  # A call cut off mid-argument (max_tokens): native keeps it in its transcript as streamed.
             elif event['type'] == 'message_delta':
                 message.update(event['delta'])
     for block in message['content']:
@@ -739,6 +742,32 @@ def test_failures_carry_the_status_hermes_routes_on(rig):
         step(client, [{'role': 'user', 'content': 'hi'}])
     assert native.value.status_code == 429
     assert not directsdk._session_pool
+
+
+def test_a_tool_call_cut_off_mid_argument_retires_the_session(rig):
+    """55c1b45: the relay drops a call cut off at max_tokens, but a kept-alive native keeps it in its own transcript,
+    where it would reach the API with no tool_result. The next step starts a native that replays Hermes' history."""
+    events = [{'type': 'message_start', 'message': {'id': 'm1', 'role': 'assistant', 'model': 'sonnet', 'content': [], 'usage': dict(USAGE)}},
+              {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'text', 'text': ''}},
+              {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'text_delta', 'text': 'writing'}},
+              {'type': 'content_block_stop', 'index': 0},
+              {'type': 'content_block_start', 'index': 1, 'content_block': {'type': 'tool_use', 'id': 'toolu_cut', 'name': 'mcp__hermes__probe', 'input': {}}},
+              {'type': 'content_block_delta', 'index': 1, 'delta': {'type': 'input_json_delta', 'partial_json': '{"key":'}},
+              {'type': 'content_block_stop', 'index': 1},
+              {'type': 'message_delta', 'delta': {'stop_reason': 'max_tokens'}, 'usage': dict(USAGE)}, {'type': 'message_stop'}]
+    rig.upstream.reply = lambda n, body: ''.join('data: ' + json.dumps(e) + '\n\n' for e in events).encode()
+    messages = [{'role': 'user', 'content': 'write the file'}]
+    first = step(rig.client(), messages)
+    rig.upstream.reply = None
+    assert first.choices[0].finish_reason == 'length' and not first.choices[0].message.tool_calls
+    assert first.choices[0].message.content.strip() == 'writing'
+    assert not directsdk._session_pool
+    messages += [as_history(first), {'role': 'user', 'content': 'continue'}]
+    second = step(rig.client(), messages)
+    assert second.usage.model_dump()['native_admission']['session'] == 'cold'
+    assert second.choices[0].message.content == 'echo continue'
+    sent = [b for m in rig.upstream.bodies[-1]['messages'] for b in (m['content'] if isinstance(m['content'], list) else [])]
+    assert not any(b.get('type') == 'tool_use' for b in sent)
 
 
 @pytest.mark.parametrize('trigger, offered', [('ghost', 'mcp__hermes__ghost'), ('bare', 'mcp__hermes__probe')])

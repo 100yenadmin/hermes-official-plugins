@@ -1214,6 +1214,9 @@ class Client:
             # next step. Intact results in another order are unrestored too, and keep the session.
             lossy = bool(admission.unrestored) and any(not text.startswith(results[i][0]) for i, text in rewritten.items())
             poisoned = poisoned or lossy
+            # The relay dropped a call cut off mid-argument (finish length), but native's transcript keeps it, where it
+            # would reach the API with no tool_result: answer, then replay Hermes' history next step.
+            poisoned = poisoned or bool(admission.capture.unparsed)
             # A name outside the inventory or a bare offered name (#39, #62) is not parked on the hermes MCP server,
             # so the session cannot continue.
             calls, offered = tool_calls(assistant['content'], hermes_names)
