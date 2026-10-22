@@ -106,7 +106,7 @@ def query():
         out({'type':'assistant','error':'rate_limit' if error.code == 429 else 'unknown','message':{'role':'assistant','model':'<synthetic>','content':[{'type':'text','text':'API Error: %d' % error.code}]}})
         out({'type':'result','subtype':'success','is_error':True,'num_turns':1})
         return
-    message, cut = None, set()
+    message, cut, partial = None, set(), {}
     for frame in raw.split('\n\n'):
         if frame.startswith('data: '):
             event = json.loads(frame[6:])
@@ -115,8 +115,10 @@ def query():
             elif event['type'] == 'content_block_start':
                 message['content'].append(event['content_block'])
             elif event['type'] == 'content_block_delta' and event['delta']['type'] == 'input_json_delta':
+                partial[event['index']] = partial.get(event['index'], '') + event['delta']['partial_json']
+            elif event['type'] == 'content_block_stop' and event['index'] in partial:
                 try:
-                    message['content'][event['index']]['input'] = json.loads(event['delta']['partial_json'] or '{}')
+                    message['content'][event['index']]['input'] = json.loads(partial.pop(event['index']) or '{}')
                 except ValueError:
                     cut.add(event['index'])  # A call cut off mid-argument (max_tokens): kept in the transcript, never run.
             elif event['type'] == 'message_delta':
