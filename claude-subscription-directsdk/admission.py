@@ -579,15 +579,6 @@ def restore_queried_turn(payload, queried):
         return unmatched()
 
 
-def thinking_display(payload):
-    """The ``thinking.display`` a request body asks the API for; None when absent or unreadable. Reads only."""
-    try:
-        display = json.loads(payload)['thinking']['display']
-    except (ValueError, TypeError, KeyError):
-        return None
-    return display if isinstance(display, str) else None
-
-
 class Capture:
     def __init__(self):
         self.message = None
@@ -737,7 +728,6 @@ class Admission:
         self.status = None
         self.failure = None
         self.unrestored = None
-        self.display = None  # thinking.display of the admitted request, as sent upstream
         self.capture = Capture()
         self.error_body = b''
         self.prefix = '/admit/' + secrets.token_urlsafe(32)
@@ -761,7 +751,7 @@ class Admission:
         anchored on that step's queried frame."""
         with self.lock:
             self.timeout, self.used, self.denied, self.queried = timeout, False, 0, queried
-            self.request_id = self.status = self.failure = self.unrestored = self.display = None
+            self.request_id = self.status = self.failure = self.unrestored = None
             self.capture, self.error_body = Capture(), b''
 
     def abort(self):
@@ -875,8 +865,6 @@ class Handler(BaseHTTPRequestHandler):
                                              session=isinstance(getattr(gate, 'first_turn', None), dict))
             payload = pin_message_breakpoint(payload, gate.queried, gate.first_turn)
             payload = stream_tool_input(payload)
-            # What the API is asked for, after every transform: the client routes the answer's thinking by it.
-            gate.display = thinking_display(payload)
             target = gate.upstream
             conn, upstream_socket = self._connect_upstream()
             if conn is None:

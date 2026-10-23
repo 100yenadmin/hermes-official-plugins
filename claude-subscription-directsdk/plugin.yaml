@@ -1,6 +1,6 @@
 name: claude-subscription-directsdk-experimental
 kind: model-provider
-version: 0.3.3+session.3
+version: 0.3.3+session.4
 manifest_version: 2
 description: Claude Subscription DirectSDK (Experimental), session-mode fork — drive your Claude Pro/Max subscription through the official Claude Code CLI; Hermes owns tools, approvals and compaction
 author: Nous Research
@@ -46,20 +46,13 @@ config_schema:
     description: >-
       Most conversations session mode keeps a Claude Code process for at once (about 400 MB each). The
       plugin lowers it to what fits in a quarter of this machine's RAM; below one, every call runs per-call.
-  progress_updates:
-    type: bool
-    default: true
-    label: Progress updates as messages
-    description: >-
-      Show the short progress notes Claude writes between tool calls as messages (Claude Code's own
-      display). The reasoning panel then shows less of Claude's thinking.
   claude_guidance:
     type: bool
     default: true
     label: Claude harness notes
     description: >-
-      Add a few notes for Claude to the system prompt of agent steps: a one-line preamble before the
-      first tool call, short updates on longer work, and how to read harness reminders.
+      Add a few notes for Claude to the system prompt of agent steps: a one-line preamble before
+      using tools, short updates on longer work, and how to read harness reminders.
   settle_answers:
     type: bool
     default: false

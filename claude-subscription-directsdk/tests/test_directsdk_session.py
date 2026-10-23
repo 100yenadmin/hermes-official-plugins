@@ -99,8 +99,7 @@ def wire():
         messages[-2]['content'][-1]['cache_control'] = {'type':'ephemeral'}
     return messages + [{'role':'system','content':[{'type':'text','text':'Today is 2026-10-05.','cache_control':{'type':'ephemeral'}}]}]
 def query():
-    display = os.environ.get('FAKE_DISPLAY')
-    body = json.dumps({'messages': wire(), **({'thinking': {'type': 'adaptive', 'display': display}} if display else {})}).encode()
+    body = json.dumps({'messages': wire()}).encode()
     try:
         raw = urllib.request.urlopen(urllib.request.Request(os.environ['ANTHROPIC_BASE_URL'] + '/v1/messages', data=body, headers={'Content-Type':'application/json'}), timeout=30).read().decode()
     except urllib.error.HTTPError as error:
@@ -185,10 +184,6 @@ def sse(message_id, blocks, stop, details=None):
         if block['type'] == 'tool_use':
             events += [{'type': 'content_block_start', 'index': index, 'content_block': dict(block, input={})},
                        {'type': 'content_block_delta', 'index': index, 'delta': {'type': 'input_json_delta', 'partial_json': json.dumps(block['input'])}}]
-        elif block['type'] == 'thinking':
-            events += [{'type': 'content_block_start', 'index': index, 'content_block': {'type': 'thinking', 'thinking': '', 'signature': ''}},
-                       {'type': 'content_block_delta', 'index': index, 'delta': {'type': 'thinking_delta', 'thinking': block['thinking']}},
-                       {'type': 'content_block_delta', 'index': index, 'delta': {'type': 'signature_delta', 'signature': 'sig'}}]
         else:
             events += [{'type': 'content_block_start', 'index': index, 'content_block': {'type': 'text', 'text': ''}},
                        {'type': 'content_block_delta', 'index': index, 'delta': {'type': 'text_delta', 'text': block['text']}}]
@@ -1624,23 +1619,3 @@ def test_close_during_active_session_turn_kills_native_and_next_turn_replays(rig
     process.wait(timeout=3)
     assert not directsdk._session_pool
     assert step(rig.client(), messages).usage.native_admission.session == 'cold'
-
-
-@pytest.mark.parametrize('display', ['updates', 'summarized'])
-def test_a_step_whose_update_became_content_reuses_its_session(rig, monkeypatch, display):
-    """Hermes re-sends the returned message with the update in content: its key matches, so the session is reused.
-    Routing follows the display sent upstream: under "summarized" the thinking stays reasoning."""
-    monkeypatch.setattr(directsdk, 'progress_updates_enabled', lambda: True)
-    rig.upstream.reply = lambda n, body: sse(f'm{n}', [{'type': 'thinking', 'thinking': 'Probing first.'},
-                                                       {'type': 'tool_use', 'id': 'toolu_u', 'name': 'mcp__hermes__probe', 'input': {}}], 'tool_use') \
-        if n == 1 else sse(f'm{n}', [{'type': 'text', 'text': 'done'}], 'end_turn')
-    reasoning = {'reasoning': {'enabled': True, 'effort': 'high'}}
-    client = rig.client()
-    client.env['FAKE_DISPLAY'] = display
-    messages = [{'role': 'user', 'content': 'go'}]
-    first = client.create(model='opus', messages=messages, tools=TOOLS, extra_body=reasoning)
-    assert (first.choices[0].message.content, first.choices[0].message.reasoning_content) == (('Probing first.', None) if display == 'updates' else (None, 'Probing first.'))
-    messages += [as_history(first), {'role': 'tool', 'tool_call_id': 'toolu_u', 'content': 'ok'}]
-    second = client.create(model='opus', messages=messages, tools=TOOLS, extra_body=reasoning)
-    assert second.usage.model_dump()['native_admission']['session'] == 'reused' and second.choices[0].message.content == 'done'
-    assert len(rig.spawned()) == 1

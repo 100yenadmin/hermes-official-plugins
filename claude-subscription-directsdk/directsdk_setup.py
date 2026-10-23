@@ -60,7 +60,6 @@ TELEMETRY_SETTING = "claude_code_telemetry"
 CONFIG_DIR_SETTING = "claude_config_dir"
 SESSION_SETTING = "session_mode"
 SESSION_POOL_SETTING = "session_pool"
-PROGRESS_SETTING = "progress_updates"
 GUIDANCE_SETTING = "claude_guidance"
 SETTLE_SETTING = "settle_answers"
 # Any one of these turns off Claude Code's feature-flag fetch, and with it every model its picker
@@ -111,11 +110,6 @@ def telemetry_enabled():
 def session_mode_enabled():
     """The ``session_mode`` plugin setting, default off; CLAUDE_SUBSCRIPTION_DIRECTSDK_SESSION_MODE overrides it when set."""
     return _flag(SESSION_SETTING, False)
-
-
-def progress_updates_enabled():
-    """The ``progress_updates`` plugin setting, default on: Claude Code's own "updates" thinking display on routes that write them."""
-    return _flag(PROGRESS_SETTING, True)
 
 
 def claude_guidance_enabled():

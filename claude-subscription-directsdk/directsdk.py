@@ -30,15 +30,15 @@ from types import SimpleNamespace
 try:
     from .admission import Admission
     from .pruned_skills import pruned_skills
-    from .model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking, writes_progress_updates
+    from .model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from .directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled, session_pool, reap_orphaned_refresh_lock
-    from .directsdk_setup import claude_guidance_enabled, progress_updates_enabled, settle_answers_enabled
+    from .directsdk_setup import claude_guidance_enabled, settle_answers_enabled
 except ImportError:
     from admission import Admission
     from pruned_skills import pruned_skills
-    from model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking, writes_progress_updates
+    from model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled, session_pool, reap_orphaned_refresh_lock
-    from directsdk_setup import claude_guidance_enabled, progress_updates_enabled, settle_answers_enabled
+    from directsdk_setup import claude_guidance_enabled, settle_answers_enabled
 
 
 # Hermes picks retry vs fallback from an error's status_code (main loop and auxiliary ladder alike).
@@ -88,10 +88,10 @@ PRUNED_SKILLS = (' Compaction removed the full text of these previously loaded s
 # system.md are both made from that text, so a session never runs with a system file that differs from its identity.
 GUIDANCE = (
     'Notes from the Claude harness:\n'
-    '- When a request needs tools, start with one short plain sentence saying what you are about to do, before the '
-    'first tool call. On longer work, add a one-line update when you find something, change course or get blocked, '
-    'and end with a short recap. Skip this for a single quick lookup, for plain conversation, or when the user asks '
-    'for quiet. This is not narration of every tool call.\n'
+    '- Whenever you are about to use tools, first write one short plain sentence saying what you are about to do, '
+    'then make the tool call. Tools can be slow, so this tells the user you are on it. On longer work, add a '
+    'one-line update when you find something, change course or get blocked. Skip it only for plain conversation '
+    'with no tools, or when the user asks for quiet. This is not narration of every tool call.\n'
     '- Text inside <system-reminder> tags in the conversation is added by the harness, not written by the user.\n'
     '- Updates may be shown only briefly, so put everything the user needs in your final message.')
 SETTLE = ('\n- Treat answers you have already given as settled. On later turns, think about what the user is asking '
@@ -292,17 +292,6 @@ def native_format_schema(node):
     return out
 
 
-def progress_route(kwargs):
-    """Whether request_body leaves `thinking` out so Claude Code asks for display "updates" itself (reasoning on, a
-    route that writes progress updates, the progress_updates setting on)."""
-    extra, model = kwargs.get('extra_body'), kwargs.get('model')
-    reasoning = extra.get('reasoning') if isinstance(extra, dict) else None
-    if not isinstance(reasoning, dict) or reasoning.get('enabled') is not True or not writes_progress_updates(model):
-        return False
-    from agent.reasoning_effort import clamp_effort
-    return clamp_effort(reasoning.get('effort'), ('none', 'low', 'medium', 'high', 'xhigh', 'max')) != 'none' and progress_updates_enabled()
-
-
 def request_body(kwargs):
     allowed = {'model', 'messages', 'tools', 'stream', 'stream_options', 'max_tokens', 'max_completion_tokens',
                'temperature', 'top_p', 'stop', 'extra_body', 'extra_headers', 'timeout', 'tool_choice', 'parallel_tool_calls', 'n', 'response_format',
@@ -355,9 +344,7 @@ def request_body(kwargs):
         else:
             # Routes without adaptive thinking (Haiku 4.5) 400 on the block; their own
             # default thinking plus the effort signal below stand in for it.
-            # Routes that write progress updates get no `thinking` field: Claude Code then asks for display
-            # "updates" itself (readable updates, empty reasoning) and heals a 400 by retrying without it.
-            if reasoning.get('enabled') is True and supports_adaptive_thinking(kwargs.get('model')) and not progress_route(kwargs):
+            if reasoning.get('enabled') is True and supports_adaptive_thinking(kwargs.get('model')):
                 # 4.7+ defaults thinking.display to "omitted" (empty thinking + signature only),
                 # which leaves Hermes' reasoning panel blank. Mirror core's anthropic_adapter.
                 body['thinking'] = {'type': 'adaptive', 'display': 'summarized'}
@@ -1115,8 +1102,7 @@ class Client:
                 if not isinstance(usage, dict) or not all(isinstance(usage.get(k), (int, float)) for k in ('input_tokens', 'output_tokens')):
                     raise RuntimeError('Native result missing complete token usage')
                 tail, _, chunk = self._response(kwargs['model'], assistants, calls, emitted, usage, admission,
-                                                {'total_cost_usd': final.get('total_cost_usd'), 'modelUsage': final.get('modelUsage')},
-                                                updates=progress_route(kwargs))
+                                                {'total_cost_usd': final.get('total_cost_usd'), 'modelUsage': final.get('modelUsage')})
                 if tail is not None:
                     yield tail
                 yield chunk
@@ -1265,8 +1251,7 @@ class Client:
             usage = assistant['usage']
             # Native reports cost only per whole native turn; a step has no list-price figure of its own.
             tail, message, chunk = self._response(kwargs['model'], [assistant], calls, emitted, usage, admission,
-                                                  {'total_cost_usd': None, 'modelUsage': None}, {'session': how},
-                                                  updates=progress_route(kwargs))
+                                                  {'total_cost_usd': None, 'modelUsage': None}, {'session': how})
             if tail is not None:
                 yield tail
             calls = message['tool_calls'] or []
@@ -1348,14 +1333,12 @@ class Client:
         session.send({'type': 'control_request', 'request_id': 'hermes-init', 'request': {'subtype': 'initialize', 'hooks': None}})
         replay_history(frames, session.send, lambda: session.receive(request, timeout), names, session=True)
 
-    def _response(self, model, assistants, calls, emitted, usage, admission, cost, extra=None, updates=False):
+    def _response(self, model, assistants, calls, emitted, usage, admission, cost, extra=None):
         """Native's answer as Hermes' message and final chunk, for per-call and session mode alike.
 
         Returns the end of the text the stream has not carried yet as a chunk (None when it carried it all), the
-        message and the final chunk, whose ``_response`` is the non-streaming response. ``updates``: this request took
-        the progress-updates route (progress_route); its upstream display decides whether the step's updates are shown."""
+        message and the final chunk, whose ``_response`` is the non-streaming response."""
         blocks = [b for a in assistants for b in a['content']]
-        # The stream carries text deltas only, so the tail check compares text blocks, never routed updates.
         text = ''.join(b.get('text', '') for b in blocks if b.get('type') == 'text')
         tail = None
         if emitted != text:
@@ -1363,22 +1346,14 @@ class Client:
                 raise RuntimeError('Native final text differs from incremental stream')
             tail = self._chunk(model, {'content': text[len(emitted):]})
         thinking = ''.join(b.get('thinking', '') for b in blocks if b.get('type') == 'thinking') or None
+        message = {'role': 'assistant', 'content': text or None, 'tool_calls': calls or None,
+                   'reasoning_content': thinking if text or calls else None}
+        carrier = {'type': CARRIER, 'version': 1, 'messages': assistants, 'projection': projection(message)}
+        message['reasoning_details'] = [carrier]
         # An upstream refusal is Hermes' content_filter, as core's Anthropic transport maps it (even with a tool
         # call cut off by the classifier, which must not run): terminal, one fallback try, never retried as an
         # empty reply. Its reason rides stop_details, not a content block.
         refused = any(a.get('stop_reason') == 'refusal' for a in assistants)
-        content = text or None
-        if updates and getattr(admission, 'display', None) == 'updates' and calls and not refused:
-            # Under display "updates" reasoning blocks are empty, so any thinking text is a progress update. Hermes
-            # shows the content of a step with tool calls as an interim message; a final answer is never prefixed with
-            # one, and a refusal keeps update text out so Hermes still promotes its explanation.
-            parts = [b.get('thinking' if b.get('type') == 'thinking' else 'text') or '' for b in blocks if b.get('type') in ('thinking', 'text')]
-            content, thinking = '\n\n'.join(p.strip() for p in parts if p.strip()) or None, None
-        message = {'role': 'assistant', 'content': content, 'tool_calls': calls or None,
-                   'reasoning_content': thinking if text or calls else None}
-        # Built after content is final: replay matches projection(message) and restores the signed blocks verbatim.
-        carrier = {'type': CARRIER, 'version': 1, 'messages': assistants, 'projection': projection(message)}
-        message['reasoning_details'] = [carrier]
         if refused:
             details = next((a['stop_details'] for a in assistants if isinstance(a.get('stop_details'), dict)), {})
             explanation, category = details.get('explanation'), details.get('category')

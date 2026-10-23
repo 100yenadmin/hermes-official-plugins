@@ -1,10 +1,19 @@
 # Changelog
 
+## [0.3.3+session.4] - Unreleased
+
+### Changed
+
+- The harness note asks for one short sentence whenever Claude is about to use tools. The "skip it for a single quick lookup" exception is gone: on a slow machine a lookup can take a minute, and with the exception Opus 5.5 skipped the sentence on lookup-shaped requests.
+
+### Removed
+
+- `progress_updates` and its routing. Opus 5.5 writes its progress notes as text blocks, which Hermes already shows as interim messages, so the routing almost never fired, and the "updates" display it requested left the reasoning panel empty. Requests with reasoning on send display "summarized" again, as before 0.3.3+session.3.
+
 ## [0.3.3+session.3] - Unreleased
 
 ### Added
 
-- `progress_updates` (on by default): with reasoning on, Opus 5.5 and Fable 5.1 requests carry no `thinking` field, so Claude Code asks for display "updates" itself. The relay records the display it sent upstream; when it was "updates", the progress notes of a step with tool calls become its content, which Hermes shows as an interim message. Final answers and refusals are unchanged.
 - `claude_guidance` (on by default): fixed Claude harness notes at the end of the system text of agent steps (requests with tools), part of the session identity. `settle_answers` (off by default) adds one more note.
 
 ## [0.3.1] - Unreleased
