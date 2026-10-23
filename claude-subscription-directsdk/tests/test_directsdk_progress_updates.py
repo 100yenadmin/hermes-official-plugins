@@ -1,4 +1,4 @@
-"""Opus 5.5 / Fable 5.1 progress updates reach Hermes as interim content."""
+"""Opus 5.5 / Fable 5.1 progress updates reach Hermes as interim content; Claude-only harness notes for agent steps."""
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -191,3 +191,27 @@ def test_non_update_requests_keep_thinking_in_reasoning(run, model, reasoning):
     # progress route, so its message stays as before.
     message = run([UPDATE, {'type': 'text', 'text': 'Then the config.'}, CALL], model=model, reasoning=reasoning).message
     assert message.content == 'Then the config.' and message.reasoning_content == 'Checking the logs first.'
+
+
+def test_the_harness_notes_close_the_system_text_of_agent_steps(run, monkeypatch):
+    messages = [{'role': 'system', 'content': 'You are eva.'}, {'role': 'user', 'content': 'go'}]
+    run([CALL], messages=messages)
+    first = run.record()
+    assert first['system'] == 'You are eva.\n\n' + directsdk.GUIDANCE and first['system'].endswith('in your final message.')
+    frames = directsdk.prepare_history(messages, {'probe': 'probe'})[1]
+    assert first['session_id'] == directsdk.conversation_session_id(first['system'], frames)
+    run([CALL], messages=messages + [{'role': 'assistant', 'content': 'hi'}, {'role': 'user', 'content': 'again'}])
+    assert run.record() == first  # stable across the calls of one conversation
+    monkeypatch.setattr(directsdk, 'settle_answers_enabled', lambda: True)
+    run([CALL], messages=messages)
+    settled = run.record()
+    assert settled['system'] == first['system'] + directsdk.SETTLE and settled['session_id'] != first['session_id']
+    monkeypatch.setattr(directsdk, 'claude_guidance_enabled', lambda: False)
+    run([CALL], messages=messages)
+    assert run.record()['system'] == 'You are eva.'
+
+
+def test_requests_without_tools_get_no_harness_notes(run):
+    run([{'type': 'text', 'text': 'A title'}], stop='end_turn', tools=None,
+        messages=[{'role': 'system', 'content': 'Title this.'}, {'role': 'user', 'content': 'go'}])
+    assert run.record()['system'] == 'Title this.'

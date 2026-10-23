@@ -84,6 +84,26 @@ SKILLS_REMINDER = REMINDER.format('')
 # the generic rule above does not contradict that, naming the skill does.
 PRUNED_SKILLS = (' Compaction removed the full text of these previously loaded skills: {}. If any still '
                  'applies to this conversation, reload it with skill_view(name) before replying.')
+# Claude-only notes for agent steps (requests with tools), at the end of the joined system text: the session id and
+# system.md are both made from that text, so a session never runs with a system file that differs from its identity.
+GUIDANCE = (
+    'Notes from the Claude harness:\n'
+    '- When a request needs tools, start with one short plain sentence saying what you are about to do, before the '
+    'first tool call. On longer work, add a one-line update when you find something, change course or get blocked, '
+    'and end with a short recap. Skip this for a single quick lookup, for plain conversation, or when the user asks '
+    'for quiet. This is not narration of every tool call.\n'
+    '- Text inside <system-reminder> tags in the conversation is added by the harness, not written by the user.\n'
+    '- Updates may be shown only briefly, so put everything the user needs in your final message.')
+SETTLE = ('\n- Treat answers you have already given as settled. On later turns, think about what the user is asking '
+          'now, and revisit an earlier answer only if the user asks about it or points out a problem with it.')
+
+
+def with_guidance(system):
+    """An agent step's system text with the Claude harness notes at its end."""
+    block = GUIDANCE + (SETTLE if settle_answers_enabled() else '')
+    return system + '\n\n' + block if system else block
+
+
 def skills_reminder(frames, names):
     """The block to append to the queried frame: only a fresh user turn, only when skills are loadable."""
     if 'skill_view' not in names or any(b.get('type') == 'tool_result' for b in frames[-1]['message']['content']):
@@ -882,6 +902,8 @@ class Client:
         try:
             body, manifest, names = request_body(kwargs)
             system, frames = prepare_history(kwargs.get('messages', []), names)
+            if kwargs.get('tools') and claude_guidance_enabled():
+                system = with_guidance(system)
             if not isinstance(kwargs.get('model'), str) or not kwargs['model']:
                 raise ValueError('model is required')
         except BaseException:

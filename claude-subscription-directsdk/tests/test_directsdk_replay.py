@@ -61,7 +61,7 @@ assert 'temperature' not in body and 'top_p' not in body
 assert body['output_config']['effort'] == 'low'
 assert sys.argv[sys.argv.index('--effort')+1] == 'low' and 'CLAUDE_CODE_EFFORT_LEVEL' not in os.environ
 assert os.environ.get('CLAUDE_CODE_ENTRYPOINT') == 'claude-desktop'  # per-call keeps it: native bills under it
-assert len(pathlib.Path(sys.argv[sys.argv.index('--system-prompt-file')+1]).read_text()) == 150000
+assert pathlib.Path(sys.argv[sys.argv.index('--system-prompt-file')+1]).read_text()[:150001] == 's' * 150000 + chr(10)  # then the harness notes
 for line in sys.stdin: pass
 for i in range(8):
  print(json.dumps({'type':'stream_event','event':{'type':'content_block_delta','delta':{'type':'text_delta','text':'x'}}}),flush=True)
