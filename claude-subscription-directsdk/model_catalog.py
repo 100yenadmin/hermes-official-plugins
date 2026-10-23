@@ -29,6 +29,11 @@ ALIASES = {
 # Haiku 4.5 rejects `thinking: {'type': 'adaptive'}` with a 400 upstream; its effort signal
 # still applies. Unknown routes keep adaptive so future models are not silently downgraded.
 NO_ADAPTIVE_THINKING = frozenset({'claude-haiku-4-5-20251001'})
+# Routes that write a progress update between tool calls (a readable `thinking` block before the call it introduces)
+# and for which Claude Code itself asks for thinking display "updates" when the extra body has no `thinking` field.
+# The docs list Opus 5.5, Fable 5.1, Sonnet 5.5, Fable 5 and Mythos 5.1; the CLI path is verified for Opus 5.5 (live
+# probe) and present for Fable 5.1 in the binary. The other three are pending verification.
+PROGRESS_UPDATES = frozenset({'claude-opus-5-5', 'claude-fable-5-1'})
 
 
 def _route_base(base):
@@ -78,6 +83,11 @@ def supports_adaptive_thinking(model):
     # and still reaches the existing `model is required` error.
     base = _route_base(model.removesuffix('[1m]')) if isinstance(model, str) else ''
     return ALIASES.get(base, base) not in NO_ADAPTIVE_THINKING
+
+
+def writes_progress_updates(model):
+    base = _route_base(model.removesuffix('[1m]')) if isinstance(model, str) else ''
+    return ALIASES.get(base, base) in PROGRESS_UPDATES
 
 
 MODEL_METADATA = {
