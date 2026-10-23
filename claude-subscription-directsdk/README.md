@@ -106,6 +106,10 @@ It is read for the active profile on every spawn, so it applies to the next requ
 
 **Session mode** (`session_mode`, off by default) and its pool size (`session_pool`, 8 by default) are described under "Per-call vs session mode" below.
 
+**Progress updates** (`progress_updates`, on by default). Opus 5.5 and Fable 5.1 write a short note between tool calls. With reasoning on, the plugin leaves the thinking display to Claude Code, which asks for "updates": the notes arrive readable and Hermes shows them as interim messages while the agent works; a final answer is never prefixed with one. The reasoning panel then shows less of Claude's thinking. Off keeps the summarized display.
+
+**Claude harness notes** (`claude_guidance`, on by default) appends a few fixed notes to the system prompt of agent steps (requests with tools): a one-line preamble before the first tool call, short updates on longer work, that `<system-reminder>` text comes from the harness, and that the final message must stand on its own. **Settled answers** (`settle_answers`, off by default) adds one more note asking Claude to treat answers it already gave as settled.
+
 ## Per-call vs session mode
 
 **Per-call** (the default) starts a fresh Claude Code process for every model call and replays the conversation into it. **Session mode** (opt-in, experimental) keeps one Claude Code process alive per Hermes conversation and sends it only what is new: the next user message, or Hermes' tool results. Per-call briefs a new assistant on the whole chat for every reply; session mode keeps the same assistant on the line.

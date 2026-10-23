@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3+session.3] - Unreleased
+
+### Added
+
+- `progress_updates` (on by default): with reasoning on, Opus 5.5 and Fable 5.1 requests carry no `thinking` field, so Claude Code asks for display "updates" itself. The relay records the display it sent upstream; when it was "updates", the progress notes of a step with tool calls become its content, which Hermes shows as an interim message. Final answers and refusals are unchanged.
+- `claude_guidance` (on by default): fixed Claude harness notes at the end of the system text of agent steps (requests with tools), part of the session identity. `settle_answers` (off by default) adds one more note.
+
 ## [0.3.1] - Unreleased
 
 ### Added
