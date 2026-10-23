@@ -1626,18 +1626,20 @@ def test_close_during_active_session_turn_kills_native_and_next_turn_replays(rig
     assert step(rig.client(), messages).usage.native_admission.session == 'cold'
 
 
-def test_a_step_whose_update_became_content_reuses_its_session(rig, monkeypatch):
-    """Hermes re-sends the returned message with the update in content: its key matches, so the session is reused."""
+@pytest.mark.parametrize('display', ['updates', 'summarized'])
+def test_a_step_whose_update_became_content_reuses_its_session(rig, monkeypatch, display):
+    """Hermes re-sends the returned message with the update in content: its key matches, so the session is reused.
+    Routing follows the display sent upstream: under "summarized" the thinking stays reasoning."""
     monkeypatch.setattr(directsdk, 'progress_updates_enabled', lambda: True)
     rig.upstream.reply = lambda n, body: sse(f'm{n}', [{'type': 'thinking', 'thinking': 'Probing first.'},
                                                        {'type': 'tool_use', 'id': 'toolu_u', 'name': 'mcp__hermes__probe', 'input': {}}], 'tool_use') \
         if n == 1 else sse(f'm{n}', [{'type': 'text', 'text': 'done'}], 'end_turn')
     reasoning = {'reasoning': {'enabled': True, 'effort': 'high'}}
     client = rig.client()
-    client.env['FAKE_DISPLAY'] = 'updates'
+    client.env['FAKE_DISPLAY'] = display
     messages = [{'role': 'user', 'content': 'go'}]
     first = client.create(model='opus', messages=messages, tools=TOOLS, extra_body=reasoning)
-    assert first.choices[0].message.content == 'Probing first.' and first.choices[0].message.reasoning_content is None
+    assert (first.choices[0].message.content, first.choices[0].message.reasoning_content) == (('Probing first.', None) if display == 'updates' else (None, 'Probing first.'))
     messages += [as_history(first), {'role': 'tool', 'tool_call_id': 'toolu_u', 'content': 'ok'}]
     second = client.create(model='opus', messages=messages, tools=TOOLS, extra_body=reasoning)
     assert second.usage.model_dump()['native_admission']['session'] == 'reused' and second.choices[0].message.content == 'done'
