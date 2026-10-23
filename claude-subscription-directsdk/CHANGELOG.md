@@ -8,7 +8,7 @@
 
 ### Removed
 
-- `progress_updates` and its routing. Opus 5.5 writes its progress notes as text blocks, which Hermes already shows as interim messages, so the routing almost never fired, and the "updates" display it requested left the reasoning panel empty. Requests with reasoning on send display "summarized" again, as before 0.3.3+session.3.
+- `progress_updates` and its routing. Opus 5.5 writes its progress notes as text blocks, which Hermes already shows as interim messages, so the routing almost never fired, and the "updates" display it requested left the reasoning panel empty. Requests that use adaptive thinking send display "summarized" again, as before 0.3.3+session.3.
 
 ## [0.3.3+session.3] - Unreleased
 
