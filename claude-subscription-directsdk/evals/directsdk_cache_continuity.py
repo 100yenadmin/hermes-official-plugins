@@ -68,6 +68,8 @@ class Peer(WirePeer):
             self.send_error(403)
             return
         self.server.wires.append(body)
+        timing = {"text_writes": [], "message_stop": None}
+        self.server.timings.append(timing)
         number = len(self.server.wires)
         self.server.signers[f"public-fixture-signature-{number}"] = body["model"]
         count = self.server.tool_count
@@ -88,6 +90,12 @@ class Peer(WirePeer):
         self.end_headers()
 
         def emit(event):
+            if event["type"] == "message_stop":
+                timing["message_stop"] = time.monotonic()
+            if event.get("delta", {}).get("type") == "text_delta":
+                if self.server.stream:
+                    time.sleep(self.server.stream_gap)
+                timing["text_writes"].append(time.monotonic())
             self.wfile.write(("event: " + event["type"] + "\ndata: " + json.dumps(event) + "\n\n").encode())
             self.wfile.flush()
 
@@ -101,6 +109,11 @@ class Peer(WirePeer):
                        {"type": "signature_delta", "signature": block["signature"]}] if kind == "thinking"
                       else [{"type": "input_json_delta", "partial_json": json.dumps(block["input"])}]
                       if kind == "tool_use" else [{"type": "text_delta", "text": block["text"]}])
+            if kind == "text" and self.server.stream:
+                text = block["text"]
+                width = (len(text) + 2) // 3
+                deltas = [{"type": "text_delta", "text": text[i:i + width]}
+                          for i in range(0, len(text), width)]
             for delta in deltas:
                 emit({"type": "content_block_delta", "index": index, "delta": delta})
             emit({"type": "content_block_stop", "index": index})
@@ -188,7 +201,7 @@ def isolated_env(tmp, port, session, subscription=False):
     return env
 
 
-def scenario(native, binary, model, name, log, subscription=False):
+def scenario(native, binary, model, name, log, subscription=False, stream=False, stream_gap=0.3):
     session = name != "S1"
     report = {"pass": True, "name": SCENARIOS[name], "boundaries": [], "requests": 0,
               "main_requests": 0, "mismatches": 0, "system_messages": [], "kills": [], "receipts": []}
@@ -202,6 +215,7 @@ def scenario(native, binary, model, name, log, subscription=False):
     log_start = len(log.events)
     with tempfile.TemporaryDirectory(prefix=f"cache-continuity-{name}-") as tmp, ThreadingHTTPServer(("127.0.0.1", 0), Peer) as peer:
         peer.wires, peer.tool_count, peer.paths, peer.signers = [], 0, [], {}
+        peer.timings, peer.stream, peer.stream_gap = [], stream, stream_gap
         worker = threading.Thread(target=peer.serve_forever, daemon=True)
         worker.start()
         env = isolated_env(tmp, peer.server_port, session, subscription)
@@ -215,7 +229,28 @@ def scenario(native, binary, model, name, log, subscription=False):
             peer.tool_count = tool_count
             peer.long_tool = main and round_number == 2
             original, start, logs = copy.deepcopy(messages), len(peer.wires), len(log.events)
-            result = client.create(model=chosen_model, messages=messages, tools=TOOLS)
+            result = client.create(model=chosen_model, messages=messages, tools=TOOLS, stream=stream)
+            if stream:
+                chunks, content_times = [], []
+                for chunk in result:
+                    chunks.append(chunk)
+                    if chunk.choices[0].delta.content:
+                        content_times.append(time.monotonic())
+                result = chunks[-1]._response
+                if tool_count == 0:
+                    timing = peer.timings[-1]
+                    early = sum(t < timing["message_stop"] for t in content_times)
+                    span = content_times[-1] - content_times[0] if content_times else 0
+                    writes = timing["text_writes"]
+                    write_span = writes[-1] - writes[0] if writes else 0
+                    incremental = early >= 2 and span >= 0.15
+                    report.setdefault("stream_timing", []).append({
+                        "turn": turn, "main": main, "content_chunks": len(content_times),
+                        "before_message_stop": early, "content_span_seconds": span,
+                        "peer_write_span_seconds": write_span,
+                        "text_write_times": writes, "message_stop_time": timing["message_stop"],
+                        "cadence": "incremental" if incremental else "single_burst", "pass": incremental})
+                    report["pass"] &= incremental
             wires = peer.wires[start:]
             events = log.events[logs:]
             modes = [re.search(r" mode=(\S+)", e).group(1) for e in events if e.startswith("session step:")]
@@ -372,13 +407,15 @@ def run_isolated(args):
     output = {"native_version": version, "native_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "root": str(root), "model": args.model,
               "subscription": subscription,
+              "stream": args.stream, "stream_gap": args.stream_gap,
               "synthetic_usage_not_cache_measurement": True, "scenarios": {}}
     for name in args.only:
         if name != "S1" and not hasattr(native, "_session_checkout"):
             output["scenarios"][name] = {"pass": None, "skipped": "root has no session mode"}
             continue
         try:
-            output["scenarios"][name] = scenario(native, binary, args.model, name, log, subscription)
+            output["scenarios"][name] = scenario(native, binary, args.model, name, log, subscription,
+                                                  args.stream, args.stream_gap)
         except OSError as error:
             output["scenarios"][name] = {"pass": False, "stopped": True,
                 "error": {"type": type(error).__name__, "message": str(error)}}
@@ -411,6 +448,9 @@ if __name__ == "__main__":
     parser.add_argument("--model", default="claude-opus-5-5")
     parser.add_argument("--subscription", action="store_true",
                         help="emulate a subscription login offline using public account fixtures")
+    parser.add_argument("--stream", action="store_true", help="check paced content delivery as well as continuity")
+    parser.add_argument("--stream-gap", type=float, default=0.3,
+                        help="seconds between text deltas; use 0 as a single-burst negative control")
     parser.add_argument("--only", default=",".join(SCENARIOS), help="comma-separated scenario ids, e.g. S3,S5")
     args = parser.parse_args()
     args.only = args.only.split(",")
