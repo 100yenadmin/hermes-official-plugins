@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.3+session.5] - Unreleased
+
+### Changed
+
+- Opt into Hermes streaming on capable hosts (upstream #31), so replies stream as they are written.
+
 ## [0.3.3+session.4] - Unreleased
 
 ### Changed
