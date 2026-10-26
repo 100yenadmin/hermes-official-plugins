@@ -7,7 +7,12 @@ user asked. The reload returned `name: "brand-voice"`.
 import json
 import time
 
-from agent.context_compressor import _PRUNED_TOOL_PLACEHOLDER, _lean_recovery_stub, _skill_pruned_marker, _sum_skill_view
+from agent.context_compressor import _PRUNED_TOOL_PLACEHOLDER, _skill_pruned_marker, _sum_skill_view
+
+try:
+    from agent.context_compressor import _lean_recovery_stub
+except ImportError:  # newer hosts moved it into context_compressor_tail
+    from agent.context_compressor_tail import _lean_recovery_stub
 
 from pruned_skills import LIMIT, pruned_skills
 
