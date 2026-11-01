@@ -1437,15 +1437,16 @@ def test_a_launch_counts_once_admitted_not_when_its_stream_ends(rig, tmp_path):
     assert directsdk._session_failures == 1
 
 
-def test_session_mode_drops_an_inherited_entrypoint(rig):
-    """A desktop entrypoint makes native send a summary request the relay denies; per-call keeps it (replay test).
+def test_session_mode_replaces_an_inherited_entrypoint(rig):
+    """A desktop entrypoint makes native send a summary request the relay denies; the session runs as hermes-agent,
+    the name subscriptions meter like the CLI (anthropics/claude-code#97074), as per-call does (replay test).
     Claude Code's own compaction stays off: Hermes owns the context. Since 2.1.299 either flag also stops idle
     compaction, which an attended session runs after ~54 min idle, before the session's idle reaper fires."""
     client = rig.client()
     client.env['CLAUDE_CODE_ENTRYPOINT'] = 'claude-desktop'
     step(client, [{'role': 'user', 'content': 'hello'}])
     (spawned,) = rig.spawned()
-    assert spawned['entrypoint'] is None
+    assert spawned['entrypoint'] == 'hermes-agent'
     assert spawned['compact'] == ['1', '1']
 
 

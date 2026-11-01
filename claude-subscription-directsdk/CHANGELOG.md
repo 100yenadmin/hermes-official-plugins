@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3+session.5] - Unreleased
+
+### Fixed
+
+- The same work uses about 1.7x less of the subscription's 5-hour window: native now runs as `hermes-agent` instead of `claude -p`'s default `sdk-cli`, a name subscriptions meter about 2x heavier per token (anthropics/claude-code#97074; live on Max with Opus 5.5: 12% vs 7% of the window for the same $2.19 of requests). A name inherited from a host (`sdk-py`, `claude-desktop`) is overwritten too, in session mode as in per-call, and native's artifact scratchpad line, which a non-SDK name switches on, stays out of every request.
+- Claude Code's own memory and instructions no longer reach Claude inside the user's message, where Claude took them for a prompt-injection attempt: native's auto memory (`MEMORY.md`) and CLAUDE.md files are not loaded (`--setting-sources ''` left auto memory and the managed CLAUDE.md on) (#195). The context native still prepends to the first user turn (the account-email reminder) keeps session mode's placement behind Hermes' frame.
+
 ## [0.3.3+session.4] - Unreleased
 
 ### Changed
