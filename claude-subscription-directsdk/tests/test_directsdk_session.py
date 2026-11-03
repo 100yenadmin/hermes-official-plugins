@@ -19,7 +19,7 @@ import directsdk
 NATIVE = r'''
 import json, os, re, sys, urllib.request
 with open(os.environ['SPAWNS'], 'a') as f:
-    f.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv[1:], 'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'), 'entrypoint': os.environ.get('CLAUDE_CODE_ENTRYPOINT'), 'compact': [os.environ.get(k) for k in ('DISABLE_COMPACT', 'DISABLE_AUTO_COMPACT')]}) + '\n')
+    f.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv[1:], 'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'), 'entrypoint': os.environ.get('CLAUDE_CODE_ENTRYPOINT'), 'compact': [os.environ.get(k) for k in ('DISABLE_COMPACT', 'DISABLE_AUTO_COMPACT')], 'memory': [os.environ.get(k) for k in ('CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'CLAUDE_CODE_DISABLE_CLAUDE_MDS')]}) + '\n')
 history, queue, rpc, answered, limits = [], [], [0], {}, {}
 first_query = True
 def out(row):
@@ -1447,6 +1447,15 @@ def test_session_mode_drops_an_inherited_entrypoint(rig):
     (spawned,) = rig.spawned()
     assert spawned['entrypoint'] is None
     assert spawned['compact'] == ['1', '1']
+
+
+def test_session_native_is_told_not_to_load_its_memory_or_claude_md(rig):
+    """Hermes owns memory and instructions (#195). A parent's "0" forces auto memory on in Claude Code; Hermes' wins."""
+    client = rig.client()
+    client.env['CLAUDE_CODE_DISABLE_AUTO_MEMORY'] = '0'
+    step(client, [{'role': 'user', 'content': 'hello'}])
+    (spawned,) = rig.spawned()
+    assert spawned['memory'] == ['1', '1']
 
 
 @pytest.mark.skipif(os.name == 'nt', reason='POSIX reaping')

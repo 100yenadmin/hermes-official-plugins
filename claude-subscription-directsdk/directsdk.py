@@ -935,6 +935,10 @@ class Client:
         apply_traffic_policy(env)
         # Hermes owns budgets; native's replayed reminder invalidates cached history.
         env['CLAUDE_CODE_TOTAL_TOKENS_REMINDER'] = 'off'
+        # Hermes owns memory and instructions. --setting-sources '' leaves auto memory and the managed
+        # CLAUDE.md loading, and native would put them in the conversation as a reminder on the user's
+        # turn, where Claude reads Claude Code's notes as text smuggled into the user's message (#195).
+        env.update(CLAUDE_CODE_DISABLE_AUTO_MEMORY='1', CLAUDE_CODE_DISABLE_CLAUDE_MDS='1')
         return env, resolved
 
     def _run(self, request, kwargs, body, manifest, names, system, frames):
