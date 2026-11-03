@@ -32,6 +32,7 @@
 
 ### Fixed
 
+- Preserve the upstream request ID in incomplete-response errors, including an HTTP 200 stream cut short by EOF or a connection reset. Only a bounded, validated ID is added to the error text and metadata, without enabling debug logging or changing retry admission.
 - Long tool calls are no longer cancelled as stalls: the relay asks the API to stream each tool's arguments as they are written (`eager_input_streaming`). Native enables that only for a first-party base URL, so behind the relay a whole-file `write_file` argument arrived in one burst after minutes of silence (live: 89.8 s with no chunk on Opus 5.5) and Hermes' stall timer killed the healthy call.
 - Report `Claude request cancelled` when a request is cancelled while native acknowledges replayed history, and include native's exit code and stderr when native exits before that acknowledgment (#122, thanks @Eros-H).
 - Restore gzip compression for large direct Anthropic requests, with a process-wide latch and one uncompressed resend when request encoding is rejected.
