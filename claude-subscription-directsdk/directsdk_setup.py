@@ -61,6 +61,7 @@ CONFIG_DIR_SETTING = "claude_config_dir"
 SESSION_SETTING = "session_mode"
 SESSION_POOL_SETTING = "session_pool"
 GUIDANCE_SETTING = "claude_guidance"
+EARLY_OPENER_SETTING = "early_opener"
 SETTLE_SETTING = "settle_answers"
 # Any one of these turns off Claude Code's feature-flag fetch, and with it every model its picker
 # only offers through a flag (#86: 11 models become 5). Off only when the user turns the setting off.
@@ -122,6 +123,11 @@ def session_mode_enabled():
 def claude_guidance_enabled():
     """The ``claude_guidance`` plugin setting, default on: the harness notes appended to agent steps' system prompt."""
     return _flag(GUIDANCE_SETTING, True)
+
+
+def early_opener_enabled():
+    """The ``early_opener`` plugin setting, default on: hand session text off at the first tool start."""
+    return _flag(EARLY_OPENER_SETTING, True)
 
 
 def settle_answers_enabled():

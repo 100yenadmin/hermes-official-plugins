@@ -32,13 +32,13 @@ try:
     from .pruned_skills import pruned_skills
     from .model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from .directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled, session_pool, reap_orphaned_refresh_lock
-    from .directsdk_setup import claude_guidance_enabled, settle_answers_enabled
+    from .directsdk_setup import claude_guidance_enabled, settle_answers_enabled, early_opener_enabled
 except ImportError:
     from admission import Admission
     from pruned_skills import pruned_skills
     from model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled, session_pool, reap_orphaned_refresh_lock
-    from directsdk_setup import claude_guidance_enabled, settle_answers_enabled
+    from directsdk_setup import claude_guidance_enabled, settle_answers_enabled, early_opener_enabled
 
 
 # Hermes picks retry vs fallback from an error's status_code (main loop and auxiliary ladder alike).
@@ -108,6 +108,26 @@ def with_guidance(system):
     """An agent step's system text with the Claude harness notes at its end."""
     block = GUIDANCE + (SETTLE if settle_answers_enabled() else '')
     return system + '\n\n' + block if system else block
+
+
+def _hermes_interim_agent():
+    """The nearest request agent on this thread, without retaining its caller frames."""
+    frame = None
+    try:
+        frame = sys._getframe(1)
+        for _ in range(64):
+            if frame is None:
+                break
+            agent = frame.f_locals.get('agent')
+            if (callable(getattr(agent, '_emit_interim_assistant_message', None))
+                    and callable(getattr(agent, '_record_delivered_interim_text', None))):
+                return agent if getattr(agent, 'interim_assistant_callback', None) is not None else None
+            frame = frame.f_back
+    except Exception:
+        return None
+    finally:
+        del frame
+    return None
 
 
 def skills_reminder(frames, names):
@@ -939,8 +959,12 @@ class Client:
             raise
         # Session mode serves tool-bearing agent steps only; auxiliary one-shots (titles, summaries) stay per-call.
         session = kwargs.get('tools') and not kwargs.get('hermes_auxiliary') and _session_enabled(self.env if self.env is not None else os.environ)
-        run = self._run_session if session else self._run
-        stream = Stream(run(request, kwargs, body, manifest, names, system, frames), request)
+        if session:
+            interim_agent = _hermes_interim_agent() if early_opener_enabled() else None
+            run = self._run_session(request, kwargs, body, manifest, names, system, frames, interim_agent)
+        else:
+            run = self._run(request, kwargs, body, manifest, names, system, frames)
+        stream = Stream(run, request)
         if kwargs.get('stream'):
             return stream
         try:
@@ -1178,7 +1202,7 @@ class Client:
             with self._lock:
                 self._requests.discard(request)
 
-    def _run_session(self, request, kwargs, body, manifest, names, system, frames):
+    def _run_session(self, request, kwargs, body, manifest, names, system, frames, interim_agent=None):
         """One Hermes step on a live native session; any mismatch rebuilds it from the full history."""
         hermes_names = {native: hermes for hermes, native in names.items()}
         started = time.monotonic()
@@ -1231,6 +1255,7 @@ class Client:
                 self._session_spawn(session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved)
             emitted, native_error, native_error_code, final = '', None, None, None
             rate_limit = None
+            handed, opener_attempted, stopped = None, False, False
             while True:
                 event = session.receive(request, timeout)
                 if event is None:
@@ -1267,7 +1292,19 @@ class Client:
                     elif delta.get('type') == 'thinking_delta':
                         yielded = True
                         yield self._chunk(kwargs['model'], {'reasoning_content': delta['thinking']})
+                    elif (native['type'] == 'content_block_start'
+                          and native.get('content_block', {}).get('type') == 'tool_use'
+                          and interim_agent is not None and not opener_attempted and not stopped
+                          and not request.cancelled.is_set() and emitted.strip()):
+                        opener_attempted = True
+                        try:
+                            interim_agent._emit_interim_assistant_message({'role': 'assistant', 'content': emitted})
+                            handed = emitted
+                            _session_log.info('session opener: handed chars=%d after=%.2fs', len(emitted), time.monotonic() - started)
+                        except Exception:
+                            _session_log.debug('session opener: handoff failed')
                     elif native['type'] == 'message_stop':
+                        stopped = True
                         capture = session.admission.capture
                         # Native now calls the hermes MCP tools; they park until the next step brings results.
                         # It runs the complete calls of a turn cut off at max_tokens too, so that turn ends the step.
@@ -1315,6 +1352,19 @@ class Client:
             if tail is not None:
                 yield tail
             calls = message['tool_calls'] or []
+            if handed is not None:
+                try:
+                    text = message['content'] or ''
+                    if calls and text != handed and text.startswith(handed):
+                        opener_tail = text[len(handed):]
+                        if opener_tail.strip():
+                            interim_agent._emit_interim_assistant_message({'role': 'assistant', 'content': opener_tail})
+                        interim_agent._record_delivered_interim_text(text)
+                        _session_log.info('session opener: tail chars=%d', len(opener_tail))
+                    elif not calls and text == handed:
+                        _session_log.info('session opener: final equals opener')
+                except Exception:
+                    _session_log.debug('session opener: step-end handoff failed')
             thinking = usage.get('output_tokens_details', {}).get('thinking_tokens', 0)
             _session_log.info('session step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s',
                            session.ident[:8] + ':' + str(session.pid), how, int(admission.used), admission.denied, bool(admission.unrestored), time.monotonic() - started,

@@ -53,6 +53,12 @@ config_schema:
     description: >-
       Add a few notes for Claude to the system prompt of agent steps: a one-line preamble before
       using tools, short updates on longer work, and how to read harness reminders.
+  early_opener:
+    type: bool
+    default: true
+    label: Early session opener
+    description: >-
+      Show the opening text as soon as Claude starts its first tool call in session mode.
   settle_answers:
     type: bool
     default: false
