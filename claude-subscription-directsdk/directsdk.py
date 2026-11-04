@@ -145,6 +145,11 @@ def _hermes_interim_text(interim_agent, text):
         return None
 
 
+def _finished_sentence(text):
+    """Whether ``text`` ends a sentence, so no token, key block or tag runs on into the step's later text."""
+    return text.rstrip().rstrip('"\'\u201d\u2019)]*_`').endswith(('.', '!', '?', ':', '\u2026', '\u3002', '\uff01', '\uff1f'))
+
+
 def skills_reminder(frames, names):
     """The block to append to the queried frame: only a fresh user turn, only when skills are loadable."""
     if 'skill_view' not in names or any(b.get('type') == 'tool_result' for b in frames[-1]['message']['content']):
@@ -1313,10 +1318,12 @@ class Client:
                           and not request.cancelled.is_set() and emitted.strip()):
                         opener_attempted = True
                         try:
-                            # The text Hermes would show at step end, so its copy then matches; text this turn already
-                            # showed stays Hermes' to place, and the opener counts once Hermes records it as shown.
+                            # Only a finished sentence Hermes would show unchanged: redacting a text cut by the tool call
+                            # can differ once the step's later text joins it. Text this turn already showed stays
+                            # Hermes' to place, and the opener counts once Hermes records it as shown.
                             opener = _hermes_interim_text(interim_agent, emitted)
-                            if opener and not interim_agent._interim_text_was_delivered(opener):
+                            if (opener and opener == emitted.strip() and _finished_sentence(opener)
+                                    and not interim_agent._interim_text_was_delivered(opener)):
                                 interim_agent._emit_interim_assistant_message({'role': 'assistant', 'content': opener})
                                 if interim_agent._interim_text_was_delivered(opener):
                                     handed = (emitted, opener)

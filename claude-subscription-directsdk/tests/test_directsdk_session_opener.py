@@ -181,19 +181,50 @@ def test_blank_tail_leaves_hermes_copy_deduplicated(opener, caplog):
     assert agent.posts == ['Checking.']
 
 
-@pytest.mark.parametrize('tail', ['', ' Then PASSWORD=hunter2hunter2hunter2 too.'], ids=['opener', 'tail'])
-def test_secret_shaped_text_is_shown_redacted_and_once(opener, caplog, tail):
+def control_posts(opener, monkeypatch, blocks):
+    """What Telegram showed for these blocks before the early opener: Hermes' own step-end copy only."""
+    directsdk._session_shutdown()
+    monkeypatch.setattr(directsdk, 'early_opener_enabled', lambda: False)
+    control = Agent()
+    control.step_end(run(opener, blocks, control).choices[0].message)
+    return control.posts
+
+
+@pytest.mark.parametrize('first, later, raw', [
+    ('Setting GITHUB_TOKEN=abc123def456ghi789jkl now.', '', 'abc123def456ghi789jkl'),
+    ('Setting GITHUB_TOKEN=abc123def456ghi789jkl now.', ' Then PASSWORD=hunter2hunter2hunter2 too.', 'hunter2hunter2'),
+    # Text cut by the tool call, which Hermes redacts or hides only once the later text joins it.
+    ('Using ghp_abcdef', 'ghijklmnop now.', 'ghp_abcdef'),
+    ('Key:\n-----BEGIN RSA PRIVATE KEY-----\nMIIEpAIBAAKCAQEA7\n', '-----END RSA PRIVATE KEY-----\nDone.', 'MIIEpAIBAAKCAQEA7'),
+    ('A <think>hidden plan.', '</think> B.', 'hidden plan'),
+    ('Using sk-abcdefghijklmnop1234', 'Found it.', 'abcdefghijklmnop'),
+    ('[ab', 'c]', '[ab'),
+], ids=['secret', 'secret-tail', 'split-token', 'split-key', 'split-think', 'token-run', 'split-marker'])
+def test_text_hermes_would_change_is_left_to_hermes(opener, monkeypatch, caplog, first, later, raw):
     agent = Agent()
-    value = 'Setting GITHUB_TOKEN=abc123def456ghi789jkl now.'
-    blocks = [text(value), call()] + ([text(tail)] if tail else [])
+    blocks = [text(first), call()] + ([text(later)] if later else [])
     result = run(opener, blocks, agent)
-    stored = _assistant_content_for_storage(agent, result.choices[0].message)
-    assert 'abc123def456ghi789jkl' not in stored  # Hermes redacts it; the test would prove nothing otherwise
+    assert agent.messages == agent.recorded == []
     agent.step_end(result.choices[0].message)
-    # The opener, then the tail Hermes' copy would have added: together exactly Hermes' stored text.
-    assert ' '.join(agent.posts) == stored and len(agent.posts) == (2 if tail else 1)
-    assert not any(secret in post for post in agent.posts for secret in ('abc123def456ghi789jkl', 'hunter2'))
-    assert 'abc123def456ghi789jkl' not in caplog.text
+    assert agent.posts == control_posts(opener, monkeypatch, blocks)
+    assert not any(raw in post for post in agent.posts)
+    assert raw not in caplog.text
+
+
+def test_unfinished_sentence_is_left_to_hermes(opener, monkeypatch):
+    agent = Agent()
+    result = run(opener, [text('Checking'), call()], agent)
+    assert agent.messages == []
+    agent.step_end(result.choices[0].message)
+    assert agent.posts == ['Checking']
+
+
+@pytest.mark.parametrize('value, expected', [
+    ('Checking.', True), ('Here is the plan:', True), ('On it!', True), ('**Checking now.**', True),
+    ('Let me check (quickly).', True), ('\u78ba\u8a8d\u3057\u307e\u3059\u3002', True), ('Checking', False),
+    ('Using ghp_abcdef', False), ('Done \U0001f440', False)])
+def test_finished_sentence(value, expected):
+    assert directsdk._finished_sentence(value) is expected
 
 
 def test_bare_marker_opener_is_left_to_hermes(opener):
