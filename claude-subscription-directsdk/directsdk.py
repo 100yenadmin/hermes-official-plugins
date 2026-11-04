@@ -120,7 +120,8 @@ def _hermes_interim_agent():
                 break
             agent = frame.f_locals.get('agent')
             if (callable(getattr(agent, '_emit_interim_assistant_message', None))
-                    and callable(getattr(agent, '_record_delivered_interim_text', None))):
+                    and callable(getattr(agent, '_record_delivered_interim_text', None))
+                    and callable(getattr(agent, '_interim_text_was_delivered', None))):
                 return agent if getattr(agent, 'interim_assistant_callback', None) is not None else None
             frame = frame.f_back
     except Exception:
@@ -128,6 +129,20 @@ def _hermes_interim_agent():
     finally:
         del frame
     return None
+
+
+def _hermes_interim_text(interim_agent, text):
+    """``text`` as Hermes shows a tool step's text at step end (bare-marker drop, then the storage boundary's
+    think-strip and secret redaction), or None when Hermes' helpers are unavailable."""
+    try:
+        from agent.chat_completion_helpers import _assistant_content_for_storage
+        from agent.conversation_loop import _STALE_MARKER_RE
+        if _STALE_MARKER_RE.fullmatch(text.strip()):
+            return ''
+        visible = _assistant_content_for_storage(interim_agent, SimpleNamespace(content=text))
+        return visible if isinstance(visible, str) else None
+    except Exception:
+        return None
 
 
 def skills_reminder(frames, names):
@@ -1298,9 +1313,14 @@ class Client:
                           and not request.cancelled.is_set() and emitted.strip()):
                         opener_attempted = True
                         try:
-                            interim_agent._emit_interim_assistant_message({'role': 'assistant', 'content': emitted})
-                            handed = emitted
-                            _session_log.info('session opener: handed chars=%d after=%.2fs', len(emitted), time.monotonic() - started)
+                            # The text Hermes would show at step end, so its copy then matches; text this turn already
+                            # showed stays Hermes' to place, and the opener counts once Hermes records it as shown.
+                            opener = _hermes_interim_text(interim_agent, emitted)
+                            if opener and not interim_agent._interim_text_was_delivered(opener):
+                                interim_agent._emit_interim_assistant_message({'role': 'assistant', 'content': opener})
+                                if interim_agent._interim_text_was_delivered(opener):
+                                    handed = (emitted, opener)
+                                    _session_log.info('session opener: handed chars=%d after=%.2fs', len(opener), time.monotonic() - started)
                         except Exception:
                             _session_log.debug('session opener: handoff failed')
                     elif native['type'] == 'message_stop':
@@ -1354,14 +1374,19 @@ class Client:
             calls = message['tool_calls'] or []
             if handed is not None:
                 try:
+                    raw, shown = handed
                     text = message['content'] or ''
-                    if calls and text != handed and text.startswith(handed):
-                        opener_tail = text[len(handed):]
-                        if opener_tail.strip():
+                    if calls and text != raw and text.startswith(raw):
+                        # Hermes skips its step-end copy only when it equals a recorded text: record the whole once
+                        # the opener and the tail are both shown. Otherwise Hermes posts the whole: nothing is lost.
+                        whole = _hermes_interim_text(interim_agent, text)
+                        if whole and whole != shown and whole.startswith(shown):
+                            opener_tail = whole[len(shown):]
                             interim_agent._emit_interim_assistant_message({'role': 'assistant', 'content': opener_tail})
-                        interim_agent._record_delivered_interim_text(text)
-                        _session_log.info('session opener: tail chars=%d', len(opener_tail))
-                    elif not calls and text == handed:
+                            if interim_agent._interim_text_was_delivered(opener_tail):
+                                interim_agent._record_delivered_interim_text(whole)
+                            _session_log.info('session opener: tail chars=%d', len(opener_tail))
+                    elif not calls and text == raw:
                         _session_log.info('session opener: final equals opener')
                 except Exception:
                     _session_log.debug('session opener: step-end handoff failed')
