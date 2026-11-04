@@ -7,7 +7,11 @@ user asked. The reload returned `name: "brand-voice"`.
 import json
 import time
 
-from agent.context_compressor import _PRUNED_TOOL_PLACEHOLDER, _lean_recovery_stub, _skill_pruned_marker, _sum_skill_view
+from agent.context_compressor import _PRUNED_TOOL_PLACEHOLDER, _skill_pruned_marker, _sum_skill_view
+try:  # core dropped lean tail stubs (hermes-agent 036c31d24c); the rest still runs against the installed core
+    from agent.context_compressor import _lean_recovery_stub
+except ImportError:
+    _lean_recovery_stub = None
 
 from pruned_skills import LIMIT, pruned_skills
 
@@ -90,13 +94,14 @@ def test_results_without_the_skill_text_do_not_count_as_reloads():
 
 
 def test_compaction_stubs_on_a_main_file_view_count_as_pruned():
-    for stub in (_lean_recovery_stub('skill_view', 9000, ''), _lean_recovery_stub('', 9000, 'sess'),
-                 '[skill_view] name=brand-voice (4,000 chars)',
+    lean = (_lean_recovery_stub('skill_view', 9000, ''), _lean_recovery_stub('', 9000, 'sess')) if _lean_recovery_stub else ()
+    for stub in (*lean, '[skill_view] name=brand-voice (4,000 chars)',
                  _PRUNED_TOOL_PLACEHOLDER, [{'type': 'text', 'text': _PRUNED_TOOL_PLACEHOLDER}],
                  '[skill_view] name=brand-voice (9,000 chars) [SKILL_PRUNED: content lost'):  # truncated marker
         assert pruned_skills([view('v1', 'brand-voice'), result('v1', stub)], TOOL) == (['brand-voice'], 0)
-    demoted = _lean_recovery_stub('terminal', 9000, '')
-    assert pruned_skills([view('v1', 'ls', tool='mcp__hermes__terminal'), result('v1', demoted)], TOOL) == ([], 0)
+    if _lean_recovery_stub:
+        demoted = _lean_recovery_stub('terminal', 9000, '')
+        assert pruned_skills([view('v1', 'ls', tool='mcp__hermes__terminal'), result('v1', demoted)], TOOL) == ([], 0)
 
 
 def test_markers_inside_unrelated_output_or_reference_views_name_nothing():
@@ -128,8 +133,8 @@ def test_pasted_runs_of_the_marker_prefix_stay_linear():
 
 def test_core_marker_and_stubs_are_recognized():
     """Core's own output, so a wording change there fails here instead of silently disabling detection."""
+    lean = [view('v2', 'z'), result('v2', _lean_recovery_stub('skill_view', 9000, 'sess')),
+            view('v3', 'w'), result('v3', _lean_recovery_stub('', 9000, ''))] if _lean_recovery_stub else []
     frames = [view('v1', 'x/y'), result('v1', _sum_skill_view('skill_view', {'name': 'x/y'}, '', 9000, 1)),
-              view('v2', 'z'), result('v2', _lean_recovery_stub('skill_view', 9000, 'sess')),
-              view('v3', 'w'), result('v3', _lean_recovery_stub('', 9000, '')),
-              text('assistant', _skill_pruned_marker('social-posting'))]
-    assert pruned_skills(frames, TOOL) == (['x/y', 'z', 'w', 'social-posting'], 0)
+              *lean, text('assistant', _skill_pruned_marker('social-posting'))]
+    assert pruned_skills(frames, TOOL) == (['x/y', *(['z', 'w'] if lean else []), 'social-posting'], 0)
