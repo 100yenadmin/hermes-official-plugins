@@ -43,7 +43,7 @@ PUBLIC_EMAIL = "public@example.invalid"
 PUBLIC_UUID = "00000000-0000-0000-0000-000000000000"
 EMAIL_REMINDER = "The user's email address is"
 # Hermes offers skill_view whenever skills exist (eva always does), so every plain user turn carries the skills reminder;
-# a restart must replay the kept-alive opening with it and with native's account context (--subscription) in place.
+# a restart must replay the kept-alive opening with it, while native's account context stays out of the wire.
 TOOLS = TOOLS + [{"type": "function", "function": {"name": "skill_view", "description": "View a skill",
           "parameters": {"type": "object", "properties": {"name": {"type": "string"}}}}}]
 
@@ -192,6 +192,15 @@ def scenario(native, binary, model, name, log, subscription=False):
     session = name != "S1"
     report = {"pass": True, "name": SCENARIOS[name], "boundaries": [], "requests": 0,
               "main_requests": 0, "mismatches": 0, "system_messages": [], "kills": [], "receipts": []}
+    admission = sys.modules[native.Admission.__module__]
+    frame_first = admission._frame_first
+    report["native_account_context_requests"] = 0
+
+    def observe_context(messages, queried, memory=None):
+        # Observe synthetic native input before dropping it; never keep the context text.
+        report["native_account_context_requests"] += any(EMAIL_REMINDER in n.get("text", "") for n in nodes(messages))
+        return frame_first(messages, queried, memory)
+
     previous, history = {}, [{"role": "system", "content": SYSTEM}]
     idle, cap = getattr(native, "SESSION_IDLE_SECONDS", None), getattr(native, "_session_cap", None)
     if session:
@@ -305,6 +314,7 @@ def scenario(native, binary, model, name, log, subscription=False):
                 report["pass"] &= restored
             return assistant
 
+        admission._frame_first = observe_context
         try:
             for turn in range(1, 7):
                 if turn > 1:
@@ -338,14 +348,15 @@ def scenario(native, binary, model, name, log, subscription=False):
             if session:
                 native._session_shutdown()
                 native.SESSION_IDLE_SECONDS, native._session_cap = idle, cap
+            admission._frame_first = frame_first
             peer.shutdown()
             worker.join(timeout=5)
             report["requests"] = len(peer.wires)
             report["account_email_reminder_requests"] = sum(
                 any(EMAIL_REMINDER in n.get("text", "") for n in nodes(wire)) for wire in peer.wires)
             if subscription:
-                report["subscription_emulated"] = report["account_email_reminder_requests"] > 0
-                report["pass"] &= report["subscription_emulated"]
+                report["subscription_emulated"] = report["native_account_context_requests"] > 0
+                report["pass"] &= report["subscription_emulated"] and report["account_email_reminder_requests"] == 0
             report["peer_paths"] = peer.paths
             report["main_requests"] = sum(r["main"] for r in report["receipts"])
             report["kills"] = [e for e in log.events[log_start:] if e.startswith("session kill:")]

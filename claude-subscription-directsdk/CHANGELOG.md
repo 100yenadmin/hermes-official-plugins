@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.3.3+session.6] - Unreleased
+
+- Record Claude Code's subscription rate-limit events and log their window and usage metadata in per-call and session mode.
+- Drop Claude Code's prepended account context and memory in both modes, keeping session history stable across live requests and restarts.
+
 ## [0.3.3+session.5] - Unreleased
 
 ### Fixed

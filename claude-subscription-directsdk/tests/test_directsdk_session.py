@@ -913,7 +913,7 @@ def test_session_live_first_turn_and_cached_prefix_replay_unchanged(rig):
     bodies = rig.upstream.bodies
     first_turn = (0, len(bodies[0]['messages'][0]['content']) - 1)
     assert all(prefix(body, first_turn) == prefix(bodies[0], first_turn) for body in bodies[1:])
-    assert all([b['text'] for b in body['messages'][0]['content']] == ['call probe in parallel', REMINDER]
+    assert all([b['text'] for b in body['messages'][0]['content']] == ['call probe in parallel']
                for body in bodies)
     for before, after in zip(bodies, bodies[1:]):
         mark = message_marks(before)[-1] if message_marks(before) else (0, 0)
@@ -926,8 +926,8 @@ def test_session_steps_get_mains_restoration_and_breakpoint_pinning(rig):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(context_client(rig), messages)
     calls = first.choices[0].message.tool_calls
-    # #77: put the frame first; sticky memory preserves that order on later session requests too.
-    assert [b['text'] for b in rig.upstream.bodies[0]['messages'][0]['content']] == ['call probe in parallel', REMINDER]
+    # #77/#195: drop native context; sticky memory repeats the drop on later session requests too.
+    assert [b['text'] for b in rig.upstream.bodies[0]['messages'][0]['content']] == ['call probe in parallel']
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': k} for c, k in zip(calls, ('APPLE', 'BANANA'))]
     second = step(context_client(rig), messages)
     assert second.usage.model_dump()['native_admission']['session'] == 'reused'
@@ -952,7 +952,7 @@ def test_cold_replay_reads_the_session_first_turn_frame_prefix(rig):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(context_client(rig), messages)
     before = rig.upstream.bodies[0]
-    assert [b['text'] for b in before['messages'][0]['content']] == ['call probe in parallel', REMINDER]
+    assert [b['text'] for b in before['messages'][0]['content']] == ['call probe in parallel']
     (session,) = directsdk._session_pool
     assert session.admission.first_turn['permutation'] == (1, 1)
     directsdk._session_shutdown()

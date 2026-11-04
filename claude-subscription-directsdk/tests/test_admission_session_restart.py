@@ -63,7 +63,7 @@ def test_restart_boundaries_replay_completed_turn_prefix(rounds, dual):
     first, second, third = [turn(n, rounds) for n in (1, 2, 3)]
     p1 = {}
     opening = pinned(native(first[:1], 0, dual), first[0]['content'], p1)
-    assert [_plain(b) for b in opening['messages'][0]['content']] == first[0]['content'] + CONTEXT
+    assert [_plain(b) for b in opening['messages'][0]['content']] == first[0]['content']
     p1_last = pinned(native(first + second, 0, dual), second[-1]['content'], p1)
 
     p2 = {}
@@ -84,11 +84,11 @@ def test_restart_boundaries_replay_completed_turn_prefix(rounds, dual):
                       fourth[0]['content'], p3)
     assert plain_prefix(p3_first['messages'][:start4]) == plain_prefix(p2_last['messages'][:-1])
     for body in (p2_first, p2_last, p3_first):
-        assert [_plain(b) for b in body['messages'][0]['content']] == first[0]['content'] + CONTEXT
+        assert [_plain(b) for b in body['messages'][0]['content']] == first[0]['content']
         assert _breakpoints(body) <= 4
 
 
-def test_session_date_normalization_preserves_remembered_context_relocation():
+def test_session_date_normalization_preserves_remembered_context_drop():
     first, second = turn(1, 1), turn(2, 1)
     memory = {}
     for messages in (first + second[:1], first + second):
@@ -98,20 +98,20 @@ def test_session_date_normalization_preserves_remembered_context_relocation():
         normalized = stable_request_context(wire(body), messages[-1]['content'], session=True)
         out = json.loads(pin_message_breakpoint(normalized, messages[-1]['content'], memory))
         assert out['messages'][1]['content'] == env + '\n\n' + date
-        assert [_plain(b) for b in out['messages'][0]['content']] == first[0]['content'] + CONTEXT
+        assert [_plain(b) for b in out['messages'][0]['content']] == first[0]['content']
         assert [_plain(b) for b in out['messages'][len(first) + 1]['content']] == second[0]['content']
         assert memory == {'context': {'index': len(first) + 1, 'blocks': CONTEXT}}
         assert len(out['messages']) == len(body['messages']) - 1
         assert _breakpoints(out) <= 4
 
 
-def legacy_expected(body, queried, permutation=False):
-    """Expected #77 layout and marker folding for these short-loop fixtures."""
+def expected_wire(body, queried, drop=False):
+    """Expected context-free layout and marker folding for these short-loop fixtures."""
     expected = copy.deepcopy(body)
     messages = expected['messages']
-    if permutation:
+    if drop:
         content = messages[0]['content']
-        messages[0]['content'] = content[len(CONTEXT):] + content[:len(CONTEXT)]
+        messages[0]['content'] = content[len(CONTEXT):]
     last = max((i for i, m in enumerate(messages) if m['role'] == 'assistant'), default=-1)
     newest = messages[last + 1]
     matches = 0
@@ -128,22 +128,22 @@ def test_kept_alive_and_per_call_wire_output_remains_byte_identical():
     first, second, third = [turn(n, 1) for n in (1, 2, 3)]
     memory = {}
     body = native(first[:1], 0)
-    assert pin_message_breakpoint(wire(body), first[0]['content'], memory) == legacy_expected(
-        body, first[0]['content'], permutation=True)
+    assert pin_message_breakpoint(wire(body), first[0]['content'], memory) == expected_wire(
+        body, first[0]['content'], drop=True)
     for messages in (first, first + second, first + second + third):
         body, queried = native(messages, 0), messages[-1]['content']
-        assert pin_message_breakpoint(wire(body), queried, memory) == legacy_expected(body, queried, permutation=True)
-    # Per-call mode still reorders only the opening turn, regardless of launch position.
+        assert pin_message_breakpoint(wire(body), queried, memory) == expected_wire(body, queried, drop=True)
+    # Per-call mode still drops only on the opening turn, regardless of launch position.
     for messages, launch, queried in ((first[:1], 0, first[0]['content']),
                                      (first + second + third[:1], len(first + second), third[0]['content']),
                                      (first + second + third, len(first + second), third[-1]['content'])):
         body = native(messages, launch)
-        assert pin_message_breakpoint(wire(body), queried, None) == legacy_expected(
-            body, queried, permutation=len(messages) == 1)
+        assert pin_message_breakpoint(wire(body), queried, None) == expected_wire(
+            body, queried, drop=len(messages) == 1)
 
 
 @pytest.mark.parametrize('case', ['missing-frame', 'duplicate-frame', 'frame-first', 'cache-control',
-                                 'metadata', 'non-text', 'string-newest', 'string-opening'])
+                                 'metadata', 'non-text', 'string-newest'])
 def test_restart_discovery_fails_open(case):
     first, second = turn(1, 1), turn(2, 1)
     body = native(first + second[:1], len(first))
@@ -163,13 +163,11 @@ def test_restart_discovery_fails_open(case):
         newest[0] = {'type': 'image', 'source': {'type': 'url', 'url': 'https://example.invalid/image'}}
     elif case == 'string-newest':
         body['messages'][-2]['content'] = 'scalar'
-    elif case == 'string-opening':
-        body['messages'][0]['content'] = 'scalar'
     before = copy.deepcopy(body['messages'])
     memory = {}
     out = pinned(body, queried, memory)
     assert plain_prefix(out['messages']) == plain_prefix(before)
-    assert memory['context'] is None if case != 'string-opening' else isinstance(memory['context'], dict)
+    assert memory['context'] is None
     # Discovery never retries, even when a later tool frame could otherwise match.
     valid = native(first + second[:1], len(first))['messages']
     if memory['context'] is None:
@@ -177,7 +175,7 @@ def test_restart_discovery_fails_open(case):
         assert memory == {'context': None}
 
 
-@pytest.mark.parametrize('case', ['short-history', 'wrong-role', 'changed-context', 'already-appended', 'string-content'])
+@pytest.mark.parametrize('case', ['short-history', 'wrong-role', 'changed-context', 'already-dropped', 'string-content'])
 def test_recorded_context_mismatches_change_nothing(case):
     first, second = turn(1, 1), turn(2, 1)
     memory = {}
@@ -190,10 +188,37 @@ def test_recorded_context_mismatches_change_nothing(case):
         messages[index]['role'] = 'assistant'
     elif case == 'changed-context':
         messages[index]['content'][0]['text'] += ' changed'
-    elif case == 'already-appended':
-        messages[0]['content'] += copy.deepcopy(CONTEXT)
+    elif case == 'already-dropped':
+        del messages[index]['content'][:len(CONTEXT)]
     elif case == 'string-content':
         messages[index]['content'] = 'scalar'
     before = copy.deepcopy(messages)
     assert not _frame_first(messages, second[-1]['content'], memory)
     assert messages == before
+
+
+@pytest.mark.parametrize('dual', [False, True])
+def test_tool_result_restart_replays_context_free_kept_history(dual):
+    from admission import restore_queried_turn
+    first = turn(1, 2)
+    memory = {}
+    opening = pinned(native(first[:1], 0, dual), first[0]['content'], memory)
+    assert [_plain(b) for b in opening['messages'][0]['content']] == first[0]['content']
+    kept = pinned(native(first, 0, dual), first[-1]['content'], memory)
+    # Native 2.1.306+ embeds the launch reminder inside the final result on restart.
+    restarted = native(first, 0, dual)
+    del restarted['messages'][0]['content'][:len(CONTEXT)]
+    result = restarted['messages'][-2]['content'][-1]
+    result['content'] = [{'type': 'text', 'text': result['content']}, *copy.deepcopy(CONTEXT)]
+    queried = copy.deepcopy(first[-1]['content'])
+    restored = restore_queried_turn(wire(restarted), queried)
+    fresh_memory = {}
+    replay = json.loads(pin_message_breakpoint(restored, queried, fresh_memory))
+    assert plain_prefix(replay['messages']) == plain_prefix(kept['messages'])
+    assert _breakpoints(replay) <= 4
+    assert fresh_memory == {'context': None}
+    # The step after the restart keeps the same completed prefix.
+    later = native(first + turn(2, 0), 0, dual)
+    del later['messages'][0]['content'][:len(CONTEXT)]
+    later_out = pinned(later, later['messages'][-2]['content'], fresh_memory)
+    assert plain_prefix(later_out['messages'][:len(replay['messages']) - 1]) == plain_prefix(replay['messages'][:-1])

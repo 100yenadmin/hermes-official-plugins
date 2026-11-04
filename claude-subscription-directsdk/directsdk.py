@@ -661,6 +661,40 @@ def _with_login_identity(env):
     return env
 
 
+def _rate_limit_summary(event) -> "dict | None":
+    """Secret-free summary of native's ``rate_limit_event`` (#43).
+
+    ``overageStatus: "allowed"`` only means overage is permitted, not in use;
+    paid use is ``isUsingOverage`` true or the ``overage`` window type.
+    Subscription windows (``five_hour``, ``seven_day``, ``seven_day_opus``,
+    ``seven_day_sonnet``, ``seven_day_overage_included``) are not paid use."""
+    info = event.get('rate_limit_info') if isinstance(event, dict) else None
+    if not isinstance(info, dict):
+        return None
+    window = str(info.get('rateLimitType') or '')
+    summary = {'window': window, 'overage_status': str(info.get('overageStatus') or ''),
+               'using_overage': bool(info.get('isUsingOverage')) or window == 'overage'}
+    if isinstance(info.get('status'), str):
+        summary['status'] = info['status']
+    for native, key, convert in (('utilization', 'utilization', float),
+                                 ('surpassedThreshold', 'surpassed_threshold', float),
+                                 ('resetsAt', 'resets_at', int)):
+        value = info.get(native)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            summary[key] = convert(value)
+    return summary
+
+
+def _log_rate_limit(summary):
+    summary = summary or {}
+    _session_log.info('rate limit: window=%s status=%s utilization=%s surpassed=%s resets_at=%s overage=%s using_overage=%d',
+                      summary.get('window') or '-', summary.get('status') or '-',
+                      '%.3f' % summary['utilization'] if 'utilization' in summary else '-',
+                      '%.2f' % summary['surpassed_threshold'] if 'surpassed_threshold' in summary else '-',
+                      str(summary['resets_at']) if 'resets_at' in summary else '-',
+                      summary.get('overage_status') or '-', bool(summary.get('using_overage')))
+
+
 def _stderr_tail(native_stderr):
     """The first native stderr lines, for the raised error - a gateway-only failure with
     stderr sent to DEVNULL is undiagnosable (#44): the reporter had to patch the plugin to
@@ -1041,6 +1075,7 @@ class Client:
                 replay_history(frames, send, receive, names, exited=replay_exited, tail=lambda: _stderr_tail(native_stderr))
                 send(None)
                 assistants, results, stopped, emitted = [], [], False, ''
+                rate_limit = None
                 native_error = native_error_code = None
                 fast = False
                 while True:
@@ -1059,6 +1094,12 @@ class Client:
                         if _fast_eligible(event, request.admission, stopped, native_error):
                             fast = True
                             break
+                    elif kind == 'rate_limit_event':
+                        # Native reports the subscription window state in-stream (#43).
+                        summary = _rate_limit_summary(event)
+                        _log_rate_limit(summary)
+                        if summary:
+                            rate_limit = summary
                     elif kind == 'stream_event':
                         native = event['event']
                         if native['type'] == 'message_stop':
@@ -1113,7 +1154,8 @@ class Client:
                 if not isinstance(usage, dict) or not all(isinstance(usage.get(k), (int, float)) for k in ('input_tokens', 'output_tokens')):
                     raise RuntimeError('Native result missing complete token usage')
                 tail, _, chunk = self._response(kwargs['model'], assistants, calls, emitted, usage, admission,
-                                                {'total_cost_usd': final.get('total_cost_usd'), 'modelUsage': final.get('modelUsage')})
+                                                {'total_cost_usd': final.get('total_cost_usd'), 'modelUsage': final.get('modelUsage')},
+                                                {'rate_limit': rate_limit} if rate_limit else None)
                 if tail is not None:
                     yield tail
                 yield chunk
@@ -1174,7 +1216,7 @@ class Client:
                     reminder = skills_reminder(frames, names)
                     if reminder:
                         frame['message']['content'].append(reminder)
-                    # Anchor on the frame as sent: native's account context must follow the reminder too.
+                    # Anchor on the whole sent frame so Hermes' skills reminder is retained.
                     session.admission.rearm(timeout, frame['message']['content'])
                     session.send(frame)
                 else:
@@ -1188,6 +1230,7 @@ class Client:
             else:
                 self._session_spawn(session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved)
             emitted, native_error, native_error_code, final = '', None, None, None
+            rate_limit = None
             while True:
                 event = session.receive(request, timeout)
                 if event is None:
@@ -1209,6 +1252,11 @@ class Client:
                     for block in event.get('message', {}).get('content') or []:
                         if isinstance(block, dict) and block.get('type') == 'tool_result' and block.get('tool_use_id') in results:
                             rewritten[block['tool_use_id']] = _native_text(block.get('content'))
+                elif kind == 'rate_limit_event':
+                    summary = _rate_limit_summary(event)
+                    _log_rate_limit(summary)
+                    if summary:
+                        rate_limit = summary
                 elif kind == 'stream_event':
                     native = event['event']
                     delta = native.get('delta', {})
@@ -1262,7 +1310,8 @@ class Client:
             usage = assistant['usage']
             # Native reports cost only per whole native turn; a step has no list-price figure of its own.
             tail, message, chunk = self._response(kwargs['model'], [assistant], calls, emitted, usage, admission,
-                                                  {'total_cost_usd': None, 'modelUsage': None}, {'session': how})
+                                                  {'total_cost_usd': None, 'modelUsage': None},
+                                                  {'session': how, **({'rate_limit': rate_limit} if rate_limit else {})})
             if tail is not None:
                 yield tail
             calls = message['tool_calls'] or []
@@ -1325,8 +1374,8 @@ class Client:
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.
         env.update(MCP_TOOL_TIMEOUT='86400000', MAX_MCP_OUTPUT_TOKENS='100000000')
         # The queried frame lets the relay keep the cache breakpoint off native's per-request context. It includes the
-        # skills reminder replay_history adds, so native's account context follows the whole sent frame in the opening
-        # request, where the relay also puts it after a restart; otherwise every restart rewrites the cache.
+        # skills reminder replay_history adds, so the relay drops only native's account context ahead of the whole
+        # sent frame. On restarts this anchor is the newest frame, including tool-result frames (#5).
         reminder = skills_reminder(frames, names) if frames[-1]['type'] == 'user' else None
         queried = frames[-1]['message']['content'] + ([reminder] if reminder else [])
         session.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=queried, first_turn={})

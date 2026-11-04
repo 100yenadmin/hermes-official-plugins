@@ -2,8 +2,9 @@
 
 In subscription mode native prepends its per-request context block (the account-email
 reminder) to the conversation's first user turn, but replays that turn without it on every
-later request. Unless the relay puts Hermes' own frame first, call #2 re-writes the whole
-first turn. These fixtures use native's real 2.1.280 message layout.
+later request. Unless the relay sends Hermes' own frame alone, call #2 re-writes the whole
+first turn, and Claude reads native's context as part of the user's message (#195). These
+fixtures use native's real 2.1.280 message layout.
 """
 import copy
 import json
@@ -83,12 +84,11 @@ def test_first_request_caches_a_prefix_the_second_request_replays():
     assert prefix[-1] == ('user', json.dumps(FRAME, sort_keys=True))
 
 
-def test_first_turn_keeps_every_block_and_moves_only_the_marker():
+def test_first_turn_is_sent_as_later_requests_replay_it_with_one_marker():
     out = json.loads(pin_message_breakpoint(wire(call1()), [FRAME]))
     first_turn = out['messages'][0]['content']
-    # native's context still reaches the model, now after the host frame as on every later turn
-    assert [{k: v for k, v in b.items() if k != 'cache_control'} for b in first_turn] == [FRAME, REMINDER]
-    assert first_turn[0]['cache_control'] == MARKER
+    # native's context is dropped from the user's turn, as every later request replays it
+    assert first_turn == [{**FRAME, 'cache_control': MARKER}]
     assert sum('cache_control' in b for m in out['messages'] if isinstance(m['content'], list)
                for b in m['content']) == 1
     assert out['messages'][1]['content'][0]['text'].startswith(ENV)
@@ -104,7 +104,7 @@ def test_first_turn_keeps_every_block_and_moves_only_the_marker():
     # the frame is not in the turn at all (native rewrote it)
     ([{'role': 'user', 'content': [REMINDER, {'type': 'text', 'text': 'rewritten'}]}], [FRAME]),
 ])
-def test_first_turn_is_only_reordered_when_the_frame_is_unambiguous(messages, queried):
+def test_first_turn_is_only_changed_when_the_frame_is_unambiguous(messages, queried):
     messages = copy.deepcopy(messages)
     messages[-1]['content'][-1] = {**messages[-1]['content'][-1], 'cache_control': MARKER}
     raw = wire(messages)
@@ -134,6 +134,40 @@ def test_first_turn_memory_requires_identical_plain_content(changed):
         messages[0]['content'][0]['text'] += ' changed'
     before = copy.deepcopy(messages)
     assert _frame_first(messages, [{'type': 'tool_result', 'tool_use_id': 't1', 'content': 'alpha'}], memory) is (not changed)
-    expected = before[0]['content'] if changed else list(reversed(before[0]['content']))
+    expected = before[0]['content'] if changed else [{**before[0]['content'][1], 'cache_control': MARKER}]
     assert messages[0]['content'] == expected
     assert messages[1:] == before[1:]
+
+
+@pytest.mark.parametrize('marked', [False, True])
+def test_drop_multiple_plain_prefixes_preserves_frame_marker_and_skills(marked):
+    from admission import _breakpoints
+    from directsdk import SKILLS_REMINDER
+    frame = [{**FRAME, 'cache_control': MARKER}, {'type': 'text', 'text': SKILLS_REMINDER}]
+    leading = [dict(REMINDER), {'type': 'text', 'text': 'native memory'}]
+    if marked:
+        leading[0]['cache_control'] = {'type': 'ephemeral'}
+    body = {'messages': [{'role': 'user', 'content': leading + frame}],
+            'system': [{'type': 'text', 'text': 'system', 'cache_control': MARKER}],
+            'tools': [{'name': 'probe', 'cache_control': MARKER}]}
+    out = json.loads(pin_message_breakpoint(json.dumps(body).encode(), frame))
+    assert out['messages'][0]['content'] == frame
+    assert _breakpoints(out) == 3
+
+
+@pytest.mark.parametrize('prefix', [REMINDER, {**REMINDER, 'cache_control': MARKER}])
+def test_drop_unmarked_opening_or_transfer_dropped_marker(prefix):
+    out = json.loads(pin_message_breakpoint(wire([{'role': 'user', 'content': [prefix, FRAME]}]), [FRAME]))
+    expected = [{**FRAME, **({'cache_control': MARKER} if 'cache_control' in prefix else {})}]
+    assert out['messages'][0]['content'] == expected
+
+
+@pytest.mark.parametrize('prefix', [
+    {**REMINDER, 'citations': []}, {'type': 'image', 'source': {}}, None,
+])
+def test_non_plain_opening_prefix_forwards_unchanged(prefix):
+    raw = wire([{'role': 'user', 'content': [prefix, FRAME]}])
+    assert pin_message_breakpoint(raw, [FRAME]) == raw
+    # The plain counterpart must be dropped; rejecting every prefix is not a fix.
+    plain = json.loads(pin_message_breakpoint(wire([{'role': 'user', 'content': [REMINDER, FRAME]}]), [FRAME]))
+    assert plain['messages'][0]['content'] == [FRAME]

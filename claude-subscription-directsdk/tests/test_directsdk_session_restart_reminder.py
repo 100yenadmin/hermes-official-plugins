@@ -1,8 +1,8 @@
 """A restarted session replays the kept-alive opening byte for byte when skill_view is offered.
 
-Native puts its account context in front of the opening user turn; the relay moves it behind the queried frame. The
-queried frame must include the skills reminder, or a kept-alive opening reads [host, context, reminder] while a restart
-rebuilds [host, reminder, context] and every restart rewrites the whole cached history.
+Native puts its account context in front of the opening user turn; the relay drops it. The
+queried frame includes Hermes' skills reminder, which must survive live reuse and restarts
+at exactly the same position in the opening message.
 """
 import test_directsdk_session as T
 from test_directsdk_session import as_history, rig  # noqa: F401
@@ -41,7 +41,8 @@ def test_a_restart_replays_the_kept_alive_opening_with_the_skills_reminder(rig, 
     history = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = client.create(model='sonnet', messages=history, tools=tools)
     kept = _opening(rig.upstream.bodies[0])
-    assert len(kept) == 3  # host text, native's account context, the skills reminder
+    assert len(kept) == 2  # host text and Hermes' skills reminder
+    assert kept[-1] == {'type': 'text', 'text': directsdk.SKILLS_REMINDER}
     calls = first.choices[0].message.tool_calls
     history += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': t} for c, t in zip(calls, ('A', 'B'))]
     second = client.create(model='sonnet', messages=history, tools=tools)

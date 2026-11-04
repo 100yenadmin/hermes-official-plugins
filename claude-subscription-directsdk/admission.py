@@ -125,24 +125,26 @@ def _breakpoints(value):
     return count
 
 
+def _drop_context(content, count):
+    """Drop native's leading context, retaining at most one of its cache markers."""
+    mark = next((b['cache_control'] for b in content[:count] if 'cache_control' in b), None)
+    del content[:count]
+    if mark is not None:
+        content[0].setdefault('cache_control', mark)
+
+
 def _frame_first(messages, queried, memory=None):
-    """Put Hermes' first user turn ahead of the context native prepends to it (#77).
+    """Drop native's prepended account context and memory from Hermes' turn (#77, #195).
 
-    On the opening request native puts its per-request context block (the account-email
-    reminder) *before* the frame Hermes queried; on every later request that turn is replayed
-    without it. Nothing of the first turn therefore recurs, and call #2 re-writes the whole of
-    it, which is most of a cron run whose first turn carries a source pack. On later turns
-    native already appends its context after the host content. Moving the prepended text
-    blocks behind the frame uses that same order for the first turn: no block is added,
-    dropped or edited, and the frame becomes a prefix the next request replays byte-identically.
-    A live session process replays the first turn as native first built it, so a session re-applies request 1's reorder on later requests.
+    Only drop plain text before one exact occurrence of the queried frame. A marker on
+    dropped context moves onto the frame with setdefault, never multiplying. Per-call
+    mode changes only the opening request. A live session replays that opening as native
+    built it: remember its leading count and plain-content digest, then repeat the drop
+    only on an identical replay. Keep the existing ``permutation`` memory key for that count.
 
-    A restarted session process instead prepends context to its newest user frame (#84).
-    Remember that context on its first request and relocate it to the end of the first user
-    message on every request, so the previous process's completed turns remain a prefix.
-    Per-call mode keeps the first-turn-only behavior. The queried frame must occur exactly
-    once, and everything before it must be plain text.
-    Returns whether the order changed."""
+    A restarted process prepends context to its newest user frame (#84). Discover it once
+    and drop it at the remembered position on every request, leaving previous turns intact.
+    Returns whether the turn changed."""
     if any(m.get('role') == 'assistant' for m in messages):
         if isinstance(memory, dict) and 'permutation' in memory:
             first = next((m for m in messages if m.get('role') == 'user'), {})
@@ -152,8 +154,8 @@ def _frame_first(messages, queried, memory=None):
             digest = hashlib.sha256(json.dumps([_plain(b) for b in content], sort_keys=True).encode()).hexdigest()
             if digest != memory['sha256']:
                 return False
-            k, n = memory['permutation']
-            first['content'] = content[k:k + n] + content[:k] + content[k + n:]
+            k, _ = memory['permutation']
+            _drop_context(content, k)
             return True
         if isinstance(memory, dict):
             if 'context' not in memory:
@@ -177,15 +179,11 @@ def _frame_first(messages, queried, memory=None):
                     return False
                 message = messages[index]
                 content = message.get('content')
-                first = next((m for m in messages if m.get('role') == 'user'), {})
-                opening = first.get('content')
-                if (first is message or message.get('role') != 'user' or not isinstance(content, list)
-                        or not isinstance(opening, list)
-                        or [_plain(b) for b in content[:len(leading)]] != leading
-                        or [_plain(b) for b in opening[-len(leading):]] == leading):
+                if (message.get('role') != 'user' or not isinstance(content, list)
+                        or len(content) <= len(leading)
+                        or [_plain(b) for b in content[:len(leading)]] != leading):
                     return False
-                message['content'] = content[len(leading):]
-                first['content'] = opening + copy.deepcopy(leading)
+                _drop_context(content, len(leading))
                 return True
         return False
     first = next((m for m in messages if m.get('role') == 'user'), {})
@@ -198,12 +196,13 @@ def _frame_first(messages, queried, memory=None):
     if len(starts) != 1 or starts[0] == 0:
         return False
     k = starts[0]
-    if not all(isinstance(b, dict) and b.get('type') == 'text' for b in content[:k]):
+    if not all(isinstance(b, dict) and b.get('type') == 'text' and set(b) <= {'type', 'text', 'cache_control'}
+               for b in content[:k]):
         return False
     if isinstance(memory, dict):
         memory.update(permutation=(k, len(queried)),
                       sha256=hashlib.sha256(json.dumps([_plain(b) for b in content], sort_keys=True).encode()).hexdigest())
-    first['content'] = content[k:k + len(queried)] + content[:k] + content[k + len(queried):]
+    _drop_context(content, k)
     return True
 
 
@@ -224,7 +223,7 @@ def stable_request_context(payload, queried, *, session=False):
     found exactly once, on later user turns, which native already omits from tool-result steps. Removed cache markers move with setdefault, never multiply.
     Session relays relocate only the date, including its replayed system row inside
     later history: their launch reminders belong to #84's remembered context
-    relocation, not per-call stripping. If the session environment
+    dropping, not per-call stripping. If the session environment
     already contains a date (including yesterday's on rollover), leave native's date
     layout alone rather than append a second date and change its kept-alive prefix.
     Assistant text/thinking, tool-result-only turns, opening-turn reminders and
@@ -374,8 +373,8 @@ def pin_message_breakpoint(payload, queried, memory=None):
     The count grows by at most that one mark and only within Anthropic's four across tools,
     system and messages; system and tools marks are never touched, and a moved or added
     marker keeps native's own order of TTLs.
-    The breakpoint never moves later, content never changes, and any payload that does not
-    parse forwards as is."""
+    The breakpoint never moves later; content changes only where ``_frame_first`` drops
+    native's prepended context. Any payload that does not parse forwards as is."""
     if not queried:
         return payload
     try:
@@ -385,7 +384,7 @@ def pin_message_breakpoint(payload, queried, memory=None):
         blocks = [(i, j, b) for i, m in enumerate(messages) if isinstance(m.get('content'), list)
                   for j, b in enumerate(m['content'])]
         marked = [(i, j, b) for i, j, b in blocks if isinstance(b, dict) and 'cache_control' in b]
-        if not marked:
+        if not marked and not reordered:
             return payload
         last = max((i for i, m in enumerate(messages) if m.get('role') == 'assistant'), default=-1)
         stable = [(i, j, b) for i, j, b in blocks if i <= last]

@@ -170,12 +170,12 @@ def relay():
         peer.server_close()
 
 
-def test_session_relay_moves_only_date_and_keeps_reminders(relay):
+def test_session_relay_moves_date_and_drops_native_reminders(relay):
     payload = wire(native())
     out = json.loads(relay(payload, [FRAME], session=True))['messages']
     assert out[0]['content'] == ENV + '\n\n' + DATE
     assert out[1] == ASSISTANT
-    assert out[-1]['content'] == [REMINDER, FRAME]
+    assert out[-1]['content'] == [FRAME]
 
 
 @pytest.mark.parametrize('env', [ENV, [{'type': 'text', 'text': ENV}]])
@@ -209,7 +209,10 @@ def test_session_date_rollover_with_existing_date_stays_native_built(relay, env)
     else:
         env[-1]['text'] += '\n\n' + old
     payload = wire(native(env=env))
-    assert relay(payload, [FRAME], session=True) == payload
+    out = json.loads(relay(payload, [FRAME], session=True))['messages']
+    original = json.loads(payload)['messages']
+    assert [m for m in out if m['role'] == 'system'] == [m for m in original if m['role'] == 'system']
+    assert out[-2]['content'] == [FRAME]
 
 
 def test_session_date_like_user_content_is_never_relocated(relay):
