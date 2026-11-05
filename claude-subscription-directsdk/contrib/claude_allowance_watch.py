@@ -50,14 +50,20 @@ def _local(moment, fmt):
     return moment.astimezone().strftime(fmt)
 
 
-def weekly_limits(rate_limits, now):
-    """``[(key, label, percent, resets_at)]`` for each current weekly limit in a ``get_usage`` reply.
+def _scope_name(scope, part):
+    value = scope.get(part) if isinstance(scope.get(part), dict) else {}
+    return value.get('display_name') if isinstance(value.get('display_name'), str) else ''
 
-    An entry without a numeric percent or a reset time is skipped, never read as 0%, and so is one whose
-    reset time has passed: its figures describe a period that is over. The session (5-hour) limit is left
-    out: it clears within hours, and Hermes already answers a refused turn in its chat."""
+
+def weekly_limits(rate_limits, now):
+    """``(current, unsure)`` for the weekly limits in a ``get_usage`` reply. ``current`` lists
+    ``(key, label, percent, resets_at)`` for each limit whose reset time is still ahead; ``unsure`` holds the
+    percents of limits whose reset time is missing or past (a period that is over), which cannot be told
+    once per period. An entry without a numeric percent is skipped, never read as 0%. A limit scoped to a
+    model or a surface keeps that name. The session (5-hour) limit is left out: it clears within hours,
+    and Hermes already answers a refused turn in its chat."""
     entries = rate_limits.get('limits') if isinstance(rate_limits, dict) else None
-    found = []
+    current, unsure = [], []
     for entry in entries if isinstance(entries, list) else ():
         if not isinstance(entry, dict) or not isinstance(entry.get('kind'), str):
             continue
@@ -68,12 +74,14 @@ def weekly_limits(rate_limits, now):
         if isinstance(percent, bool) or not isinstance(percent, (int, float)) or percent != percent:
             continue
         if resets_at is None or resets_at <= now:
+            unsure.append(float(percent))
             continue
         scope = entry.get('scope') if isinstance(entry.get('scope'), dict) else {}
-        model = scope.get('model') if isinstance(scope.get('model'), dict) else {}
-        name = model.get('display_name') if isinstance(model.get('display_name'), str) else ''
-        found.append((f'{kind}:{name}', f'{name} weekly limit' if name else 'weekly limit', float(percent), resets_at))
-    return found
+        model, surface = _scope_name(scope, 'model'), _scope_name(scope, 'surface')
+        name = ' '.join(part.removeprefix('Claude ') for part in (model, surface) if part)  # "her Claude …"
+        current.append((f'{kind}:{model}:{surface}', f'{name} weekly limit' if name else 'weekly limit',
+                        float(percent), resets_at))
+    return current, unsure
 
 
 def _told(stored, resets_at):
@@ -90,9 +98,9 @@ def _notice(label, percent, threshold, resets_at):
             "out she can't answer on Claude until then. You can wait, switch her model, or cut her usage.")
 
 
-def decide(limits, state, now):
-    """``(lines, state)`` after a successful reading: one line per limit whose highest crossed threshold
-    has not been told in this period. Crossing 90% straight from below 75% sends only the 90% line.
+def decide(limits, state, now, worst):
+    """``(lines, state)`` after a reading: one line per current limit whose highest crossed threshold has
+    not been told in this period. Crossing 90% straight from below 75% sends only the 90% line.
     ``told`` keeps one reset time per limit and threshold, replaced each period."""
     told = dict(state.get('told') or {})
     lines = []
@@ -104,9 +112,7 @@ def decide(limits, state, now):
             told[f'{key}|{threshold}'] = resets_at.isoformat()
     reading = [{'limit': key, 'percent': percent, 'resets_at': resets_at.isoformat()}
                for key, _, percent, resets_at in limits]
-    state = dict(state, told=told, failing_since=None, last_error=None, last_reading=reading,
-                 worst=max(percent for _, _, percent, _ in limits))
-    return lines, state
+    return lines, dict(state, told=told, last_reading=reading, worst=worst)
 
 
 def failed(reason, state, now):
@@ -214,9 +220,17 @@ def main(home=None, now=None, fetch=None):
         except Exception as exc:  # the reader itself broke: report its type only, never its message
             rate_limits, reason = None, f'{type(exc).__name__} while reading'
         try:
-            limits = weekly_limits(rate_limits, now)
-            if limits:
-                lines, state = decide(limits, state, now)
+            current, unsure = weekly_limits(rate_limits, now)
+            if current or unsure:
+                worst = max([percent for _, _, percent, _ in current] + unsure)
+                lines, state = decide(current, state, now, worst)
+                high = [percent for percent in unsure if percent >= THRESHOLDS[0]]
+                if high:  # a high limit we cannot place in a period must not pass as a good reading
+                    more, state = failed(f'a weekly limit at {int(min(max(high), 100))}% had no current reset time',
+                                         state, now)
+                    lines += more
+                else:
+                    state = dict(state, failing_since=None, last_error=None)
             else:
                 lines, state = failed(str(reason or NO_WEEKLY)[:160], state, now)
         except Exception as exc:  # a reply the watcher cannot read counts as a failed reading

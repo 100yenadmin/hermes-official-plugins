@@ -25,11 +25,16 @@ def fetch_usage(env=None, timeout=8):
 '''
 
 
+def row(percent, resets=RESET, kind='weekly_all', model=None, surface=None):
+    scope = None
+    if model or surface:
+        scope = {'model': {'display_name': model} if model else None,
+                 'surface': {'display_name': surface} if surface else None}
+    return {'kind': kind, 'group': 'weekly', 'percent': percent, 'resets_at': resets, 'scope': scope}
+
+
 def reply(percent, resets=RESET, kind='weekly_all', group='weekly', scoped=None, extra=()):
-    entry = {'kind': kind, 'group': group, 'percent': percent, 'resets_at': resets, 'scope': None}
-    if scoped:
-        entry['scope'] = {'model': {'display_name': scoped}, 'surface': None}
-    return {'limits': [entry, *extra]}, None
+    return {'limits': [dict(row(percent, resets, kind, model=scoped), group=group), *extra]}, None
 
 
 class Tick:
@@ -71,7 +76,7 @@ def tick(tmp_path, capsys):
 def test_a_quiet_week_prints_nothing(tick):
     assert tick(reply(40)) == ''
     assert tick(reply(74), minutes=60) == ''
-    assert tick.state['last_reading'] == [{'limit': 'weekly_all:', 'percent': 74.0, 'resets_at': RESET}]
+    assert tick.state['last_reading'] == [{'limit': 'weekly_all::', 'percent': 74.0, 'resets_at': RESET}]
 
 
 def test_75_percent_is_told_once(tick):
@@ -103,7 +108,7 @@ def test_a_new_reset_period_rearms(tick):
     # Past the old reset: the new week's figure is low, then crosses 75% again.
     assert tick(reply(5, resets=NEXT_RESET), minutes=6 * 24 * 60) == ''
     assert '80%' in tick(reply(80, resets=NEXT_RESET), minutes=60)
-    assert tick.state['told']['weekly_all:|75'] == NEXT_RESET
+    assert tick.state['told']['weekly_all::|75'] == NEXT_RESET
 
 
 @pytest.mark.parametrize('first, later', [
@@ -122,7 +127,7 @@ def test_reset_time_drift_does_not_rearm(tick, first, later):
 def test_a_reading_for_a_period_that_is_over_never_repeats(tick, resets):
     for minutes in (0, 10, 10, 10):
         assert tick(reply(100, resets=resets), minutes=minutes) == ''
-    assert tick.state['last_error'] == watch.NO_WEEKLY
+    assert tick.state['last_error'] == 'a weekly limit at 100% had no current reset time'
 
 
 def test_a_used_up_notice_just_before_the_reset_is_not_repeated_after_it(tick):
@@ -133,10 +138,28 @@ def test_a_used_up_notice_just_before_the_reset_is_not_repeated_after_it(tick):
 
 
 @pytest.mark.parametrize('resets', [None, '', 'soon', 1794326400])
-def test_a_reading_without_a_reset_time_is_unreadable(tick, resets):
+def test_a_high_reading_without_a_reset_time_counts_as_failed(tick, resets):
     assert tick(reply(80, resets=resets)) == ''
-    assert tick.state['last_error'] == watch.NO_WEEKLY
-    assert 'told' not in tick.state
+    assert tick.state['last_error'] == 'a weekly limit at 80% had no current reset time'
+    assert not tick.state.get('told')
+    assert tick(reply(80, resets=resets), minutes=60) == ''
+    assert tick(reply(80, resets=resets), minutes=60).startswith("eva's Claude usage check has not worked since ")
+
+
+def test_a_low_reading_without_a_reset_time_is_a_good_reading(tick):
+    # Right after a reset the new period can come back before its reset time does.
+    for minutes in (0, 60, 60, 60):
+        assert tick(reply(3, resets=None), minutes=minutes) == ''
+    assert tick.state['failing_since'] is None and tick.state['worst'] == 3.0
+
+
+def test_a_high_limit_without_a_reset_time_is_not_lost_beside_a_current_one(tick):
+    answer = reply(80, extra=[row(95, resets=None, kind='weekly_scoped', model='Fable')])
+    assert tick(answer).startswith('Heads-up: eva has used 80% of her Claude weekly limit')
+    assert tick(answer, minutes=60) == ''
+    meter = tick(answer, minutes=60)
+    assert meter.startswith("eva's Claude usage check has not worked since ")
+    assert '(a weekly limit at 95% had no current reset time)' in meter
 
 
 def test_the_session_limit_is_left_to_the_chat(tick):
@@ -149,6 +172,18 @@ def test_a_model_scoped_limit_keeps_its_name(tick):
         {'kind': 'weekly_all', 'group': 'weekly', 'percent': 30, 'resets_at': RESET}]))
     assert 'used 80% of her Claude Fable weekly limit' in out
     assert out.count('\n') == 0
+
+
+def test_limits_scoped_to_different_surfaces_are_told_apart(tick):
+    answer = {'limits': [row(80, kind='weekly_scoped', surface='Claude Code'),
+                         row(91, resets='2026-11-12T09:00:00+00:00', kind='weekly_scoped', surface='Claude Design')]}, None
+    lines = tick(answer).split('\n')
+    assert len(lines) == 2
+    assert 'used 80% of her Claude Code weekly limit' in lines[0]
+    assert 'used 91% of her Claude Design weekly limit' in lines[1]
+    assert tick(answer, minutes=10) == ''
+    assert sorted(tick.state['told']) == ['weekly_scoped::Claude Code|75', 'weekly_scoped::Claude Design|75',
+                                          'weekly_scoped::Claude Design|90']
 
 
 @pytest.mark.parametrize('percent', [None, float('nan'), True, '95', {'value': 95}])
