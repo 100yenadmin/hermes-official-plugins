@@ -98,7 +98,7 @@ def _notice(label, percent, threshold, resets_at):
             "out she can't answer on Claude until then. You can wait, switch her model, or cut her usage.")
 
 
-def decide(limits, state, now, worst):
+def decide(limits, state, now):
     """``(lines, state)`` after a reading: one line per current limit whose highest crossed threshold has
     not been told in this period. Crossing 90% straight from below 75% sends only the 90% line.
     ``told`` keeps one reset time per limit and threshold, replaced each period."""
@@ -112,7 +112,7 @@ def decide(limits, state, now, worst):
             told[f'{key}|{threshold}'] = resets_at.isoformat()
     reading = [{'limit': key, 'percent': percent, 'resets_at': resets_at.isoformat()}
                for key, _, percent, resets_at in limits]
-    return lines, dict(state, told=told, last_reading=reading, worst=worst)
+    return lines, dict(state, told=told, last_reading=reading, worst=max(percent for _, _, percent, _ in limits))
 
 
 def failed(reason, state, now):
@@ -221,18 +221,19 @@ def main(home=None, now=None, fetch=None):
             rate_limits, reason = None, f'{type(exc).__name__} while reading'
         try:
             current, unsure = weekly_limits(rate_limits, now)
-            if current or unsure:
-                worst = max([percent for _, _, percent, _ in current] + unsure)
-                lines, state = decide(current, state, now, worst)
-                high = [percent for percent in unsure if percent >= THRESHOLDS[0]]
-                if high:  # a high limit we cannot place in a period must not pass as a good reading
-                    more, state = failed(f'a weekly limit at {int(min(max(high), 100))}% had no current reset time',
-                                         state, now)
-                    lines += more
-                else:
-                    state = dict(state, failing_since=None, last_error=None)
+            lines = []
+            if current:
+                lines, state = decide(current, state, now)
+            # A reading is good only when a limit is current and none at 75% or more was left out for want of a
+            # current reset time. Anything else is a failed reading, so the meter speaks after two hours.
+            gap = [percent for percent in unsure if percent >= THRESHOLDS[0]] or ([] if current else unsure)
+            if current and not gap:
+                state = dict(state, failing_since=None, last_error=None)
             else:
-                lines, state = failed(str(reason or NO_WEEKLY)[:160], state, now)
+                why = (f'a weekly limit at {int(min(max(gap), 100))}% had no current reset time' if gap
+                       else str(reason or NO_WEEKLY)[:160])
+                more, state = failed(why, state, now)
+                lines += more
         except Exception as exc:  # a reply the watcher cannot read counts as a failed reading
             lines, state = failed(f'{type(exc).__name__} in the watcher', state, now)
         _save(path, state)

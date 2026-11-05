@@ -146,11 +146,26 @@ def test_a_high_reading_without_a_reset_time_counts_as_failed(tick, resets):
     assert tick(reply(80, resets=resets), minutes=60).startswith("eva's Claude usage check has not worked since ")
 
 
-def test_a_low_reading_without_a_reset_time_is_a_good_reading(tick):
-    # Right after a reset the new period can come back before its reset time does.
+def test_readings_that_never_carry_a_current_reset_time_reach_the_meter(tick):
+    # Reset times that stop parsing (a format change) must not leave the meter silent while usage is low.
+    assert tick(reply(60, resets=1794326400)) == ''
+    assert tick(reply(60, resets=1794326400), minutes=60) == ''
+    meter = tick(reply(60, resets=1794326400), minutes=60)
+    assert meter.startswith("eva's Claude usage check has not worked since ")
+    assert '(a weekly limit at 60% had no current reset time)' in meter
+
+
+def test_a_low_limit_without_a_reset_time_beside_a_current_one_is_a_good_reading(tick):
+    answer = reply(40, extra=[row(3, resets=None, kind='weekly_scoped', model='Fable')])
     for minutes in (0, 60, 60, 60):
-        assert tick(reply(3, resets=None), minutes=minutes) == ''
-    assert tick.state['failing_since'] is None and tick.state['worst'] == 3.0
+        assert tick(answer, minutes=minutes) == ''
+    assert tick.state['failing_since'] is None and tick.state['worst'] == 40.0
+
+
+def test_a_limit_without_a_reset_time_does_not_slow_the_readings(tick):
+    stale = row(100, resets=None, kind='weekly_scoped', model='Fable')
+    assert '85%' in tick(reply(85, extra=[stale]))
+    assert '91%' in tick(reply(91, extra=[stale]), minutes=10)
 
 
 def test_a_high_limit_without_a_reset_time_is_not_lost_beside_a_current_one(tick):
