@@ -18,9 +18,10 @@ T0 = datetime(2026, 11, 5, 3, 0, tzinfo=timezone.utc)
 RESET = '2026-11-10T16:00:00.365322+00:00'
 NEXT_RESET = '2026-11-17T16:00:00+00:00'
 STUB_PLUGIN = '''
-def fetch_usage(timeout=8):
+def fetch_usage(env=None, timeout=8):
+    assert env is not None and timeout == 30
     return {'limits': [{'kind': 'weekly_all', 'group': 'weekly', 'percent': 76,
-                        'resets_at': '2026-11-10T16:00:00+00:00', 'scope': None}]}, None
+                        'resets_at': '2099-11-10T16:00:00+00:00', 'scope': None}]}, None
 '''
 
 
@@ -50,8 +51,16 @@ class Tick:
         return self.capsys.readouterr().out.strip()
 
     @property
+    def path(self):
+        return self.home / 'cache' / 'claude_allowance_watch' / 'state.json'
+
+    @property
     def state(self):
-        return json.loads((self.home / 'cache' / 'claude_allowance_watch' / 'state.json').read_text())
+        return json.loads(self.path.read_text())
+
+    def save(self, state):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(state))
 
 
 @pytest.fixture
@@ -62,6 +71,7 @@ def tick(tmp_path, capsys):
 def test_a_quiet_week_prints_nothing(tick):
     assert tick(reply(40)) == ''
     assert tick(reply(74), minutes=60) == ''
+    assert tick.state['last_reading'] == [{'limit': 'weekly_all:', 'percent': 74.0, 'resets_at': RESET}]
 
 
 def test_75_percent_is_told_once(tick):
@@ -78,7 +88,7 @@ def test_90_then_used_up_then_silence(tick):
     used_up = tick(reply(100), minutes=10)
     assert used_up.startswith('eva has used up her Claude weekly limit (resets ')
     assert used_up.endswith("She can't answer on Claude until it resets.")
-    assert tick(reply(100), minutes=10) == ''
+    assert tick(reply(100), minutes=20) == ''
 
 
 def test_a_jump_past_two_thresholds_sends_one_line_and_no_late_75(tick):
@@ -88,19 +98,45 @@ def test_a_jump_past_two_thresholds_sends_one_line_and_no_late_75(tick):
     assert tick(reply(93), minutes=10) == ''
 
 
-def test_a_new_reset_period_rearms_and_old_periods_are_forgotten(tick):
+def test_a_new_reset_period_rearms(tick):
     assert '76%' in tick(reply(76))
     # Past the old reset: the new week's figure is low, then crosses 75% again.
     assert tick(reply(5, resets=NEXT_RESET), minutes=6 * 24 * 60) == ''
-    assert all(NEXT_RESET[:10] not in key for key in tick.state['notified'])
-    assert tick.state['notified'] == {}
     assert '80%' in tick(reply(80, resets=NEXT_RESET), minutes=60)
+    assert tick.state['told']['weekly_all:|75'] == NEXT_RESET
 
 
-def test_reset_time_drift_does_not_rearm(tick):
-    assert '76%' in tick(reply(76, resets='2026-11-10T16:00:00.365322+00:00'))
-    assert tick(reply(77, resets='2026-11-10T15:59:59.9+00:00'), minutes=10) == ''
-    assert tick(reply(78, resets='2026-11-10T16:00:01Z'), minutes=10) == ''
+@pytest.mark.parametrize('first, later', [
+    ('2026-11-10T16:00:00.365322+00:00', '2026-11-10T15:59:59.9+00:00'),
+    ('2026-11-10T16:00:00.365322+00:00', '2026-11-10T16:00:01Z'),
+    ('2026-11-10T16:29:59.9+00:00', '2026-11-10T16:30:00.1+00:00'),
+    ('2026-11-10T16:00:00+00:00', '2026-11-10T16:59:00+00:00'),
+])
+def test_reset_time_drift_does_not_rearm(tick, first, later):
+    assert '76%' in tick(reply(76, resets=first))
+    assert tick(reply(77, resets=later), minutes=10) == ''
+    assert tick(reply(78, resets=first), minutes=10) == ''
+
+
+@pytest.mark.parametrize('resets', ['2026-11-05T02:00:00Z', '2026-11-05T03:00:00Z'])
+def test_a_reading_for_a_period_that_is_over_never_repeats(tick, resets):
+    for minutes in (0, 10, 10, 10):
+        assert tick(reply(100, resets=resets), minutes=minutes) == ''
+    assert tick.state['last_error'] == watch.NO_WEEKLY
+
+
+def test_a_used_up_notice_just_before_the_reset_is_not_repeated_after_it(tick):
+    tick.now = datetime(2026, 11, 10, 15, 50, tzinfo=timezone.utc)
+    assert tick(reply(100)).startswith('eva has used up her Claude weekly limit')
+    for minutes in (10, 10, 10):
+        assert tick(reply(100), minutes=minutes) == ''
+
+
+@pytest.mark.parametrize('resets', [None, '', 'soon', 1794326400])
+def test_a_reading_without_a_reset_time_is_unreadable(tick, resets):
+    assert tick(reply(80, resets=resets)) == ''
+    assert tick.state['last_error'] == watch.NO_WEEKLY
+    assert 'told' not in tick.state
 
 
 def test_the_session_limit_is_left_to_the_chat(tick):
@@ -118,13 +154,13 @@ def test_a_model_scoped_limit_keeps_its_name(tick):
 @pytest.mark.parametrize('percent', [None, float('nan'), True, '95', {'value': 95}])
 def test_an_unreadable_percent_is_never_read_as_zero(tick, percent):
     assert tick(reply(percent)) == ''
-    assert tick.state['last_error'] == 'the reply had no weekly limits'
+    assert tick.state['last_error'] == watch.NO_WEEKLY
     assert tick.state['failing_since'] is not None
-    assert 'notified' not in tick.state
+    assert 'told' not in tick.state
 
 
 @pytest.mark.parametrize('answer', [(None, 'Claude Code did not answer in time'), ({'limits': 'odd'}, None),
-                                    ({}, None), ('odd', None)])
+                                    ({}, None), ('odd', None), None])
 def test_failed_readings_tell_once_after_two_hours_then_daily(tick, answer):
     assert tick(answer) == ''
     assert tick(answer, minutes=60) == ''
@@ -151,7 +187,36 @@ def test_a_crashing_reader_is_reported_by_type_only(tick):
     assert 'secret' not in json.dumps(tick.state)
 
 
-@pytest.mark.parametrize('worst, wait, reads', [(40, 30, 1), (40, 60, 2), (55, 10, 1), (55, 20, 2), (72, 10, 2)])
+def test_a_reply_the_watcher_cannot_read_counts_as_a_failed_reading(tick, monkeypatch):
+    def boom(*_):
+        raise RuntimeError('unexpected')
+    monkeypatch.setattr(watch, '_notice', boom)
+    assert tick(reply(80)) == ''
+    assert tick.state['last_error'] == 'RuntimeError in the watcher'
+    assert tick(reply(80), minutes=60) == ''
+    assert tick(reply(80), minutes=60).startswith("eva's Claude usage check has not worked since ")
+
+
+@pytest.mark.parametrize('damaged', [
+    {'notified': ['bad']}, {'told': ['bad']}, {'told': {'weekly_all:|90': 5}}, {'worst': 'high', 'last_attempt_at': 5},
+    {'failing_since': ['x'], 'meter_notice_at': {}}, {'worst': float('nan')}, {'last_reading': 'odd'},
+])
+def test_a_damaged_state_is_repaired(tick, damaged):
+    tick.save(damaged)
+    assert '95%' in tick(reply(95))
+    assert tick(reply(95), minutes=10) == ''
+
+
+def test_a_clock_that_went_back_does_not_stop_readings(tick):
+    later = (T0 + timedelta(hours=2)).isoformat()
+    tick.save({'last_attempt_at': later, 'worst': 40.0, 'failing_since': later, 'meter_notice_at': later})
+    assert tick((None, 'Claude Code did not answer in time')) == ''
+    assert tick.reads == 1
+    assert tick.state['failing_since'] == T0.isoformat()
+
+
+@pytest.mark.parametrize('worst, wait, reads', [(40, 30, 1), (40, 60, 2), (55, 10, 1), (55, 20, 2), (72, 10, 2),
+                                                (100, 10, 1), (100, 20, 2)])
 def test_readings_follow_the_worst_limit(tick, worst, wait, reads):
     tick(reply(worst))
     tick(reply(worst), minutes=wait)
@@ -167,17 +232,30 @@ def test_an_unwritable_state_is_silent_and_still_exits_0(tmp_path, capsys):
 
 
 def test_a_corrupt_state_starts_over(tick):
-    path = tick.home / 'cache' / 'claude_allowance_watch' / 'state.json'
-    path.parent.mkdir(parents=True)
-    path.write_text('{not json')
+    tick.path.parent.mkdir(parents=True)
+    tick.path.write_text('{not json')
     assert '76%' in tick(reply(76))
 
 
-def _stub_plugin(home):
-    plugin = home / 'plugins' / 'claude-subscription-directsdk-experimental'
-    plugin.mkdir(parents=True)
-    (plugin / 'directsdk_setup.py').write_text(STUB_PLUGIN)
-    return plugin
+@pytest.mark.parametrize('env, home', [
+    ({'HOME': '/u/eva/home', 'HERMES_REAL_HOME': '/u'}, '/u'),
+    ({'HOME': '/u/eva/home', 'HERMES_REAL_HOME': '/u', 'CLAUDE_CONFIG_DIR': '/c'}, '/u/eva/home'),
+    ({'HOME': '/u/eva/home', 'HERMES_REAL_HOME': '/u', 'CLAUDE_SUBSCRIPTION_DIRECTSDK_CONFIG_DIR': '/c'}, '/u/eva/home'),
+    ({'HOME': '/u'}, '/u'),
+    ({'HOME': '/u', 'HERMES_REAL_HOME': '/u'}, '/u'),
+])
+def test_the_reader_looks_up_the_login_where_model_calls_do(env, home):
+    assert watch.reader_env(env)['HOME'] == home
+    assert env.get('HOME') in ('/u', '/u/eva/home')  # the caller's mapping is never changed
+
+
+def test_the_profile_home_comes_from_the_scripts_folder(tmp_path, monkeypatch):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path / 'elsewhere'))
+    eva = (tmp_path / 'eva').resolve()
+    assert watch.profile_home(tmp_path / 'eva' / 'scripts' / SCRIPT.name) == eva
+    assert watch.profile_home(tmp_path / 'eva' / 'scripts' / 'sub' / SCRIPT.name) == tmp_path / 'elsewhere'
+    monkeypatch.delenv('HERMES_HOME')
+    assert watch.profile_home(tmp_path / 'eva' / 'tools' / SCRIPT.name) == eva
 
 
 @pytest.fixture
@@ -189,6 +267,13 @@ def fresh_import(monkeypatch):
     sys.modules.pop('directsdk_setup', None)
     if prior is not None:
         sys.modules['directsdk_setup'] = prior
+
+
+def _stub_plugin(home):
+    plugin = home / 'plugins' / 'claude-subscription-directsdk-experimental'
+    plugin.mkdir(parents=True)
+    (plugin / 'directsdk_setup.py').write_text(STUB_PLUGIN)
+    return plugin
 
 
 def test_the_profile_plugin_is_the_reader(tmp_path, capsys, fresh_import):
