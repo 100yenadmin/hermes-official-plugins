@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.3+session.7] - Unreleased
+
+### Fixed
+
+- Other Claude Code sessions on the machine can no longer put text into Hermes' conversations through native. Every `claude -p` child registers as a peer session (other sessions' ListAgents lists it) and, with `--setting-sources ''`, accepted cross-session messages: an idle native ran a turn on one, and one sent while a tool ran joined that turn's next request, so it reached Claude mid-turn. Native's settings file now sets `crossSessionInbound: refuse`, per call and in session mode; senders get a "refused" notice. Natives still appear in those listings.
+
 ## [0.3.3+session.6] - Unreleased
 
 - Record Claude Code's subscription rate-limit events and log their window and usage metadata in per-call and session mode.

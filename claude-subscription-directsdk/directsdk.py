@@ -456,7 +456,11 @@ def native_command(resolved, model, root, body, system, mcp, env, session=False)
     """The native argv for one launch, per call or for a session; writes its private settings and system files."""
     # Native settings apply env inside the process, avoiding execve's
     # per-argument/environment-string limit for full Hermes schemas.
-    (root / 'settings.json').write_text(json.dumps({'env': {'CLAUDE_CODE_EXTRA_BODY': body}}), encoding='utf-8')
+    # Every native registers as a peer session that any Claude Code session on the machine can message, and
+    # --setting-sources '' leaves it accepting: an idle native runs a turn on a message, and one sent while a tool
+    # runs joins that turn's next request. Hermes owns the conversation, so native refuses them.
+    settings = {'crossSessionInbound': 'refuse', 'env': {'CLAUDE_CODE_EXTRA_BODY': body}}
+    (root / 'settings.json').write_text(json.dumps(settings), encoding='utf-8')
     (root / 'system.md').write_text(system, encoding='utf-8')
     parsed = json.loads(body)
     if 'max_tokens' in parsed:
