@@ -624,8 +624,10 @@ def test_rauth_conflicting_override_is_refused_on_reuse(rig, monkeypatch):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(client, messages)
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'} for c in first.choices[0].message.tool_calls]
-    monkeypatch.setenv('ANTHROPIC_API_KEY', 'fixture-not-a-key')
-    with pytest.raises(ValueError, match='ANTHROPIC_API_KEY'):
+    # Inherited Anthropic API keys are dropped, not refused (main's drop_api_credentials); a backend override
+    # still refuses, and the check runs on reuse.
+    monkeypatch.setenv('CLAUDE_CODE_USE_BEDROCK', '1')
+    with pytest.raises(ValueError, match='CLAUDE_CODE_USE_BEDROCK'):
         step(client, messages)
     client.close()
 
