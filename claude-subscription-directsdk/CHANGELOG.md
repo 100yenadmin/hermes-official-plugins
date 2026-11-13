@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.3.5+session.8] - Unreleased
+
+Merged with main at 8b5b629 (plugin 0.3.5): everything main shipped since the fork's base b5932f1
+reaches the session-mode build, including the Fable 5.2 and Mythos pins, the account's own model
+picker, one OAuth refresh re-issue after a revoked login, the no-tools MCP skip, dropped inherited
+API keys, the shared-date environment fix (#243), streaming on capable hosts and its long-tool-call
+liveness.
+
+### Fixed
+
+- Session mode keeps long tool calls alive for Hermes' stale detector, as per-call does on main: an empty chunk for every
+  native stream event that carries no text (pings stay silent).
+- Main's shared-date environment fix (#243) works in session mode's whole-history date scan.
+
+### Removed
+
+- The skills-index reminder and the pruned-skills reminder (#30), which upstream declined; a skills nudge belongs in
+  core's prompt for every provider.
+
 ## [0.3.3+session.7] - Unreleased
 
 ### Fixed
