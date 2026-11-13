@@ -1350,6 +1350,8 @@ class Client:
                                     _session_log.info('session opener: handed chars=%d after=%.2fs', len(opener), time.monotonic() - started)
                         except Exception:
                             _session_log.debug('session opener: handoff failed')
+                        # Liveness for Hermes' stale detector, as below (no content shown).
+                        yield self._chunk(kwargs['model'], {})
                     elif native['type'] == 'message_stop':
                         stopped = True
                         capture = session.admission.capture
@@ -1359,6 +1361,12 @@ class Client:
                         if capture.complete and (capture.message.get('stop_reason') in ('tool_use', 'refusal')
                                                  or any(b.get('type') == 'tool_use' for b in capture.message['content'])):
                             break
+                    elif native['type'] != 'ping':
+                        # The model is working but has nothing to show (tool-call arguments, signatures, block
+                        # boundaries). Hermes' stale detector only sees chunks, so yield an empty one, as per-call
+                        # does (main's 019a7cc); a ping proves only an open connection. Not `yielded` content: a
+                        # step that showed nothing may still fall back per-call before admission.
+                        yield self._chunk(kwargs['model'], {})
             admission = session.admission
             if native_error_code == 'authentication_failed' and not admission.used:
                 raise ClaudeCodeLoggedOut(f'{LOGGED_OUT_HINT} (native: {native_error})')
