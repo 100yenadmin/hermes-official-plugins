@@ -637,9 +637,11 @@ def test_logged_out_session_native_raises_the_login_hint(rig):
     from directsdk_setup import LOGGED_OUT_HINT
     client = rig.client()
     client.env['AUTH_FAIL'] = '1'
-    with pytest.raises(directsdk.ClaudeCodeLoggedOut, match='Not logged in'):
+    with pytest.raises(directsdk.ClaudeCodeLoggedOut, match='Not logged in') as error:
         step(client, [{'role': 'user', 'content': 'hi'}])
     assert LOGGED_OUT_HINT
+    # As per-call (#47): the error names the resolved CLI and the login dir native looked in.
+    assert f'cli: {client.command[0]}' in str(error.value) and 'login: ' in str(error.value)
 
 
 # ---- Codex re-review (v3) ----

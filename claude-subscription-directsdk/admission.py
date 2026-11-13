@@ -760,6 +760,8 @@ class Admission:
             self.timeout, self.used, self.denied, self.queried = timeout, False, 0, queried
             self.request_id = self.status = self.failure = self.unrestored = None
             self.capture, self.error_body = Capture(), b''
+            # Each step may buy its own refresh re-issue (#162), as each per-call request does.
+            self.auth_retry_used = False
 
     def abort(self):
         with self.lock:

@@ -787,3 +787,30 @@ def test_abort_wakes_a_real_getresponse_blocked_on_a_silent_upstream(monkeypatch
         listener.close()
         if reader is not None:
             reader.join(5)
+
+
+def test_each_session_step_gets_its_own_refresh_retry():
+    """Session mode re-arms one Admission per step: a refresh re-issue on an earlier step must not use up a later
+    step's (#162 x session mode)."""
+    import http.client
+    from admission import Admission
+    peer = ScriptedPeer([_auth_answer(401), _sse_answer(), _auth_answer(401), _sse_answer()])
+    thread = threading.Thread(target=peer.serve_forever, daemon=True); thread.start()
+    gate = Admission(f'http://127.0.0.1:{peer.server_port}', 5, queried=None)
+
+    def post():
+        conn = http.client.HTTPConnection('127.0.0.1', gate.server.server_port, timeout=5)
+        try:
+            conn.request('POST', gate.prefix + '/v1/messages', b'{"model":"m","messages":[]}', {'Content-Type': 'application/json'})
+            response = conn.getresponse(); response.read()
+            return response.status
+        finally:
+            conn.close()
+    try:
+        assert [post(), post()] == [401, 200] and gate.denied == 0
+        gate.rearm(5, None)
+        assert [post(), post()] == [401, 200] and gate.denied == 0
+        assert post() == 400 and gate.denied == 1  # still one upstream request per step after the retry
+        assert not peer.answers
+    finally:
+        gate.close(); peer.shutdown(); thread.join(timeout=3); peer.server_close()

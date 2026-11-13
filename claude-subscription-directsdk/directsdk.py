@@ -1337,7 +1337,10 @@ class Client:
                         yield self._chunk(kwargs['model'], {})
             admission = session.admission
             if native_error_code == 'authentication_failed' and not admission.used:
-                raise ClaudeCodeLoggedOut(f'{LOGGED_OUT_HINT} (native: {native_error})')
+                # Name what was tried, as per-call does (#47): native looked for ~/.claude under the child's own HOME.
+                home = env.get('HOME') or env.get('USERPROFILE')
+                login = env.get('CLAUDE_CONFIG_DIR') or str((Path(home) if home else Path.home()) / '.claude')
+                raise ClaudeCodeLoggedOut(f'{LOGGED_OUT_HINT} (native: {native_error}; cli: {resolved[0]}; login: {login})')
             # Failures carry the status Hermes routes retry/fallback on, as per-call does.
             if native_error and not admission.used:
                 raise ClaudeAPIError('Native API error: ' + native_error, NATIVE_ERROR_STATUS.get(str(native_error_code)))
@@ -1346,7 +1349,8 @@ class Client:
                 if admission.error_text():
                     first_attempt += ', upstream said: ' + admission.error_text()[:500]
                 status = admission.status if isinstance(admission.status, int) and admission.status >= 400 else None
-                raise ClaudeAPIError(f'Incomplete upstream response ({first_attempt})' + (': ' + native_error if native_error else ''), status)
+                raise ClaudeAPIError(f'Incomplete upstream response ({first_attempt})' + (': ' + native_error if native_error else ''), status,
+                                     request_id=admission.request_id)
             assistant = admission.capture.message
             refused = assistant.get('stop_reason') == 'refusal'
             # A denied native retry, a native error or a refusal leaves native's own state unknown: answer, then rebuild next step.
