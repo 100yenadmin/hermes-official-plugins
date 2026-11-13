@@ -1509,8 +1509,8 @@ def test_session_restart_and_per_call_fallback_share_conversation_id(rig, monkey
     assert len(ids) == 3 and len(set(ids)) == 1
 
 
-def test_session_skills_reminder_survives_reuse_and_replay(rig):
-    from test_directsdk_skills_reminder import tool
+def test_session_user_frames_survive_reuse_and_replay(rig):
+    from test_directsdk_session_restart_reminder import tool
     tools = [tool('probe'), tool('skill_view')]
     client = rig.client()
     messages = [{'role': 'user', 'content': 'hello'}]
@@ -1521,16 +1521,14 @@ def test_session_skills_reminder_survives_reuse_and_replay(rig):
     second = ask()
     kept = json.loads(json.dumps(rig.upstream.bodies[-1]['messages']))
     assert len(rig.spawned()) == 1
-    for frame in kept:
-        if frame['role'] == 'user':
-            assert frame['content'][-1] == {'type': 'text', 'text': directsdk.SKILLS_REMINDER}
-    # Restart the same turn: old and new reminders occupy exactly the kept-native positions.
+    # No skills reminder rides the user frames (upstream declined it, #30).
+    assert all('skill_view(name)' not in json.dumps(frame) for frame in kept if frame['role'] == 'user')
+    # Restart the same turn: the user frames are exactly what the kept-alive native sent.
     directsdk._session_shutdown()
     ask()
     assert [m for m in rig.upstream.bodies[-1]['messages'] if m['role'] == 'user'] == [
         m for m in kept if m['role'] == 'user']
     assert len(rig.spawned()) == 2
-    assert all(directsdk.SKILLS_REMINDER not in str(m) for m in messages)
     # A tool continuation carries no reminder and replay strips old assistant usage (#92).
     messages += [as_history(second), {'role': 'user', 'content': 'call probe in parallel'}]
     third = ask()
@@ -1540,7 +1538,7 @@ def test_session_skills_reminder_survives_reuse_and_replay(rig):
     ask()
     wire = rig.upstream.bodies[-1]['messages']
     assert all('usage' not in m for m in wire if m['role'] == 'assistant')
-    assert all(b.get('text') != directsdk.SKILLS_REMINDER for b in wire[-1]['content'])
+    assert all('skill_view(name)' not in json.dumps(b) for b in wire[-1]['content'])
 
 
 @pytest.mark.parametrize('session_mode', ['0', '1'])

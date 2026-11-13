@@ -140,10 +140,9 @@ def test_first_turn_memory_requires_identical_plain_content(changed):
 
 
 @pytest.mark.parametrize('marked', [False, True])
-def test_drop_multiple_plain_prefixes_preserves_frame_marker_and_skills(marked):
+def test_drop_multiple_plain_prefixes_preserves_frame_marker_and_blocks(marked):
     from admission import _breakpoints
-    from directsdk import SKILLS_REMINDER
-    frame = [{**FRAME, 'cache_control': MARKER}, {'type': 'text', 'text': SKILLS_REMINDER}]
+    frame = [{**FRAME, 'cache_control': MARKER}, {'type': 'text', 'text': 'Second block of the frame'}]
     leading = [dict(REMINDER), {'type': 'text', 'text': 'native memory'}]
     if marked:
         leading[0]['cache_control'] = {'type': 'ephemeral'}

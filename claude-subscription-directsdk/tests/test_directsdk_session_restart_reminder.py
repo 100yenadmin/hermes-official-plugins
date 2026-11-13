@@ -1,12 +1,15 @@
 """A restarted session replays the kept-alive opening byte for byte when skill_view is offered.
 
-Native puts its account context in front of the opening user turn; the relay drops it. The
-queried frame includes Hermes' skills reminder, which must survive live reuse and restarts
-at exactly the same position in the opening message.
+Native puts its account context in front of the opening user turn; the relay drops it, on live
+reuse and after a restart, so the opening message stays exactly what the kept-alive native sent.
+(The fork no longer adds a skills reminder: upstream declined it, #30.)
 """
 import test_directsdk_session as T
 from test_directsdk_session import as_history, rig  # noqa: F401
-from test_directsdk_skills_reminder import tool
+
+
+def tool(name):
+    return {'type': 'function', 'function': {'name': name, 'description': name, 'parameters': {'type': 'object', 'properties': {}}}}
 
 import directsdk
 
@@ -33,7 +36,7 @@ def _opening(body):
     return [{k: v for k, v in block.items() if k != 'cache_control'} for block in body['messages'][0]['content']]
 
 
-def test_a_restart_replays_the_kept_alive_opening_with_the_skills_reminder(rig, tmp_path):
+def test_a_restart_replays_the_kept_alive_opening(rig, tmp_path):
     (tmp_path / 'native.py').write_text(_restart_context_native())
     tools = T.TOOLS + [tool('skill_view')]
     client = rig.client()
@@ -41,8 +44,7 @@ def test_a_restart_replays_the_kept_alive_opening_with_the_skills_reminder(rig, 
     history = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = client.create(model='sonnet', messages=history, tools=tools)
     kept = _opening(rig.upstream.bodies[0])
-    assert len(kept) == 2  # host text and Hermes' skills reminder
-    assert kept[-1] == {'type': 'text', 'text': directsdk.SKILLS_REMINDER}
+    assert kept == [{'type': 'text', 'text': 'call probe in parallel'}]  # host text only: context dropped, no reminder
     calls = first.choices[0].message.tool_calls
     history += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': t} for c, t in zip(calls, ('A', 'B'))]
     second = client.create(model='sonnet', messages=history, tools=tools)

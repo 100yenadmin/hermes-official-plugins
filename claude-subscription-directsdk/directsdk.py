@@ -29,13 +29,11 @@ from types import SimpleNamespace
 
 try:
     from .admission import Admission
-    from .pruned_skills import pruned_skills
     from .model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from .directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled, session_pool, reap_orphaned_refresh_lock, drop_api_credentials
     from .directsdk_setup import claude_guidance_enabled, settle_answers_enabled, early_opener_enabled
 except ImportError:
     from admission import Admission
-    from pruned_skills import pruned_skills
     from model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled, session_pool, reap_orphaned_refresh_lock, drop_api_credentials
     from directsdk_setup import claude_guidance_enabled, settle_answers_enabled, early_opener_enabled
@@ -78,18 +76,6 @@ NATIVE_ERROR_STATUS = {
 
 CARRIER = 'claude-subscription-directsdk-experimental.native_assistant'
 PREFIX = 'mcp__hermes__'
-# Claude reads Hermes' skills index at the top of a long prompt and, deep into a session or
-# after compaction, stops consulting it. Restating the rule next to the new user turn restores
-# skill loading (live A/B in the PR). It rides after the relay's cache breakpoint like native's
-# own per-request context and is never part of Hermes history.
-REMINDER = ('<system-reminder>Before replying, scan the available skills in your instructions. '
-            'If one matches or is even partially relevant to this message, load it with '
-            'skill_view(name) first.{}</system-reminder>')
-SKILLS_REMINDER = REMINDER.format('')
-# Compaction swaps a loaded skill's text for a stub, and Claude goes on as if it were still loaded;
-# the generic rule above does not contradict that, naming the skill does.
-PRUNED_SKILLS = (' Compaction removed the full text of these previously loaded skills: {}. If any still '
-                 'applies to this conversation, reload it with skill_view(name) before replying.')
 # Claude-only notes for agent steps (requests with tools), at the end of the joined system text: the session id and
 # system.md are both made from that text, so a session never runs with a system file that differs from its identity.
 GUIDANCE = (
@@ -148,17 +134,6 @@ def _hermes_interim_text(interim_agent, text):
 def _finished_sentence(text):
     """Whether ``text`` ends a sentence, so no token, key block or tag runs on into the step's later text."""
     return text.rstrip().rstrip('"\'\u201d\u2019)]*_`').endswith(('.', '!', '?', ':', '\u2026', '\u3002', '\uff01', '\uff1f'))
-
-
-def skills_reminder(frames, names):
-    """The block to append to the queried frame: only a fresh user turn, only when skills are loadable."""
-    if 'skill_view' not in names or any(b.get('type') == 'tool_result' for b in frames[-1]['message']['content']):
-        return None
-    pruned, more = pruned_skills(frames, PREFIX + 'skill_view')
-    if not pruned:
-        return {'type': 'text', 'text': SKILLS_REMINDER}
-    listed = ', '.join(pruned) + (f', and {more} more' if more else '')
-    return {'type': 'text', 'text': REMINDER.format(PRUNED_SKILLS.format(listed))}
 
 
 class Object(SimpleNamespace):
@@ -483,10 +458,6 @@ def replay_history(frames, send, receive, names=None, session=False, exited=None
         frame = copy.deepcopy(frame)
         if frame['type'] == 'user' and index < len(frames) - 1:
             frame['shouldQuery'] = False
-        if (session or index == len(frames) - 1) and frame['type'] == 'user':
-            reminder = skills_reminder(frames[:index + 1], names or {})
-            if reminder:
-                frame['message']['content'].append(reminder)
         send(frame)
         if frame.get('shouldQuery') is False:
             while True:
@@ -1277,10 +1248,7 @@ class Client:
                 session.attach(request)
                 if session.expect == 'user':
                     frame = copy.deepcopy(frames[-1])
-                    reminder = skills_reminder(frames, names)
-                    if reminder:
-                        frame['message']['content'].append(reminder)
-                    # Anchor on the whole sent frame so Hermes' skills reminder is retained.
+                    # Anchor on the whole frame as sent.
                     session.admission.rearm(timeout, frame['message']['content'])
                     session.send(frame)
                 else:
@@ -1483,11 +1451,10 @@ class Client:
         session.root, session.manifest = root, manifest
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.
         env.update(MCP_TOOL_TIMEOUT='86400000', MAX_MCP_OUTPUT_TOKENS='100000000')
-        # The queried frame lets the relay keep the cache breakpoint off native's per-request context. It includes the
-        # skills reminder replay_history adds, so the relay drops only native's account context ahead of the whole
-        # sent frame. On restarts this anchor is the newest frame, including tool-result frames (#5).
-        reminder = skills_reminder(frames, names) if frames[-1]['type'] == 'user' else None
-        queried = frames[-1]['message']['content'] + ([reminder] if reminder else [])
+        # The queried frame lets the relay keep the cache breakpoint off native's per-request context, so the relay
+        # drops only native's account context ahead of the whole sent frame. On restarts this anchor is the newest
+        # frame, including tool-result frames (#5).
+        queried = frames[-1]['message']['content']
         session.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=queried, first_turn={})
         env['ANTHROPIC_BASE_URL'] = session.admission.url
         command = native_command(resolved, kwargs['model'], root, body, system, {'mcpServers': {'hermes': {'type': 'sdk', 'name': 'hermes'}}}, env, session=True)

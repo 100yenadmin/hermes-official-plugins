@@ -42,8 +42,8 @@ SYSTEM = "PUBLIC SYNTHETIC SYSTEM\n" * 300
 PUBLIC_EMAIL = "public@example.invalid"
 PUBLIC_UUID = "00000000-0000-0000-0000-000000000000"
 EMAIL_REMINDER = "The user's email address is"
-# Hermes offers skill_view whenever skills exist (eva always does), so every plain user turn carries the skills reminder;
-# a restart must replay the kept-alive opening with it, while native's account context stays out of the wire.
+# Hermes offers skill_view whenever skills exist (eva always does); a restart must replay the kept-alive opening byte for
+# byte with it offered, while native's account context stays out of the wire.
 TOOLS = TOOLS + [{"type": "function", "function": {"name": "skill_view", "description": "View a skill",
           "parameters": {"type": "object", "properties": {"name": {"type": "string"}}}}}]
 
