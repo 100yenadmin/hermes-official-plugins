@@ -249,13 +249,16 @@ def stable_request_context(payload, queried, *, session=False):
         candidates = enumerate(messages) if session else enumerate(messages[-1:], len(messages) - 1)
         for index, message in candidates:
             content = message.get('content')
+            if message is env or message.get('role') != 'system':
+                continue
             tail = {'type': 'text', 'text': content} if isinstance(content, str) else (
-                content[0] if isinstance(content, list) and len(content) == 1 else {})
-            if message is not env and message.get('role') == 'system' and tail.get('type') == 'text' \
-                    and _DATE_LINE.fullmatch(tail.get('text', '')):
-                dates.append((index, message, tail))
+                content[0] if isinstance(content, list) and content else {})
+            if tail.get('type') == 'text' and _DATE_LINE.fullmatch(tail.get('text', '')):
+                # A date alone moves with its message; a date leading a per-step reminder (native 2.1.311 on
+                # Fable, #243) moves alone and leaves the reminder where it was.
+                dates.append((index, message, tail, isinstance(content, str) or len(content) == 1))
         if env is not None and len(dates) == 1:
-            index, last, tail = dates[0]
+            index, last, tail, whole = dates[0]
             original, line = env['content'], '\n\n' + tail['text']
             target = {'type': 'text', 'text': original} if isinstance(original, str) else (original[-1] if original else {})
             if target.get('type') == 'text' and not target['text'].endswith(tail['text']) \
@@ -264,30 +267,13 @@ def stable_request_context(payload, queried, *, session=False):
                     env['content'] = original + line
                 else:
                     target['text'] += line
-                mark = tail.get('cache_control', last.get('cache_control'))
-                messages.pop(index)
-                previous = messages[index - 1]['content'] if index else []
-                if mark is not None and isinstance(previous, list) and previous:
-                    previous[-1].setdefault('cache_control', mark)
-                changed = True
-        elif last.get('role') == 'system' and env is not None and isinstance(content, list) and len(content) > 1 \
-                and content[0].get('type') == 'text' and _DATE_LINE.fullmatch(content[0].get('text', '')):
-            # Native 2.1.311 on Fable sends the date line first in the same
-            # trailing system message as a per-step reminder. Moving only
-            # the date into the environment message keeps messages[1]
-            # identical on user turns and tool-result steps alike; the
-            # reminder stays trailing, where later requests never replay it.
-            date_block = content[0]
-            original = env['content']
-            target = {'type': 'text', 'text': original} if isinstance(original, str) else (original[-1] if original else {})
-            if target.get('type') == 'text' and not target['text'].endswith(date_block['text']):
-                if isinstance(original, str):
-                    env['content'] = original + '\n\n' + date_block['text']
+                if whole:
+                    mark = tail.get('cache_control', last.get('cache_control'))
+                    messages.pop(index)
                 else:
-                    target['text'] += '\n\n' + date_block['text']
-                del content[0]
-                mark = date_block.get('cache_control')
-                previous = messages[-2]['content'] if len(messages) > 1 else None
+                    mark = tail.get('cache_control')
+                    del last['content'][0]
+                previous = messages[index - 1]['content'] if index else []
                 if mark is not None and isinstance(previous, list) and previous:
                     previous[-1].setdefault('cache_control', mark)
                 changed = True

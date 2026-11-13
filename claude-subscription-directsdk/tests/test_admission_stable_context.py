@@ -62,6 +62,25 @@ def test_date_first_multi_block_matches_user_turn_environment():
     assert tool_step[0] == user_turn[0]
 
 
+def test_session_date_first_in_multi_block_trailing_system_moves_to_environment():
+    # Session mode scans the whole history for the date, so the shared-message shape (#243) moves there too:
+    # only the date, the per-step reminder stays, and the environment matches the user-turn shape.
+    reminder = {'type': 'text', 'text': 'First privately list what you need next'}
+    user_turn = json.loads(stable_request_context(wire(native()), [FRAME], session=True))['messages']
+    out = json.loads(stable_request_context(
+        wire(native(tail=[{'type': 'text', 'text': DATE}, reminder])), [FRAME], session=True))['messages']
+    assert out[0] == user_turn[0] and out[0]['content'] == ENV + '\n\n' + DATE
+    assert out[-1] == {'role': 'system', 'content': [reminder]}
+
+
+def test_shared_date_marker_moves_to_the_previous_message():
+    reminder = {'type': 'text', 'text': 'First privately list what you need next'}
+    messages = native(tail=[{'type': 'text', 'text': DATE, 'cache_control': MARK}, reminder])
+    out = json.loads(stable_request_context(wire(messages), [FRAME]))['messages']
+    assert out[-1] == {'role': 'system', 'content': [reminder]}
+    assert out[-2]['content'][-1].get('cache_control') == MARK
+
+
 @pytest.mark.parametrize('tail', ["Today's date is 2031-01-01. Now 09:30.", 'Per-request note', "Today's date is soon."])
 def test_trailing_text_other_than_the_date_line_stays_in_place(tail):
     out = json.loads(stable_request_context(wire(native(tail=tail)), [FRAME]))['messages']
