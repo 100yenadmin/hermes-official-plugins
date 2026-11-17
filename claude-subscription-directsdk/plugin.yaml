@@ -73,9 +73,9 @@ config_schema:
     default: 4
     label: Claude Code calls at once
     description: >-
-      At most this many Claude Code processes (about 250 MB each) run at once in one Hermes process, across its
+      At most this many per-call Claude Code processes (about 250 MB each) run at once in one Hermes process, across its
       profiles, subagents and auxiliary calls. A call past the limit waits for a free one within its own timeout;
-      it is not failed or sent to another provider. /usage and the model picker do not count.
+      it is not failed or sent to another provider. /usage, the model picker and session-mode processes do not count.
   extra_usage:
     type: string
     default: notify

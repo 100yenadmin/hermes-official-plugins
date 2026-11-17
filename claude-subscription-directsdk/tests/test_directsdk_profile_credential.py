@@ -27,13 +27,17 @@ REQUEST = dict(model="sonnet", messages=[{"role": "user", "content": "go"}],
                                                         "parameters": {"type": "object", "properties": {}}}}])
 
 
+SERVED_HOME = os.path.join(os.sep, "hermes-test", "profiles", "served")
+
+
 @contextmanager
-def multiplexed(scope):
-    """One served turn: multiplex semantics, with ``scope`` bound (``None``: no scope bound)."""
+def multiplexed(scope, home=SERVED_HOME):
+    """One served turn: multiplex semantics, with ``scope`` bound (``None``: no scope bound). Core stamps a served
+    profile's scope with its home; ``home=None`` binds it unstamped, which core uses for the launch profile's own."""
     from agent.secret_scope import (reset_multiplex_context, reset_secret_scope, set_multiplex_context,
                                     set_secret_scope)
     mode = set_multiplex_context(True)
-    bound = set_secret_scope(scope) if scope is not None else None
+    bound = set_secret_scope(scope, profile_home=home) if scope is not None else None
     try:
         yield
     finally:
@@ -198,3 +202,47 @@ def test_setup_probes_use_the_serving_profiles_login(ambient, tmp_path, monkeypa
     per_call = 2 if probe == "setup_status" else 3
     assert captured == [PROFILE] * per_call + [None] * per_call
     assert env[TOKEN] == AMBIENT
+
+
+@pytest.mark.parametrize("stamp", ["unstamped", "own-home"])
+def test_the_launch_profiles_own_turn_keeps_its_login_under_multiplexing(ambient, tmp_path, monkeypatch, stamp):
+    """eva fork: a Desktop backend serving several profiles multiplexes, so core counts every task as routed, the
+    launch profile's own turns too. Core binds that profile's scope unstamped (or stamped with the process home), and
+    its login is the process's own: its turns keep the inherited login instead of being refused, as on one profile."""
+    from hermes_constants import get_routing_process_hermes_home
+    home = None if stamp == "unstamped" else str(get_routing_process_hermes_home())
+    client, seen = _native(tmp_path, monkeypatch)
+    try:
+        with multiplexed({}, home=home):
+            assert client.create(**REQUEST).choices[0].message.content == "hello\n"
+    finally:
+        client.close()
+    assert seen() == [AMBIENT]
+    with multiplexed({}, home=home):
+        assert _apply({TOKEN: AMBIENT, "UNRELATED": "kept"}) == {TOKEN: AMBIENT, "UNRELATED": "kept"}
+    # A served profile in the same process is still refused without a login of its own.
+    with multiplexed({}), pytest.raises(Exception) as raised:
+        _apply({TOKEN: AMBIENT})
+    assert type(raised.value).__name__ == "ClaudeCodeLoggedOut"
+
+
+def test_cores_own_launch_turn_bind_keeps_the_launch_login(profile, tmp_path, monkeypatch):
+    """eva's shape, through core's own binder for a launch-profile turn on a multi-profile host
+    (tui_gateway.launch_profile_policy.launch_profile_runtime_scope): no token anywhere and no claude_config_dir,
+    the login lives in ~/.claude. The turn runs on it instead of being refused."""
+    monkeypatch.delenv(TOKEN, raising=False)
+    try:
+        from tui_gateway.launch_profile_policy import launch_profile_runtime_scope
+    except ImportError:
+        pytest.skip("core without launch_profile_runtime_scope")
+    from agent.secret_scope import reset_multiplex_context, set_multiplex_context
+    from hermes_constants import get_routing_process_hermes_home
+    client, seen = _native(tmp_path, monkeypatch)
+    mode = set_multiplex_context(True)
+    try:
+        with launch_profile_runtime_scope(get_routing_process_hermes_home()):
+            assert client.create(**REQUEST).choices[0].message.content == "hello\n"
+    finally:
+        reset_multiplex_context(mode)
+        client.close()
+    assert seen() == [None]

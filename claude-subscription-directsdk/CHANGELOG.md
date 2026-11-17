@@ -5,6 +5,10 @@
 Merged with main at e726eb7 (plugin 0.4.0): everything main shipped since 8b5b629 reaches the session-mode build.
 Session mode carries main's per-request checks on every step.
 
+- A launch profile's own turns keep its own Claude login under multiplexing. A Desktop backend that serves several profiles turns multiplexing on, and main's served-profile guard then counted the launch profile's own turns as served. A launch profile whose login is the shared `~/.claude` (no `claude_config_dir`, no token in its `.env`) was refused with "This profile has no Claude login of its own" on every Desktop turn. Core marks the launch profile's scope unstamped, or stamped with the process home, so those turns now keep the launch login. A served profile without a login of its own is still refused.
+- A changed `upstream_ca_file` (another path, new content, or added or removed while Hermes exports the same bundle) starts a new session instead of reusing one that trusts the old bundle.
+- The first-run login settle drops `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` unless you exported it, as main's `/usage` probe does.
+
 ## [0.4.0] - Unreleased
 
 ### Added

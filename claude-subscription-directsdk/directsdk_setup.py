@@ -242,6 +242,23 @@ def _secret_scope():
     return get_secret, routed
 
 
+def _serves_launch_profile():
+    """True when the bound scope is the launch profile's own. Multiplexing makes every task routed, the launch
+    profile's own turns included (a Desktop backend serving several profiles). Core binds that profile's scope
+    unstamped, or stamped with the process home ("unstamped marks the process's own profile"), and its login is
+    the process's own, so it keeps it as a single-profile install does. A served profile's scope is stamped with
+    its own home. No scope bound, or a core without these names: False."""
+    try:
+        from agent.secret_scope import current_secret_scope, current_secret_scope_home
+        from hermes_constants import get_routing_process_hermes_home, hermes_home_key
+    except ImportError:
+        return False
+    if current_secret_scope() is None:
+        return False
+    home = current_secret_scope_home()
+    return home is None or hermes_home_key(home) == hermes_home_key(get_routing_process_hermes_home())
+
+
 def _scoped(get_secret, name):
     value = get_secret(name)
     return value.strip() if isinstance(value, str) and value.strip() else None
@@ -272,6 +289,8 @@ def apply_profile_credential(env):
     changed and no value is logged.
     """
     get_secret, routed = _secret_scope()
+    if routed and _serves_launch_profile():
+        routed = False  # the launch profile's own turn under multiplexing: its own login, as before (eva fork)
     for name in PROFILE_SECRETS:
         value = _scoped(get_secret, name) if get_secret else None
         if value:
