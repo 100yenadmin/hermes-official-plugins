@@ -46,6 +46,8 @@ def test_requests_work_after_the_frozen_copy_is_deleted(profile, tmp_path, monke
     report = tmp_path / 'report.json'
     env = {'PATH': os.defpath, 'HOME': str(tmp_path), 'REPORT': str(report)}
     client = profile.create_client(command=[sys.executable, str(native)], env=env)
+    # The client must come from the discovered package, not a flat-import fallback bound before sys.path changed.
+    assert type(client).__module__ == package.__name__ + '.directsdk'
     tools = [{'type': 'function', 'function': {'name': 'probe', 'description': 'd',
               'parameters': {'type': 'object', 'properties': {}}}}]
     try:
