@@ -2087,7 +2087,7 @@ def _divergence(consumed, keys, messages, expect, why):
         shape = 'truncated'
     elif keys[i + 1:n + 1] == consumed[i:n]:
         shape = 'insert'
-    elif keys[i:n - 1] == consumed[i + 1:n]:
+    elif i < n - 1 and keys[i:n - 1] == consumed[i + 1:n]:
         shape = 'delete'
     elif keys[i + 1:n] == consumed[i + 1:n]:
         shape = 'replace-one'

@@ -450,6 +450,13 @@ def test_divergence_shapes():
     assert shape(rows[:1] + [key({'role': 'user', 'content': 'edited'})] + rows[2:]) == 'replace-one'
     assert shape(rows[:2]) == 'truncated'
     assert shape([key({'role': 'user', 'content': 'x'})] * 4) == 'other'
+    # The last consumed row is the session's own reply: an edit there is a replace, not a delete.
+    edited_last = rows[:3] + [key({'role': 'user', 'content': 'edited'})]
+    assert shape(edited_last) == 'replace-one'
+    assert shape(edited_last + [key({'role': 'user', 'content': 'next'})]) == 'replace-one'
+    line = directsdk._divergence(rows, rows + [key({'role': 'assistant', 'content': 'a'})], [{}] * 4 + [{'role': 'assistant'}],
+                                 'user', 'suffix')
+    assert 'expect=user' in line and 'got=assistant:1' in line and 'matched_ids=0' in line
     assistant = key({'role': 'assistant', 'content': 'a'})
     line = directsdk._divergence([assistant], [rows[0]], [], 'user', 'prefix')
     assert 'role=assistant/user' in line and 'parts=role' in line
