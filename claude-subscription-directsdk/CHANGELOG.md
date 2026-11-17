@@ -1,6 +1,17 @@
 # Changelog
 
-## [0.3.5+session.8] - Unreleased
+## [0.3.5+session.9] - Unreleased
+
+### Fixed
+
+- The plugin keeps working after Hermes' frozen import copy is deleted under a running process
+  (hermes-agent#156493). Since Hermes 0.23 a provider plugin is imported from a copy in the temp
+  directory, which Hermes' scratch pruner or macOS's daily temp cleanup (files older than three
+  days) can remove. The client module is now imported with the package instead of on first use,
+  and the inert MCP helper script is read at import and written next to each request's tools.json
+  instead of being run from the copy.
+
+## [0.3.5+session.8] - 2026-11-14
 
 Merged with main at 8b5b629 (plugin 0.3.5): everything main shipped since the fork's base b5932f1
 reaches the session-mode build, including the Fable 5.2 and Mythos pins, the account's own model
