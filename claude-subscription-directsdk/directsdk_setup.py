@@ -432,8 +432,8 @@ def settle_login(resolved, env, timeout, upstream=None):
         egress_env(child, upstream)
     reap_orphaned_refresh_lock(child)
     try:
-        subprocess.run(resolved + ["-p", "/usage"], env=child, stdin=subprocess.DEVNULL,
-                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+        # A tracked probe: killed with its process tree on every path, and at interpreter exit (main's a369429).
+        _probe(resolved + ["-p", "/usage"], input="", env=child, timeout=timeout, prefix="claude-directsdk-settle-")
     except (OSError, ValueError, subprocess.SubprocessError):
         pass
 
