@@ -1685,3 +1685,27 @@ def test_session_steps_take_no_concurrency_slot(rig, monkeypatch):
     messages += [as_history(first), {'role': 'user', 'content': 'again'}]
     assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
     assert taken == []
+
+
+def test_a_changed_gateway_ca_starts_a_new_session(rig, monkeypatch, tmp_path):
+    """The relay and native load upstream_ca_file once, at spawn: a step after the CA changes (another path, or new
+    content at the same path) must not reuse a session that still trusts the old bundle."""
+    import directsdk_setup
+    url = f'http://127.0.0.1:{rig.upstream.server.server_port}'
+    ca = {'path': tmp_path / 'a.pem'}
+    ca['path'].write_text('A')
+    monkeypatch.setattr(directsdk, 'resolve_upstream', lambda: directsdk_setup.Upstream(
+        url, None, None, True, {'NODE_EXTRA_CA_CERTS': str(ca['path'])}))
+    messages = [{'role': 'user', 'content': 'hello'}]
+    def next_step(text):
+        result = step(rig.client(drop=('ANTHROPIC_BASE_URL',)), messages)
+        messages.extend([as_history(result), {'role': 'user', 'content': text}])
+        return result.usage.model_dump()['native_admission']['session']
+    assert next_step('two') == 'cold'
+    assert next_step('three') == 'reused' and len(rig.spawned()) == 1
+    ca['path'].write_text('B')  # new content, same path
+    assert next_step('four') != 'reused' and len(rig.spawned()) == 2
+    assert next_step('five') == 'reused' and len(rig.spawned()) == 2
+    ca['path'] = tmp_path / 'b.pem'  # another path, same content
+    ca['path'].write_text('B')
+    assert next_step('six') != 'reused' and len(rig.spawned()) == 3

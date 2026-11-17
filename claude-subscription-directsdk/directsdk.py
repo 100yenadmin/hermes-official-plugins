@@ -1386,8 +1386,9 @@ class Client:
         check_extra_usage(resolved, billed, upstream)
         # Only what decides native auth/config; per-process values (CLAUDE_PID, session ids) must not force rebuilds.
         # The upstream (Anthropic or the profile's gateway) is part of it: a session never moves between hosts.
+        # The CA bundle counts by content too: the relay and native load it once, at spawn.
         launch = [resolved, sorted((k, v) for k, v in env.items() if k in _SESSION_LAUNCH_KEYS or k.startswith(_SESSION_LAUNCH_PREFIXES)),
-                  [upstream.url, repr(upstream.proxy), bool(upstream.opted_in)]]
+                  [upstream.url, repr(upstream.proxy), bool(upstream.opted_in), _file_digest(env.get('NODE_EXTRA_CA_CERTS'))]]
         ident = hashlib.sha256(json.dumps([kwargs['model'], body, system, launch]).encode('utf-8')).hexdigest()
         login = hashlib.sha256(json.dumps(launch).encode('utf-8')).hexdigest()
         first = next((k for k, m in zip(keys, messages) if m.get('role') == 'assistant'), None)
@@ -1756,8 +1757,18 @@ _session_noted = set()
 _session_failures, _session_off = 0, False
 # The telemetry setting (applied per spawn) and the proxy route are fixed for a session's life: a change starts a new one.
 _SESSION_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
-                     'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy')
+                     'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy', 'NODE_EXTRA_CA_CERTS')
 _SESSION_LAUNCH_PREFIXES = ('ANTHROPIC_', 'CLAUDE_SUBSCRIPTION_DIRECTSDK_', 'CLAUDE_CODE_USE_')
+
+
+def _file_digest(path):
+    """sha256 of a file's bytes, or None when there is no path or it cannot be read."""
+    if not path:
+        return None
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
 
 
 def _session_enabled(env):
