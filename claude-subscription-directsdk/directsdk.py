@@ -1392,9 +1392,11 @@ class Client:
             raise
         # Only what decides native auth/config; per-process values (CLAUDE_PID, session ids) must not force rebuilds.
         # The upstream (Anthropic or the profile's gateway) is part of it: a session never moves between hosts.
-        # The CA bundle counts by content too: the relay and native load it once, at spawn.
+        # The CA bundle counts by content too: the relay and native load it once, at spawn. Whether the relay has a
+        # configured CA counts on its own: an inherited NODE_EXTRA_CA_CERTS can name the same file as upstream_ca_file.
         launch = [resolved, sorted((k, v) for k, v in env.items() if k in _SESSION_LAUNCH_KEYS or k.startswith(_SESSION_LAUNCH_PREFIXES)),
-                  [upstream.url, repr(upstream.proxy), bool(upstream.opted_in), _file_digest(env.get('NODE_EXTRA_CA_CERTS'))]]
+                  [upstream.url, repr(upstream.proxy), bool(upstream.opted_in), upstream.context is not None,
+                   _file_digest(env.get('NODE_EXTRA_CA_CERTS'))]]
         ident = hashlib.sha256(json.dumps([kwargs['model'], body, system, launch]).encode('utf-8')).hexdigest()
         login = hashlib.sha256(json.dumps(launch).encode('utf-8')).hexdigest()
         first = next((k for k, m in zip(keys, messages) if m.get('role') == 'assistant'), None)

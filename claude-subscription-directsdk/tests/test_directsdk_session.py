@@ -1709,3 +1709,31 @@ def test_a_changed_gateway_ca_starts_a_new_session(rig, monkeypatch, tmp_path):
     ca['path'] = tmp_path / 'b.pem'  # another path, same content
     ca['path'].write_text('B')
     assert next_step('six') != 'reused' and len(rig.spawned()) == 3
+
+
+def test_the_relays_ca_counts_even_when_hermes_exports_the_same_bundle(rig, monkeypatch, tmp_path):
+    """Hermes' own NODE_EXTRA_CA_CERTS can name the file upstream_ca_file names: adding or removing the setting then
+    leaves native's env unchanged but changes the relay's TLS context, so it still starts a new session."""
+    import directsdk_setup
+    url = f'http://127.0.0.1:{rig.upstream.server.server_port}'
+    bundle = tmp_path / 'corp.pem'
+    bundle.write_text('C')
+    configured = {'on': False}
+    monkeypatch.setattr(directsdk, 'resolve_upstream', lambda: directsdk_setup.Upstream(
+        url, None, object() if configured['on'] else None, True,
+        {'NODE_EXTRA_CA_CERTS': str(bundle)} if configured['on'] else {}))
+    monkeypatch.setattr(directsdk, 'relay', lambda upstream, timeout, **kw: directsdk.Admission(
+        upstream.url, timeout, **kw))
+    messages = [{'role': 'user', 'content': 'hello'}]
+    def next_step(text):
+        client = rig.client(drop=('ANTHROPIC_BASE_URL',))
+        client.env['NODE_EXTRA_CA_CERTS'] = str(bundle)
+        result = step(client, messages)
+        messages.extend([as_history(result), {'role': 'user', 'content': text}])
+        return result.usage.model_dump()['native_admission']['session']
+    assert next_step('two') == 'cold'
+    assert next_step('three') == 'reused'
+    configured['on'] = True
+    assert next_step('four') != 'reused' and len(rig.spawned()) == 2
+    configured['on'] = False
+    assert next_step('five') != 'reused' and len(rig.spawned()) == 3
