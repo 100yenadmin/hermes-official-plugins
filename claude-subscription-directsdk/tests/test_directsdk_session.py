@@ -110,6 +110,9 @@ def query():
     for frame in raw.split('\n\n'):
         if frame.startswith('data: '):
             event = json.loads(frame[6:])
+            if os.environ.get('FAKE_TOOL_STREAM') and event['type'] in ('content_block_start', 'content_block_delta', 'content_block_stop') and (
+                    event.get('content_block', {}).get('type') == 'tool_use' or event.get('delta', {}).get('type') == 'input_json_delta' or event['index'] in partial):
+                out({'type':'stream_event','event':event})  # as native streams a call while the model writes it
             if event['type'] == 'message_start':
                 message = event['message']
             elif event['type'] == 'content_block_start':
@@ -1655,7 +1658,9 @@ def test_a_session_step_streams_its_tool_calls_as_written(rig):
               {'type': 'content_block_stop', 'index': 0},
               {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use'}, 'usage': dict(USAGE)}, {'type': 'message_stop'}]
     rig.upstream.reply = lambda n, body: ''.join('data: ' + json.dumps(e) + '\n\n' for e in events).encode()
-    chunks = list(rig.client().create(model='sonnet', messages=[{'role': 'user', 'content': 'probe it'}], tools=TOOLS, stream=True))
+    client = rig.client()
+    client.env['FAKE_TOOL_STREAM'] = '1'
+    chunks = list(client.create(model='sonnet', messages=[{'role': 'user', 'content': 'probe it'}], tools=TOOLS, stream=True))
     rig.upstream.reply = None
     streamed = [tc for c in chunks[:-1] for tc in (c.choices[0].delta.tool_calls or [])]
     assert streamed[0].id == 'toolu_s' and streamed[0].function.name == 'probe'
