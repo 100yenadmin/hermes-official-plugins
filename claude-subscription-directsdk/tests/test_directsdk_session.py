@@ -764,10 +764,15 @@ def test_a_tool_call_cut_off_mid_argument_retires_the_session(rig):
     messages = [{'role': 'user', 'content': 'write the file'}]
     first = step(rig.client(), messages)
     rig.upstream.reply = None
-    assert first.choices[0].finish_reason == 'length' and not first.choices[0].message.tool_calls
+    # As on main's per-call path (#164 #221): the cut call reaches Hermes with its raw arguments and finish length, which
+    # Hermes never runs (it re-sends with a larger cap); the session retires.
+    (cut,) = first.choices[0].message.tool_calls
+    assert first.choices[0].finish_reason == 'length' and (cut.id, cut.function.arguments) == ('toolu_cut', '{"key":')
     assert first.choices[0].message.content.strip() == 'writing'
     assert not directsdk._session_pool
-    messages += [as_history(first), {'role': 'user', 'content': 'continue'}]
+    answered = as_history(first)
+    answered.pop('tool_calls')  # Hermes keeps no call of a length reply
+    messages += [answered, {'role': 'user', 'content': 'continue'}]
     second = step(rig.client(), messages)
     assert second.usage.model_dump()['native_admission']['session'] == 'cold'
     assert second.choices[0].message.content == 'echo continue'
@@ -800,9 +805,16 @@ def test_complete_calls_of_a_turn_cut_off_at_max_tokens_end_the_step(rig, cut):
     first = step(rig.client(), messages)
     rig.upstream.reply = None
     assert time.monotonic() - started < 10
+    assert not directsdk._session_pool
+    if cut:
+        # The cut call joins the complete one with its raw arguments and finish length (main's #164 #221): Hermes runs
+        # neither and re-sends the request, so there is no tool step to continue.
+        whole, partial = first.choices[0].message.tool_calls
+        assert first.choices[0].finish_reason == 'length' and json.loads(whole.function.arguments) == {'key': 'a'}
+        assert (partial.id, partial.function.arguments) == ('toolu_cut', '{"key":')
+        return
     (call,) = first.choices[0].message.tool_calls
     assert first.choices[0].finish_reason == 'tool_calls' and json.loads(call.function.arguments) == {'key': 'a'}
-    assert not directsdk._session_pool
     messages += [as_history(first), {'role': 'tool', 'tool_call_id': call.id, 'content': 'APPLE'}]
     second = step(rig.client(), messages)
     assert second.usage.model_dump()['native_admission']['session'] == 'cold'
@@ -1631,3 +1643,40 @@ def test_close_during_active_session_turn_kills_native_and_next_turn_replays(rig
     process.wait(timeout=3)
     assert not directsdk._session_pool
     assert step(rig.client(), messages).usage.native_admission.session == 'cold'
+
+
+def test_a_session_step_streams_its_tool_calls_as_written(rig):
+    """Main's #326/#164 on the session path: the call's header and argument fragments reach Hermes as native streams
+    them, the final chunk repeats none of it, and the response still carries the whole call."""
+    events = [{'type': 'message_start', 'message': {'id': 'm1', 'role': 'assistant', 'model': 'sonnet', 'content': [], 'usage': dict(USAGE)}},
+              {'type': 'content_block_start', 'index': 0, 'content_block': {'type': 'tool_use', 'id': 'toolu_s', 'name': 'mcp__hermes__probe', 'input': {}}},
+              {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'input_json_delta', 'partial_json': '{"key":'}},
+              {'type': 'content_block_delta', 'index': 0, 'delta': {'type': 'input_json_delta', 'partial_json': ' "a"}'}},
+              {'type': 'content_block_stop', 'index': 0},
+              {'type': 'message_delta', 'delta': {'stop_reason': 'tool_use'}, 'usage': dict(USAGE)}, {'type': 'message_stop'}]
+    rig.upstream.reply = lambda n, body: ''.join('data: ' + json.dumps(e) + '\n\n' for e in events).encode()
+    chunks = list(rig.client().create(model='sonnet', messages=[{'role': 'user', 'content': 'probe it'}], tools=TOOLS, stream=True))
+    rig.upstream.reply = None
+    streamed = [tc for c in chunks[:-1] for tc in (c.choices[0].delta.tool_calls or [])]
+    assert streamed[0].id == 'toolu_s' and streamed[0].function.name == 'probe'
+    assert ''.join(tc.function.arguments or '' for tc in streamed) == '{"key": "a"}'
+    assert not chunks[-1].choices[0].delta.tool_calls and chunks[-1].choices[0].finish_reason == 'tool_calls'
+    (call,) = chunks[-1]._response.choices[0].message.tool_calls
+    assert call.id == 'toolu_s' and json.loads(call.function.arguments) == {'key': 'a'}
+
+
+def test_session_steps_take_no_concurrency_slot(rig, monkeypatch):
+    """Main's max_concurrent (#329) caps per-call processes; a session native is bounded by session_pool instead, so a
+    session step never waits for, or holds, a max_concurrent place."""
+    taken = []
+    real = directsdk.concurrency.acquire
+    def acquire(*args, **kwargs):
+        taken.append(args[0])
+        return (yield from real(*args, **kwargs))
+    monkeypatch.setattr(directsdk.concurrency, 'acquire', acquire)
+    messages = [{'role': 'user', 'content': 'hello'}]
+    first = step(rig.client(), messages)
+    assert first.usage.model_dump()['native_admission']['session'] == 'cold'
+    messages += [as_history(first), {'role': 'user', 'content': 'again'}]
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    assert taken == []

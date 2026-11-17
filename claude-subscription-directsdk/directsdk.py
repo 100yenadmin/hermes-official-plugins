@@ -1425,6 +1425,8 @@ class Client:
             emitted, native_error, native_error_code, final = '', None, None, None
             rate_limit = None
             handed, opener_attempted, stopped = None, False, False
+            # Tool calls reach Hermes as native writes them, as on the per-call path (#164 #221 #326).
+            tool_stream = _ToolStream(hermes_names)
             while True:
                 event = session.receive(request, timeout)
                 if event is None:
@@ -1455,6 +1457,10 @@ class Client:
                 elif kind == 'stream_event':
                     native = event['event']
                     delta = native.get('delta', {})
+                    tool_deltas = tool_stream.deltas(native)
+                    if tool_deltas:
+                        # Hermes has these calls now: from here this step must not fall back per-call.
+                        yielded = True
                     if delta.get('type') == 'text_delta':
                         emitted += delta['text']
                         yielded = True
@@ -1480,8 +1486,10 @@ class Client:
                                     _session_log.info('session opener: handed chars=%d after=%.2fs', len(opener), time.monotonic() - started)
                         except Exception:
                             _session_log.debug('session opener: handoff failed')
-                        # Liveness for Hermes' stale detector, as below (no content shown).
-                        yield self._chunk(kwargs['model'], {})
+                        # The call's first delta, or liveness for Hermes' stale detector, as below (no content shown).
+                        yield self._chunk(kwargs['model'], {'tool_calls': tool_deltas} if tool_deltas else {})
+                    elif tool_deltas:
+                        yield self._chunk(kwargs['model'], {'tool_calls': tool_deltas})
                     elif native['type'] == 'message_stop':
                         stopped = True
                         capture = session.admission.capture
@@ -1530,6 +1538,15 @@ class Client:
             # so the session cannot continue.
             calls, offered = tool_calls(assistant['content'], hermes_names)
             poisoned = poisoned or not offered
+            parsed_calls = list(calls)
+            # A call whose arguments did not parse reaches Hermes with its raw arguments and finish length, which Hermes
+            # never runs (main's #164 #221); the session is rebuilt next step (above). Not a cut: the API streamed
+            # invalid JSON, so this conversation's next native buffers and validates tool input.
+            unparsed = [] if refused else admission.capture.unparsed_calls
+            for call_id, native_name, raw in unparsed:
+                calls.append({'id': call_id, 'type': 'function', 'function': {'name': offered_tool_name(native_name or '', hermes_names)[1], 'arguments': raw}})
+            if unparsed and assistant.get('stop_reason') != 'max_tokens':
+                _buffer_tool_input(conversation_session_id(system, frames))
             # Calls from a turn that stopped for another reason (max_tokens): native's handling of a cut turn is its
             # own, so answer, then replay next step.
             poisoned = poisoned or (bool(calls) and assistant.get('stop_reason') != 'tool_use')
@@ -1537,7 +1554,8 @@ class Client:
             # Native reports cost only per whole native turn; a step has no list-price figure of its own.
             tail, message, chunk = self._response(kwargs['model'], [assistant], calls, emitted, usage, admission,
                                                   {'total_cost_usd': None, 'modelUsage': None},
-                                                  {'session': how, **({'rate_limit': rate_limit} if rate_limit else {})})
+                                                  {'session': how, **({'rate_limit': rate_limit} if rate_limit else {})},
+                                                  parsed_calls=parsed_calls, unparsed=bool(unparsed), tool_stream=tool_stream)
             if tail is not None:
                 yield tail
             calls = message['tool_calls'] or []
