@@ -418,6 +418,56 @@ def test_divergence_kills_the_session_and_replays_full_history(rig):
     assert len(rig.spawned()) == 2
 
 
+def test_a_divergence_logs_where_and_how_without_message_text(rig, caplog):
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(rig.client(), messages)
+    calls = first.choices[0].message.tool_calls
+    messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': f'R{i}' * 50} for i, c in enumerate(calls)]
+    second = step(rig.client(), messages)
+    messages += [as_history(second)]
+    messages[2] = dict(messages[2], content='SECRETTEXT R0')
+    messages.append({'role': 'user', 'content': 'after compaction'})
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'rebuild:prefix'
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith('session diverged:')]
+    assert len(lines) == 1, lines
+    line = lines[0]
+    for part in ('why=prefix', 'at=2', 'consumed=5', 'request=6', 'shape=replace-one', 'rows_differ=1',
+                 'role=tool/tool', 'parts=content'):
+        assert part in line, (part, line)
+    assert 'SECRETTEXT' not in line and 'R0' not in line and 'compaction' not in line
+    old, new = line.rsplit('hash=', 1)[1].split('/')
+    assert len(old) == len(new) == 12 and old != new
+
+
+def test_divergence_shapes():
+    key = directsdk._message_key
+    rows = [key({'role': 'user', 'content': f'u{i}'}) for i in range(4)]
+    def shape(request):
+        return directsdk._divergence(rows, request, [], 'user', 'prefix').split('shape=')[1].split()[0]
+    assert shape(rows[:1] + [key({'role': 'user', 'content': 'stub'})] + rows[1:]) == 'insert'
+    assert shape(rows[:1] + rows[2:] + [key({'role': 'user', 'content': 'next'})]) == 'delete'
+    assert shape(rows[:1] + [key({'role': 'user', 'content': 'edited'})] + rows[2:]) == 'replace-one'
+    assert shape(rows[:2]) == 'truncated'
+    assert shape([key({'role': 'user', 'content': 'x'})] * 4) == 'other'
+    assistant = key({'role': 'assistant', 'content': 'a'})
+    line = directsdk._divergence([assistant], [rows[0]], [], 'user', 'prefix')
+    assert 'role=assistant/user' in line and 'parts=role' in line
+
+
+def test_a_suffix_divergence_logs_what_was_expected(rig, caplog):
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(rig.client(), messages)
+    calls = first.choices[0].message.tool_calls
+    messages += [as_history(first), {'role': 'tool', 'tool_call_id': calls[0].id, 'content': 'A'},
+                 {'role': 'tool', 'tool_call_id': calls[1].id, 'content': 'B'}, {'role': 'user', 'content': 'steer'}]
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'rebuild:suffix'
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith('session diverged:')]
+    assert len(lines) == 1 and 'why=suffix' in lines[0] and 'expect=tools:2' in lines[0], lines
+    assert 'got=tool,user:3' in lines[0] and 'matched_ids=2' in lines[0] and 'steer' not in lines[0]
+
+
 def test_unexpected_suffix_rebuilds(rig):
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
     first = step(rig.client(), messages)

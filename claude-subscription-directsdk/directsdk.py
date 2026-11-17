@@ -2061,6 +2061,59 @@ class NativeSession:
             shutil.rmtree(self.root, ignore_errors=True)
 
 
+_KEY_PARTS = {'assistant': ('role', 'projection', 'carrier'), 'tool': ('role', 'call_id', 'content', 'is_error')}
+
+
+def _short_hash(text):
+    return hashlib.sha256(text.encode('utf-8')).hexdigest()[:12] if text is not None else '-'
+
+
+def _divergence(consumed, keys, messages, expect, why):
+    """Ids, counts and hashes for a diverged session (no message text): where the request left the
+    consumed history and what kind of change it was. Keys hold only replayed fields, so metadata
+    (stamps, ids Hermes adds) never diverges a session; every divergence is a change in those bytes."""
+    n = len(consumed)
+    if why == 'suffix':
+        tail = messages[n:]
+        ids = {m.get('tool_call_id') for m in tail if m.get('role') == 'tool'}
+        want = 'user' if expect == 'user' else f'tools:{len(expect or ())}'
+        got = ','.join(sorted({str(m.get('role')) for m in tail})) or 'none'
+        matched = 0 if expect == 'user' else len(ids & set(expect or ()))
+        return (f'why=suffix at={n} consumed={n} request={len(keys)} expect={want} got={got}:{len(tail)} '
+                f'matched_ids={matched} hash=-/{_short_hash(keys[n] if n < len(keys) else None)}')
+    i = next((j for j, (a, b) in enumerate(zip(consumed, keys)) if a != b), min(n, len(keys)))
+    old, new = (consumed[i] if i < n else None), (keys[i] if i < len(keys) else None)
+    if new is None:
+        shape = 'truncated'
+    elif keys[i + 1:n + 1] == consumed[i:n]:
+        shape = 'insert'
+    elif keys[i:n - 1] == consumed[i + 1:n]:
+        shape = 'delete'
+    elif keys[i + 1:n] == consumed[i + 1:n]:
+        shape = 'replace-one'
+    else:
+        shape = 'other'
+    differ = sum(a != b for a, b in zip(consumed, keys))
+    role_old = role_new = parts = '-'
+    common = '-'
+    if old is not None and new is not None:
+        a, b = json.loads(old), json.loads(new)
+        role_old, role_new = a[0], b[0]
+        names = _KEY_PARTS.get(a[0], ('role', 'content'))
+        if a[0] != b[0] or len(a) != len(b):
+            parts = 'role'
+        else:
+            parts = '+'.join(names[k] if k < len(names) else str(k) for k in range(len(a)) if a[k] != b[k]) or 'none'
+        head = next((k for k, (x, y) in enumerate(zip(old, new)) if x != y), min(len(old), len(new)))
+        tail_len = next((k for k, (x, y) in enumerate(zip(reversed(old), reversed(new))) if x != y), min(len(old), len(new)))
+        common = f'{head}/{tail_len}'
+    elif old is not None:
+        role_old = json.loads(old)[0]
+    return (f'why=prefix at={i} consumed={n} request={len(keys)} shape={shape} rows_differ={differ} '
+            f'role={role_old}/{role_new} parts={parts} key_chars={len(old or "")}/{len(new or "")} '
+            f'common_chars={common} hash={_short_hash(old)}/{_short_hash(new)}')
+
+
 def _session_checkout(ident, keys, messages, first, login=None):
     """The idle session whose consumed history prefixes this request and expects its suffix, marked busy.
 
@@ -2068,7 +2121,7 @@ def _session_checkout(ident, keys, messages, first, login=None):
     or its launch configuration (CLI, auth, config dir) changed. One that differs only in model,
     system prompt, tools or generation fields is a fork, such as a review on another model: both stay,
     and the idle limit and pool LRU reclaim whichever goes unused."""
-    now, stale, matches, how, oversize = time.monotonic(), [], [], 'cold', None
+    now, stale, matches, how, oversize, diverged = time.monotonic(), [], [], 'cold', None, []
     with _session_lock:
         for session in list(_session_pool):
             if session.busy:
@@ -2081,6 +2134,8 @@ def _session_checkout(ident, keys, messages, first, login=None):
             elif first is not None and session.first == first and (session.ident == ident or session.login != login):
                 # This conversation diverged (compaction, edit, interrupt, changed prompt/tools/model).
                 why = 'ident' if session.ident != ident else ('prefix' if keys[:n] != session.consumed else 'suffix')
+                if why != 'ident':
+                    diverged.append((session, list(session.consumed), session.expect, why))
                 stale.append(session)
                 how = 'rebuild:' + why
         found = matches[0] if len(matches) == 1 else None
@@ -2100,6 +2155,13 @@ def _session_checkout(ident, keys, messages, first, login=None):
             how = 'rebuild:ambiguous'  # never pick by pool order; replay instead
         for session in stale:
             _session_pool.remove(session)
+    for session, consumed, expect, why in diverged:
+        try:
+            _session_log.info('session diverged: session=%s %s', session.ident[:8] + ':' + str(session.pid),
+                              _divergence(consumed, keys, messages, expect, why))
+        except Exception as error:  # a diagnostic must never fail a request
+            _session_log.info('session diverged: session=%s why=%s diagnostic-failed=%s',
+                              session.ident[:8] + ':' + str(session.pid), why, type(error).__name__)
     for session in stale:
         session.kill('tool-result-over-mcp-limit' if session is oversize else 'stale-or-diverged')
     return found, how
