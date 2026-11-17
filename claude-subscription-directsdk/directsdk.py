@@ -38,6 +38,10 @@ except ImportError:
     from directsdk_setup import INSTALL_HINT, LOGGED_OUT_HINT, QUIET_TRAFFIC, _resolve as resolve_claude, apply_config_dir, apply_traffic_policy, session_mode_enabled, session_pool, reap_orphaned_refresh_lock, drop_api_credentials
     from directsdk_setup import claude_guidance_enabled, settle_answers_enabled, early_opener_enabled
 
+# Read at import and written next to each request's tools.json: Hermes imports this module from a frozen copy in
+# the temp directory, and a temp cleaner can remove that copy while the process runs (hermes-agent#156493).
+INERT_MCP = Path(__file__).with_name('inert_mcp.py').read_text(encoding='utf-8')
+
 
 # Hermes picks retry vs fallback from an error's status_code (main loop and auxiliary ladder alike).
 class ClaudeCodeMissing(RuntimeError):
@@ -1022,7 +1026,8 @@ class Client:
                 mcp = {'mcpServers': {}}
                 if manifest:
                     (root / 'tools.json').write_text(json.dumps(manifest), encoding='utf-8')
-                    mcp = {'mcpServers': {'hermes': {'command': sys.executable, 'args': [str(Path(__file__).with_name('inert_mcp.py')), str(root / 'tools.json')]}}}
+                    (root / 'inert_mcp.py').write_text(INERT_MCP, encoding='utf-8')
+                    mcp = {'mcpServers': {'hermes': {'command': sys.executable, 'args': [str(root / 'inert_mcp.py'), str(root / 'tools.json')]}}}
                 env, resolved = self._native_env()
                 # The queried frame lets the relay keep the cache breakpoint off native's per-request context.
                 request.admission = Admission(env.get('ANTHROPIC_BASE_URL', 'https://api.anthropic.com'), timeout, queried=frames[-1]['message']['content'])
