@@ -1381,9 +1381,15 @@ class Client:
         messages = [m for m in kwargs['messages'] if m.get('role') not in ('system', 'developer')]
         keys = [_message_key(m) for m in messages]
         # Every step re-runs baseline's launch guards; the launch configuration is part of reuse identity.
-        env, resolved, upstream, billed = self._native_env()
-        # The extra_usage setting refuses each step before anything is billed, as main does per call (#43).
-        check_extra_usage(resolved, billed, upstream)
+        try:
+            env, resolved, upstream, billed = self._native_env()
+            # The extra_usage setting refuses each step before anything is billed, as main does per call (#43).
+            check_extra_usage(resolved, billed, upstream)
+        except BaseException:
+            # A refused step never reaches the try below, whose finally forgets the request.
+            with self._lock:
+                self._requests.discard(request)
+            raise
         # Only what decides native auth/config; per-process values (CLAUDE_PID, session ids) must not force rebuilds.
         # The upstream (Anthropic or the profile's gateway) is part of it: a session never moves between hosts.
         # The CA bundle counts by content too: the relay and native load it once, at spawn.

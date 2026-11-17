@@ -171,3 +171,26 @@ def test_manifest_declares_the_setting_under_the_key_the_code_reads(profile):
     assert directsdk_setup.CONFIG_DIR_SETTING == SETTING
     assert field["type"] == "string" and field["default"] == ""
     assert field["label"] and field["description"]
+
+
+@pytest.mark.parametrize("exported", [False, True])
+def test_the_login_settle_runs_without_the_quiet_traffic_flag(profile, tmp_path, monkeypatch, exported):
+    """Telemetry is off by default, which sets CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC on every child. With it, the
+    CLI skips the account fetch `-p /usage` makes, the one that waits for a due refresh to land; the settle drops it,
+    as main's usage probe does, unless the user exported it."""
+    import directsdk_setup
+    _set_config_dir(str(tmp_path / "profile-login"))
+    captured = []
+    def run(argv, **kwargs):
+        captured.append((argv, kwargs["env"]))
+        return SimpleNamespace(stdout=json.dumps(PRO["auth"]), returncode=0)
+    monkeypatch.setattr(directsdk_setup.subprocess, "run", run)
+    monkeypatch.setattr(directsdk_setup.subprocess, "Popen", popen_from_run(run))
+    env = {"PATH": os.defpath, "HOME": str(tmp_path)}
+    if exported:
+        env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    assert directsdk_setup.setup_status(command=[sys.executable], env=env)["logged_in"]
+    settle = [child for argv, child in captured if argv[-2:] == ["-p", "/usage"]]
+    assert len(settle) == 1
+    assert ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" in settle[0]) == exported
+    assert settle[0].get("DISABLE_TELEMETRY")  # telemetry itself stays off

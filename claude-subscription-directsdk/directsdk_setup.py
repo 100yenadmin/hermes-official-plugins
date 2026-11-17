@@ -427,6 +427,10 @@ def settle_login(resolved, env, timeout, upstream=None):
     valid token, so it waits for that refresh to be saved before exiting; it sends no Messages request. The
     plugin cannot tell whether a refresh is due without opening the credential store, so it always runs it."""
     child = _child_env(env)  # the profile's config dir outranks an inherited one: reap where the probe looks
+    if "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in env:
+        # As main's /usage probe: with this flag (on by default since telemetry is off) the CLI skips the account
+        # fetch /usage makes, which is what waits for the due refresh to land.
+        child.pop("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", None)
     if upstream is not None:
         # /usage is one of Claude Code's own account calls: it leaves through the configured proxy and CA.
         egress_env(child, upstream)
