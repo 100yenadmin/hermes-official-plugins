@@ -609,10 +609,8 @@ def test_a_fork_on_another_model_leaves_the_chat_session_alive(rig):
 def test_rauth_conflicting_override_is_refused_on_reuse(rig, monkeypatch):
     """R-auth: the inherited-environment refusal runs on every session step, not only at spawn."""
     url = f'http://127.0.0.1:{rig.upstream.server.server_port}'
-    class Local(directsdk.Admission):
-        def __init__(self, upstream, timeout, queried=None, first_turn=None):
-            super().__init__(url, timeout, queried, first_turn=first_turn)
-    monkeypatch.setattr(directsdk, 'Admission', Local)
+    # Sessions build their relay through main's relay(upstream, ...): point it at the rig's upstream.
+    monkeypatch.setattr(directsdk, 'relay', lambda upstream, timeout, **kwargs: directsdk.Admission(url, timeout, **kwargs))
     fixture = rig.client()
     for key, value in fixture.env.items():
         if key != 'ANTHROPIC_BASE_URL':
@@ -1561,7 +1559,7 @@ def test_session_stdin_writes_are_bounded_and_abort_relay(tmp_path, phase):
     script = tmp_path / 'blocked.py'
     script.write_text('import time; time.sleep(30)')
     process = subprocess.Popen([sys.executable, str(script)], stdin=subprocess.PIPE,
-                               text=True, **directsdk._own_process_group())
+                               text=True, **directsdk.own_process_group())
     session = directsdk.NativeSession('fixture', None)
     session.process = process
     session.admission = directsdk.Admission('http://127.0.0.1:1', .15)
@@ -1590,7 +1588,7 @@ def test_session_reader_clears_unreaped_group_before_wait(monkeypatch):
     session = directsdk.NativeSession('fixture', None)
     session.process = process
     monkeypatch.setattr(directsdk.os, 'waitid', lambda *args: None, raising=False)
-    monkeypatch.setattr(directsdk, '_unreaped', lambda p, block=False: calls.append(('unreaped', block)) or True)
+    monkeypatch.setattr(directsdk, 'unreaped', lambda p, block=False: calls.append(('unreaped', block)) or True)
     monkeypatch.setattr(directsdk, 'kill_process_tree', lambda p: calls.append('kill'))
     session.read()
     if os.name != 'nt':
@@ -1604,7 +1602,9 @@ def test_session_kill_never_signals_a_reaped_process(monkeypatch):
     process = SimpleNamespace(wait=lambda **kwargs: calls.append('wait'))
     session = directsdk.NativeSession('fixture', None)
     session.process = process
-    monkeypatch.setattr(directsdk, '_unreaped', lambda p, block=False: False)
+    monkeypatch.setattr(directsdk, 'unreaped', lambda p, block=False: False)
+    # kill_process_tree lives in process_tree now and checks its own unreaped.
+    monkeypatch.setattr(sys.modules[directsdk.kill_process_tree.__module__], 'unreaped', lambda p, block=False: False)
     monkeypatch.setattr(directsdk.os, 'killpg', lambda *args: pytest.fail('signalled reaped group'), raising=False)
     if os.name == 'nt':
         process.poll = lambda: 0

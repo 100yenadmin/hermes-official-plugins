@@ -418,7 +418,7 @@ def reap_orphaned_refresh_lock(env):
         pass
 
 
-def settle_login(resolved, env, timeout):
+def settle_login(resolved, env, timeout, upstream=None):
     """Let a due OAuth refresh land before a short-lived probe runs.
 
     Every Claude Code command starts the refresh at init, and ``auth status`` exits before it lands
@@ -427,6 +427,9 @@ def settle_login(resolved, env, timeout):
     valid token, so it waits for that refresh to be saved before exiting; it sends no Messages request. The
     plugin cannot tell whether a refresh is due without opening the credential store, so it always runs it."""
     child = _child_env(env)  # the profile's config dir outranks an inherited one: reap where the probe looks
+    if upstream is not None:
+        # /usage is one of Claude Code's own account calls: it leaves through the configured proxy and CA.
+        egress_env(child, upstream)
     reap_orphaned_refresh_lock(child)
     try:
         subprocess.run(resolved + ["-p", "/usage"], env=child, stdin=subprocess.DEVNULL,
@@ -450,12 +453,13 @@ def setup_status(command=None, env=None, timeout=20):
     if resolved is None:
         return {"available": False, "logged_in": False, "plan": "", "detail": INSTALL_HINT, "login_command": None}
     login_command = resolved + ["auth", "login"]
-    settle_login(resolved, env, timeout)
     try:
         child = _child_env(env)
-        resolve_upstream()  # an unusable gateway setting fails setup, and an opted-in one logs where the login goes
+        upstream = resolve_upstream()  # an unusable gateway setting fails setup, and an opted-in one logs where the login goes
     except (UnscopedSecretError, ClaudeCodeLoggedOut, ClaudeUpstreamConfigError) as error:
         return {"available": True, "logged_in": False, "plan": "", "detail": str(error), "login_command": login_command}
+    # Only after the guards above: a refused setting must never start Claude Code, not even the login settle.
+    settle_login(resolved, env, timeout, upstream)
     try:
         run = subprocess.run(resolved + ["auth", "status"], env=child, stdin=subprocess.DEVNULL,
                              capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)

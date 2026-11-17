@@ -194,6 +194,7 @@ def test_setup_probes_use_the_serving_profiles_login(ambient, tmp_path, monkeypa
     _set_config_dir(str(tmp_path / "login"))
     with multiplexed({}):
         getattr(directsdk_setup, probe)(command=[sys.executable], env=env)
-    per_call = 1 if probe == "setup_status" else 2
+    # The session fork settles the login first (its own /usage probe), so each probe spawns once more than on main.
+    per_call = 2 if probe == "setup_status" else 3
     assert captured == [PROFILE] * per_call + [None] * per_call
     assert env[TOKEN] == AMBIENT

@@ -143,11 +143,13 @@ def test_the_clis_own_calls_take_the_configured_proxy_and_ca(clean, tmp_path, mo
         monkeypatch.setattr(directsdk_setup.subprocess, "run", run)
         monkeypatch.setattr(directsdk_setup.subprocess, "Popen", popen_from_run(run))
         getattr(directsdk_setup, probe)(command=[sys.executable], env=dict(os.environ, PATH=os.defpath))
-    env, = seen
-    assert _spellings(env, "HTTPS_PROXY") == ["http://svc:p%40ss@[::1]:3128"] * _SPELLINGS
-    assert env["NODE_EXTRA_CA_CERTS"] == str(ca)
-    # Only the loopback relay bypasses the proxy: an inherited exception would let the CLI's own calls skip it.
-    assert [value.split(",") for value in _spellings(env, "NO_PROXY")] == [["127.0.0.1", "localhost"]] * _SPELLINGS
+    # discover_models also runs the session fork's login settle (`-p /usage`), another of the CLI's own calls.
+    assert len(seen) == (2 if probe == "discover_models" else 1)
+    for env in seen:
+        assert _spellings(env, "HTTPS_PROXY") == ["http://svc:p%40ss@[::1]:3128"] * _SPELLINGS
+        assert env["NODE_EXTRA_CA_CERTS"] == str(ca)
+        # Only the loopback relay bypasses the proxy: an inherited exception would let the CLI's own calls skip it.
+        assert [value.split(",") for value in _spellings(env, "NO_PROXY")] == [["127.0.0.1", "localhost"]] * _SPELLINGS
     assert env["ANTHROPIC_BASE_URL"].startswith("http://127.0.0.1:")
 
 

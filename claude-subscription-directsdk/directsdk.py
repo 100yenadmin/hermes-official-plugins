@@ -28,6 +28,7 @@ from types import SimpleNamespace
 
 try:
     from . import concurrency
+    from .admission import Admission
     from .model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from .process_tree import kill_process_tree, own_process_group, unreaped
     from .directsdk_setup import (
@@ -37,6 +38,7 @@ try:
     from .directsdk_setup import session_mode_enabled, session_pool, claude_guidance_enabled, settle_answers_enabled, early_opener_enabled, QUIET_TRAFFIC
 except ImportError:
     import concurrency
+    from admission import Admission
     from model_catalog import accepts_thinking_disable, native_model, supports_adaptive_thinking
     from process_tree import kill_process_tree, own_process_group, unreaped
     from directsdk_setup import (

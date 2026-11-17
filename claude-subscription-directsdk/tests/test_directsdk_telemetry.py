@@ -66,7 +66,7 @@ def test_the_picker_handshake_fetches_feature_flags_with_telemetry_off(profile, 
     zero-inference handshake leaves both unset; error reporting stays off and auth status stays quiet."""
     if value:
         _set_telemetry(value)
-    status, handshake = _discovery_envs(profile, tmp_path)
+    _, status, handshake = _discovery_envs(profile, tmp_path)  # the session fork's login settle comes first
     assert {k: status.get(k) for k in QUIET} == dict.fromkeys(QUIET, "1")
     assert "DISABLE_TELEMETRY" not in handshake and "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC" not in handshake
     assert handshake["DISABLE_ERROR_REPORTING"] == "1" and handshake["DISABLE_AUTOUPDATER"] == "1"
