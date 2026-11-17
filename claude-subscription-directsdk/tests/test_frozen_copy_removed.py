@@ -28,7 +28,13 @@ print(json.dumps({'type': 'result', 'subtype': 'success', 'is_error': False, 'nu
 '''
 
 
-def test_requests_work_after_the_frozen_copy_is_deleted(profile, tmp_path):
+def test_requests_work_after_the_frozen_copy_is_deleted(profile, tmp_path, monkeypatch):
+    # In Hermes only the frozen copy holds the plugin's modules: hide the repo checkout the test bootstrap puts
+    # on sys.path, or the flat-import fallback would load from it and mask the bug.
+    repo = str(Path(__file__).resolve().parents[1])
+    monkeypatch.setattr(sys, 'path', [entry for entry in sys.path if str(Path(entry or '.').resolve()) != repo])
+    for name in ('directsdk', 'directsdk_setup', 'admission', 'model_catalog', 'inert_mcp'):
+        monkeypatch.delitem(sys.modules, name, raising=False)
     package = sys.modules[type(profile).__module__]
     copy = Path(package.__file__).resolve().parent
     installed = Path(os.environ['HERMES_HOME']).resolve() / 'plugins'
