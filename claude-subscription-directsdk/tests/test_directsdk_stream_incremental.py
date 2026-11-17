@@ -106,8 +106,9 @@ def test_session_text_arrives_before_message_stop(streamed_step):
     assert len(stops) == 1
     early = [c for c, arrived in zip(chunks, arrivals) if c.choices[0].delta.content and arrived < stops[0]]
     assert len(early) >= 2, 'text must stream before the peer writes message_stop'
-    assert all(not c.choices[0].delta.tool_calls for c in chunks[:-1])
-    assert chunks[-1].choices[0].delta.tool_calls
+    # Main's #326 in session mode: the call streams as native writes it, so the final chunk repeats none of it.
+    assert any(c.choices[0].delta.tool_calls for c in chunks[:-1])
+    assert not chunks[-1].choices[0].delta.tool_calls and chunks[-1]._response.choices[0].message.tool_calls
     assert ''.join(c.choices[0].delta.content or '' for c in chunks) == chunks[-1]._response.choices[0].message.content
     assert chunks[-1].choices[0].delta.reasoning_details[0]['type'].endswith('.native_assistant')
 
@@ -124,10 +125,11 @@ def test_session_thinking_only_final_chunk_keeps_carrier(streamed_step):
 
 def test_session_tool_arguments_keep_the_stream_alive(streamed_step):
     """Main's 019a7cc in session mode: while the model writes a call's arguments, Hermes' stale detector
-    still sees chunks (empty ones), so a long tool call is not cancelled as a stall."""
+    still sees chunks (tool-call deltas or empty ones), so a long tool call is not cancelled as a stall."""
     chunks, arrivals, stops = streamed_step()
     last_text = max(i for i, c in enumerate(chunks) if c.choices[0].delta.content)
     quiet = [c for c, arrived in zip(chunks[last_text + 1:-1], arrivals[last_text + 1:-1])
-             if arrived < stops[0] and not c.choices[0].delta.content and not c.choices[0].delta.tool_calls
+             if arrived < stops[0] and not c.choices[0].delta.content
              and not getattr(c.choices[0].delta, 'reasoning_content', None)]
-    assert len(quiet) >= 2, 'tool-argument events must reach Hermes as empty chunks'
+    # Each argument fragment now reaches Hermes as a tool-call delta (main #326), which also keeps the stream alive.
+    assert len(quiet) >= 2, 'tool-argument events must reach Hermes while the model writes them'
