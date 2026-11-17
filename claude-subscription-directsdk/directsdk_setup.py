@@ -244,19 +244,17 @@ def _secret_scope():
 
 def _serves_launch_profile():
     """True when the bound scope is the launch profile's own. Multiplexing makes every task routed, the launch
-    profile's own turns included (a Desktop backend serving several profiles). Core binds that profile's scope
-    unstamped, or stamped with the process home ("unstamped marks the process's own profile"), and its login is
-    the process's own, so it keeps it as a single-profile install does. A served profile's scope is stamped with
-    its own home. No scope bound, or a core without these names: False."""
+    profile's own turns included (a Desktop backend serving several profiles). Core binds that profile's secrets
+    unstamped ("the stamp marks a FOREIGN home": launch_profile_runtime_scope, model_switch), and its login is the
+    process's own, so it keeps it as a single-profile install does. A stamp, even one equal to the process home, is
+    not enough: a cron worker started with HERMES_HOME=<served profile> stamps that profile's scope with its own
+    home, which is then the process home, while ~/.claude still holds the launch profile's login. No scope bound,
+    or a core without these names: False."""
     try:
         from agent.secret_scope import current_secret_scope, current_secret_scope_home
-        from hermes_constants import get_routing_process_hermes_home, hermes_home_key
     except ImportError:
         return False
-    if current_secret_scope() is None:
-        return False
-    home = current_secret_scope_home()
-    return home is None or hermes_home_key(home) == hermes_home_key(get_routing_process_hermes_home())
+    return current_secret_scope() is not None and current_secret_scope_home() is None
 
 
 def _scoped(get_secret, name):

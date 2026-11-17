@@ -204,13 +204,11 @@ def test_setup_probes_use_the_serving_profiles_login(ambient, tmp_path, monkeypa
     assert env[TOKEN] == AMBIENT
 
 
-@pytest.mark.parametrize("stamp", ["unstamped", "own-home"])
-def test_the_launch_profiles_own_turn_keeps_its_login_under_multiplexing(ambient, tmp_path, monkeypatch, stamp):
+def test_the_launch_profiles_own_turn_keeps_its_login_under_multiplexing(ambient, tmp_path, monkeypatch):
     """eva fork: a Desktop backend serving several profiles multiplexes, so core counts every task as routed, the
-    launch profile's own turns too. Core binds that profile's scope unstamped (or stamped with the process home), and
-    its login is the process's own: its turns keep the inherited login instead of being refused, as on one profile."""
-    from hermes_constants import get_routing_process_hermes_home
-    home = None if stamp == "unstamped" else str(get_routing_process_hermes_home())
+    launch profile's own turns too. Core binds that profile's scope unstamped, and its login is the process's own:
+    its turns keep the inherited login instead of being refused, as on one profile."""
+    home = None
     client, seen = _native(tmp_path, monkeypatch)
     try:
         with multiplexed({}, home=home):
@@ -246,3 +244,14 @@ def test_cores_own_launch_turn_bind_keeps_the_launch_login(profile, tmp_path, mo
         reset_multiplex_context(mode)
         client.close()
     assert seen() == [None]
+
+
+def test_a_cron_worker_for_a_served_profile_is_still_refused(profile, tmp_path, monkeypatch):
+    """A cron worker started with HERMES_HOME=<served profile> pins that home as its process home and stamps the
+    profile's scope with it (cron/scheduler.py), while HOME and ~/.claude are still the launch profile's. A stamp equal
+    to the process home is therefore not "the launch profile": with no login of its own the turn is refused."""
+    import directsdk_setup
+    from hermes_constants import get_routing_process_hermes_home
+    monkeypatch.delenv(TOKEN, raising=False)
+    with multiplexed({}, home=str(get_routing_process_hermes_home())), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
+        _apply({"UNRELATED": "kept"})
