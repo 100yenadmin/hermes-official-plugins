@@ -7,6 +7,7 @@ import copy
 from collections import OrderedDict, deque
 from contextlib import suppress
 import hashlib
+import hmac
 import inspect
 import json
 import logging
@@ -2064,8 +2065,13 @@ class NativeSession:
 _KEY_PARTS = {'assistant': ('role', 'projection', 'carrier'), 'tool': ('role', 'call_id', 'content', 'is_error')}
 
 
+# Keyed per process: the divergence log compares a row's two sides within one gateway, and an unkeyed
+# hash of a short message ("yes") could be recovered from the log by guessing.
+_LOG_HASH_KEY = os.urandom(32)
+
+
 def _short_hash(text):
-    return hashlib.sha256(text.encode('utf-8')).hexdigest()[:12] if text is not None else '-'
+    return hmac.new(_LOG_HASH_KEY, text.encode('utf-8'), hashlib.sha256).hexdigest()[:12] if text is not None else '-'
 
 
 def _divergence(consumed, keys, messages, expect, why):

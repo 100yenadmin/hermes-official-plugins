@@ -2,7 +2,7 @@
 
 ## [0.4.0+session.11] - Unreleased
 
-- A session retired as `stale-or-diverged` now logs one `session diverged:` line first: where the request left the history the session had consumed (`at`, both lengths), the shape of the change (`insert`, `delete`, `replace-one`, `truncated`, `other`), how many overlapping rows differ, the role and changed field at that row, the lengths of the two keys and their common prefix and suffix, and a short hash of each side. For an unexpected suffix it logs what the session expected and what came. Ids, counts and hashes only, never message text. The comparison already ignores metadata Hermes adds, so every divergence is a change in replayed bytes.
+- A session retired because its conversation diverged (`rebuild:prefix` or `rebuild:suffix`) now logs one `session diverged:` line first; idle, dead, launch-identity and unpaired retirements log none: where the request left the history the session had consumed (`at`, both lengths), the shape of the change (`insert`, `delete`, `replace-one`, `truncated`, `other`), how many overlapping rows differ, the role and changed field at that row, the lengths of the two keys and their common prefix and suffix, and a short hash of each side, keyed with a random per-process secret so a short message can't be recovered from the log by guessing (the two sides still compare within one gateway process). For an unexpected suffix it logs what the session expected and what came. Ids, counts and hashes only, never message text. The comparison already ignores metadata Hermes adds, so every divergence is a change in replayed bytes.
 
 ## [0.4.0+session.10] - Unreleased
 

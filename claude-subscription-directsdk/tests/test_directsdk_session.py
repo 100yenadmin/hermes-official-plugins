@@ -462,6 +462,17 @@ def test_divergence_shapes():
     assert 'role=assistant/user' in line and 'parts=role' in line
 
 
+def test_the_divergence_hash_is_keyed_per_process():
+    import hashlib
+    row = directsdk._message_key({'role': 'user', 'content': 'yes'})
+    keyed = directsdk._short_hash(row)
+    assert keyed == directsdk._short_hash(row)  # old and new still compare within one process
+    assert keyed != hashlib.sha256(row.encode('utf-8')).hexdigest()[:12]
+    line = directsdk._divergence([row], [directsdk._message_key({'role': 'user', 'content': 'stop'})], [], 'user', 'prefix')
+    old, new = line.rsplit('hash=', 1)[1].split('/')
+    assert old == keyed and hashlib.sha256(row.encode('utf-8')).hexdigest()[:12] not in line
+
+
 def test_a_suffix_divergence_logs_what_was_expected(rig, caplog):
     caplog.set_level('INFO', logger=directsdk._session_log.name)
     messages = [{'role': 'user', 'content': 'call probe in parallel'}]
