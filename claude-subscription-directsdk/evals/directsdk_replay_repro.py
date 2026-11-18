@@ -8,6 +8,8 @@ one tool call pending on a live native, then makes the step that retires it:
   S2  a user message arrives with the pending call's result (/steer, an inbound message): unexpected suffix, replay
   S3  the pool loses the native with no kill line (as in a new gateway process): cold respawn, replay
   S3b the native process dies under the pool (killed when the next checkout finds it dead): cold respawn, replay
+  S1b S1, one more turn on the replayed native, then a second image: the first image is inside the compared prefix
+  C0b C0, one more turn on the replayed native, then a second shutdown: S1b's control with a text result
 For each it compares the old native's last forwarded request with the new native's first, and checks the cache
 entries every earlier request wrote (one per cache mark) against the new request's marks, walking back at most
 LOOKBACK blocks from each mark. Blocks are flattened in cached-prefix order: each tool, each system block, then each
@@ -35,7 +37,9 @@ from directsdk_cache_wire import LOOKBACK, content  # noqa: E402
 
 PNG = "data:image/png;base64,iVBORw0KGgo="  # as tests/test_directsdk_vision.py sends it
 SHAPES = {"C0": "control: logged shutdown, cold respawn", "S1": "image tool result", "S2": "user message with the pending result",
-          "S3": "pool loss, no kill line", "S3b": "native process died"}
+          "S3": "pool loss, no kill line", "S3b": "native process died",
+          "S1b": "image inside the compared prefix: S1, then a second image retires the replayed native",
+          "C0b": "text control for S1b: C0, one more turn, then a second logged shutdown"}
 RESULT = ("Public synthetic result\n" * 100)[:2048]
 
 
@@ -127,9 +131,18 @@ def analyse(wires, old_indices, new_index):
             "old_marks": [describe(fo, p) | {"flat": p} for p in marks(fo)], "new_marks": [describe(fn, p) | {"flat": p} for p in new_marks],
             "entries_written_before": len(entries), "reachable_hits": hits, "matching_entries": matching[-5:],
             "deepest_reachable_hit": deepest, "deepest_matching_entry": deepest_match, "old_native_tails": tails,
+            "old_native_self_continuity": self_continuity(wires, old_indices),
             "system_blocks": [describe(fn, p) for p in range(len(new.get("tools") or []), fixed)],
             "first_message_blocks": [describe(fn, p) for p, e in enumerate(fn) if e[0][0] == "messages" and e[0][1] == 0],
             "new_tail_blocks": [describe(fn, p) for p in range(max(fixed, len(fn) - 4), len(fn))]}
+
+
+def self_continuity(wires, indices):
+    """The old native's first request against its last: the first block where its own history changed, if any."""
+    first, last = flat(wires[indices[0]]), flat(wires[indices[-1]])
+    a, b = [key(e) for e in first], [key(e) for e in last]
+    p = next((p for p in range(len(a)) if p >= len(b) or a[p] != b[p]), None)
+    return {"requests": len(indices), "first_differing_block": None if p is None else {"first": describe(first, p), "last": describe(last, p)}}
 
 
 def negative_control(wires, old_indices, new_index):
@@ -180,12 +193,13 @@ def shape(native, binary, model, name, log, subscription, turns=1):
             history.append(pending)
             (call,) = pending["tool_calls"]
             result = {"role": "tool", "tool_call_id": call["id"], "content": RESULT}
-            if name == "S1":
-                result["content"] = [{"type": "text", "text": "Public synthetic screenshot:"}, {"type": "image_url", "image_url": {"url": PNG}}]
+            image = [{"type": "text", "text": "Public synthetic screenshot:"}, {"type": "image_url", "image_url": {"url": PNG}}]
+            if name in ("S1", "S1b"):
+                result["content"] = image
             history.append(result)
             if name == "S2":
                 history.append({"role": "user", "content": "Public steer: also check the second probe."})
-            if name == "C0":
+            if name in ("C0", "C0b"):
                 native._session_shutdown()
             elif name in ("S3", "S3b"):
                 with native._session_lock:
@@ -195,7 +209,15 @@ def shape(native, binary, model, name, log, subscription, turns=1):
                         session.killed = True  # gone with its process, as in a new gateway process: no kill line
                 native.kill_process_tree(session.process)
                 session.process.wait(timeout=10)
-            request(history, 0, "shape step")
+            answered = request(history, 0, "shape step")
+            if name in ("S1b", "C0b"):
+                old_pid = report["steps"][-1]["pid"]
+                history += [answered, {"role": "user", "content": f"Public main question {turns + 2}: run the probes."}]
+                pending = request(history, 1, "second hop (call left pending)")
+                history += [pending, {"role": "tool", "tool_call_id": pending["tool_calls"][0]["id"], "content": image if name == "S1b" else RESULT}]
+                if name == "C0b":
+                    native._session_shutdown()
+                request(history, 0, "second hop shape step")
             shaped = report["steps"][-1]
             old = [w for s in report["steps"][:-1] if s["pid"] == old_pid for w in s["wires"]]
             report["old_pid_differs_from_new"] = shaped["pid"] != old_pid
