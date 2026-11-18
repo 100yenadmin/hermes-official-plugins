@@ -517,13 +517,13 @@ def test_a_reissued_first_request_whose_row_changed_takes_the_ordinary_mismatch(
     assert relay(changed, [host], memory) == (changed, True)
 
 
-def test_a_spawn_row_digest_that_cannot_be_computed_forwards_unchanged_and_never_marks_unrestored():
+def test_a_changed_spawn_row_with_a_lone_surrogate_forwards_unchanged_and_never_marks_unrestored():
     host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
     memory, _ = spawned(host, {**host, "content": host["content"] + [REMINDER]})
     lone = {**host, "content": [{"type": "text", "text": "output"}, {"type": "text", "text": "x"}]}
     payload = later([lone]).replace(b'"text":"x"', b'"text":"\\ud800"')  # an escaped lone surrogate
     assert relay(payload, [{"type": "text", "text": "next"}], memory) == (payload, False)
-    assert memory["spawn_row"]["missed"].endswith(":error")
+    assert memory["spawn_row"]["missed"].endswith(":differs")
 
 
 def test_a_relay_closed_during_the_first_digest_keeps_no_record(monkeypatch):
@@ -563,3 +563,14 @@ def test_the_profile_counts_tool_use_inputs_and_thinking_signatures():
     assert admission._payload_chars(thought) == 13
     assert admission._payload_chars({**call, "input": {"key": "other"}}) == admission._payload_chars(call)  # same length
     assert admission._payload_chars({**thought, "signature": "s" * 11}) == 14
+
+
+def test_a_spawn_row_whose_addition_holds_a_lone_surrogate_is_recorded_and_cleaned_to_request_1s_bytes():
+    host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
+    sent = {**host, "content": host["content"] + [{"type": "text", "text": "\nSURROGATE"}]}
+    memory = {}
+    first = restore_queried_turn(wire([sent]).replace(b"SURROGATE", b"\\ud800"), [host], memory)  # escaped lone surrogate
+    assert memory["spawn_row"] is not None and memory["spawn_row"]["index"] == 1
+    forwarded, unrestored = relay(later([sent]).replace(b"SURROGATE", b"\\ud800"), [{"type": "text", "text": "next"}], memory)
+    assert row_bytes(forwarded) == row_bytes(first) and not unrestored and memory["spawn_row"]["missed"] is None
+

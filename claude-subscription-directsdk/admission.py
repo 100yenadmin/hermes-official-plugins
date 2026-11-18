@@ -615,9 +615,10 @@ def restore_queried_turn(payload, queried, memory=None, *, row=None, parsed=None
 
 
 def _sent_digest(content):
-    """sha256 and length of a row's content as sent, cache_control aside (ValueError on text it cannot encode)."""
-    plain = json.dumps(_plain_tree(content), sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(plain.encode('utf-8')).hexdigest(), len(plain)
+    """sha256 and length of a row's content as sent, cache_control aside, over its ASCII-escaped JSON (any text,
+    a lone surrogate included, encodes), the same form at spawn and on later requests."""
+    plain = json.dumps(_plain_tree(content), sort_keys=True)
+    return hashlib.sha256(plain.encode('ascii')).hexdigest(), len(plain)
 
 
 def restore_spawn_row(payload, memory):
