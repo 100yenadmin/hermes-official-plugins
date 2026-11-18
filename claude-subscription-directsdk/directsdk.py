@@ -1433,8 +1433,6 @@ class Client:
                     session.deliver(results)
             else:
                 self._session_spawn(session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved, upstream)
-                if how == 'cold':
-                    _session_respawned(session, keys)
             emitted, native_error, native_error_code, final = '', None, None, None
             rate_limit = None
             handed, opener_attempted, stopped = None, False, False
@@ -1599,8 +1597,12 @@ class Client:
                     _session_log.debug('session opener: step-end handoff failed')
             thinking = usage.get('output_tokens_details', {}).get('thinking_tokens', 0)
             # Keyed digests of the ident's parts (the tool list is also inside body): which part re-keyed a conversation.
-            parts = ' '.join(f'{name}={_short_hash(value)[:8]}' for name, value in (
-                ('tools', json.dumps(json.loads(body).get('tools'))), ('sys', json.dumps(system)), ('launch', json.dumps(launch)), ('body', body)))
+            # The step is already admitted: a diagnostic failure logs dashes and never raises.
+            try:
+                parts = ' '.join(f'{name}={_short_hash(value)[:8]}' for name, value in (
+                    ('tools', json.dumps(json.loads(body).get('tools'))), ('sys', json.dumps(system)), ('launch', json.dumps(launch)), ('body', body)))
+            except Exception:
+                parts = 'tools=- sys=- launch=- body=-'
             _session_log.info('session step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s %s',
                            session.ident[:8] + ':' + str(session.pid), how, int(admission.used), admission.denied, bool(admission.unrestored), time.monotonic() - started,
                            usage['input_tokens'], usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0), usage['output_tokens'], thinking, len(calls), assistant.get('stop_reason'), assistant.get('id'), parts)
@@ -1777,10 +1779,6 @@ _session_pool = []
 _session_reaper = None
 _session_noted = set()
 _session_failures, _session_off = 0, False
-# The first consumed row (keyed hash) and row count of the last retired session per ident (bounded): the next cold
-# step for that ident logs whether its first row changed. Metadata only, for the cache audit.
-_session_retired = OrderedDict()
-_session_retired_lock = threading.Lock()
 # The telemetry setting (applied per spawn) and the proxy route are fixed for a session's life: a change starts a new one.
 _SESSION_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
                      'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy', 'NODE_EXTRA_CA_CERTS')
@@ -2067,12 +2065,6 @@ class NativeSession:
                 return
             self.killed = True
         _session_log.info('session kill: session=%s reason=%s%s', self.ident[:8] + ':' + str(self.pid), reason, f' why={why}' if why else '')
-        if self.consumed:
-            with _session_retired_lock:
-                _session_retired[self.ident] = (_short_hash(self.consumed[0]), len(self.consumed))
-                _session_retired.move_to_end(self.ident)
-                while len(_session_retired) > 256:
-                    _session_retired.popitem(last=False)
         if self.process is not None:
             kill_process_tree(self.process)
             try:
@@ -2262,15 +2254,6 @@ def _session_discard(session, reason='step-failed-or-poisoned', why=None):
         if session in _session_pool:
             _session_pool.remove(session)
     session.kill(reason, why)
-
-
-def _session_respawned(session, keys):
-    """On a cold step for an ident retired earlier in this process: whether the first row changed (hashes and counts only)."""
-    with _session_retired_lock:
-        retired = _session_retired.pop(session.ident, None)
-    if retired is not None:
-        _session_log.info('session respawn: session=%s first_row_changed=%d rows=%d prev_rows=%d', session.ident[:8] + ':' + str(session.pid),
-                          int(retired[0] != _short_hash(keys[0] if keys else None)), len(keys), retired[1])
 
 
 def _session_reap():

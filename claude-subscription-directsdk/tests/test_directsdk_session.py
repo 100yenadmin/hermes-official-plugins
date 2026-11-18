@@ -1,5 +1,5 @@
 """Session mode: one live native session across Hermes steps; parked hermes tool calls; rebuild on divergence."""
-from collections import OrderedDict
+import hashlib
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -275,7 +275,6 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(directsdk, '_session_failures', 0)
     monkeypatch.setattr(directsdk, '_session_off', False)
     monkeypatch.setattr(directsdk, '_session_noted', set())
-    monkeypatch.setattr(directsdk, '_session_retired', OrderedDict())
     upstream = Upstream()
     native = tmp_path / 'native.py'
     native.write_text(NATIVE)
@@ -1831,35 +1830,59 @@ def test_a_poisoned_step_names_which_condition_retired_it(rig, caplog, text, why
     assert line.endswith(' reason=step-failed-or-poisoned why=' + why), line
 
 
-def test_the_step_line_carries_keyed_digests_of_each_identity_part(rig, caplog):
+def test_a_raised_or_closed_step_names_how_it_ended(rig, caplog):
+    """A step that raised names the exception type; a stream the caller closed first reads closed."""
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    with pytest.raises(directsdk.ClaudeAPIError):
+        step(rig.client(), [{'role': 'user', 'content': 'hit the limit'}])
+    stream = rig.client().create(model='sonnet', messages=[{'role': 'user', 'content': 'hello'}], tools=TOOLS, stream=True)
+    next(iter(stream))
+    stream.close()
+    assert [line.rsplit(' ', 2)[1:] for line in _session_lines(caplog, 'session kill:')] == [
+        ['reason=step-failed-or-poisoned', 'why=raised-ClaudeAPIError'], ['reason=step-failed-or-poisoned', 'why=closed']]
+
+
+def _digests(line):
+    return dict(field.split('=', 1) for field in line.split(' id=', 1)[1].split()[1:])
+
+
+def test_the_step_line_carries_keyed_digests_of_each_identity_part(rig, caplog, monkeypatch):
     """tools=, sys=, launch= and body= tell apart why a conversation was re-keyed; keyed hashes, never text."""
     caplog.set_level('INFO', logger=directsdk._session_log.name)
     other = [dict(TOOLS[0], function=dict(TOOLS[0]['function'], description='probe two'))]
-    for system, tools in (('SYSTEM ONE', TOOLS), ('SYSTEM TWO', TOOLS), ('SYSTEM ONE', other)):
-        rig.client().create(model='sonnet', messages=[{'role': 'system', 'content': system}, {'role': 'user', 'content': 'hi'}], tools=tools)
-    lines = _session_lines(caplog, 'session step:')
-    assert len(lines) == 3 and not any('SYSTEM' in line or 'probe two' in line for line in lines)
-    parts = [dict(field.split('=', 1) for field in line.split(' id=', 1)[1].split()[1:]) for line in lines]
-    assert all(list(p) == ['tools', 'sys', 'launch', 'body'] and all(len(v) == 8 for v in p.values()) for p in parts), parts
-    one, two, three = parts
-    assert one['sys'] != two['sys'] and {k: one[k] for k in ('tools', 'launch', 'body')} == {k: two[k] for k in ('tools', 'launch', 'body')}
-    assert one['tools'] != three['tools'] and one['body'] != three['body'] and (one['sys'], one['launch']) == (three['sys'], three['launch'])
+    def run(system, tools, launch=None):
+        client = rig.client()
+        if launch:
+            client.env['CLAUDE_SUBSCRIPTION_DIRECTSDK_AUDIT_PROBE'] = launch
+        client.create(model='sonnet', messages=[{'role': 'system', 'content': system}, {'role': 'user', 'content': 'hi'}], tools=tools)
+        return _digests(_session_lines(caplog, 'session step:')[-1])
+    one, two, three, four = run('SYSTEM ONE', TOOLS), run('SYSTEM TWO', TOOLS), run('SYSTEM ONE', other), run('SYSTEM ONE', TOOLS, 'x')
+    assert not any('SYSTEM' in line or 'probe two' in line for line in _session_lines(caplog, 'session step:'))
+    assert all(list(p) == ['tools', 'sys', 'launch', 'body'] and all(len(v) == 8 for v in p.values()) for p in (one, two, three, four))
+    same = lambda a, b, keys: all(a[k] == b[k] for k in keys)
+    assert one['sys'] != two['sys'] and same(one, two, ('tools', 'launch', 'body'))
+    assert one['tools'] != three['tools'] and one['body'] != three['body'] and same(one, three, ('sys', 'launch'))
+    assert one['launch'] != four['launch'] and same(one, four, ('tools', 'sys', 'body'))
+    # Keyed: not the plain sha256 of the input, and a new key changes every digest of the same inputs.
+    body = directsdk.request_body({'model': 'sonnet', 'tools': TOOLS})[0]
+    assert one['body'] == directsdk._short_hash(body)[:8] != hashlib.sha256(body.encode()).hexdigest()[:8]
+    plain_tools = json.dumps(json.loads(body)['tools'])
+    assert one['tools'] == directsdk._short_hash(plain_tools)[:8] != hashlib.sha256(plain_tools.encode()).hexdigest()[:8]
+    monkeypatch.setattr(directsdk, '_LOG_HASH_KEY', os.urandom(32))
+    rekeyed = run('SYSTEM ONE', TOOLS)
+    assert all(rekeyed[k] != one[k] for k in one), (rekeyed, one)
 
 
-def test_a_cold_respawn_logs_whether_its_first_row_changed(rig, caplog):
-    """A session retired for any reason leaves its first row's keyed hash and row count; the next cold step compares."""
+def test_a_digest_failure_logs_dashes_and_never_fails_the_step(rig, caplog, monkeypatch):
+    """The digests run after the step was admitted: a failure there must not turn the step into an error."""
     caplog.set_level('INFO', logger=directsdk._session_log.name)
-    messages = [{'role': 'user', 'content': 'hello'}]
-    messages += [as_history(step(rig.client(), messages)), {'role': 'user', 'content': 'again'}]
-    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
-    assert not _session_lines(caplog, 'session respawn:')
-    directsdk._session_shutdown()
-    messages += [as_history(step(rig.client(), messages)), {'role': 'user', 'content': 'third'}]
-    directsdk._session_shutdown()
-    messages[0] = {'role': 'user', 'content': 'hello, edited'}
-    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'cold'
-    lines = _session_lines(caplog, 'session respawn:')
-    assert [line.split(' ', 3)[3] for line in lines] == ['first_row_changed=0 rows=3 prev_rows=4', 'first_row_changed=1 rows=5 prev_rows=4'], lines
+    def broken(text):
+        raise RuntimeError('digest failed')
+    monkeypatch.setattr(directsdk, '_short_hash', broken)
+    response = step(rig.client(), [{'role': 'user', 'content': 'hi'}])
+    assert response.choices[0].message.content == 'echo hi'
+    (line,) = _session_lines(caplog, 'session step:')
+    assert line.endswith(' tools=- sys=- launch=- body=-'), line
 
 
 def _plain_tree(value):
