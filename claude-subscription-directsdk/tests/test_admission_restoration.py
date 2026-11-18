@@ -9,7 +9,8 @@ import threading
 
 import pytest
 
-from admission import Admission, QueriedTurnMismatch, restore_queried_turn
+import admission
+from admission import Admission, QueriedTurnMismatch, restore_queried_turn, restore_spawn_row
 import directsdk
 
 RESULT = {"type": "tool_result", "tool_use_id": "t1", "content": "output"}
@@ -439,6 +440,16 @@ def later(row):
     return wire(row, after=NEXT)
 
 
+def relay(payload, queried, memory):
+    """The relay's two passes as the handler runs them: (payload forwarded, whether the step is marked unrestored)."""
+    unrestored = False
+    try:
+        payload = restore_queried_turn(payload, queried, memory)
+    except QueriedTurnMismatch:
+        unrestored = True
+    return restore_spawn_row(payload, memory), unrestored
+
+
 def row_bytes(payload):
     return json.dumps(json.loads(payload)["messages"][1]["content"], separators=(",", ":"))
 
@@ -448,7 +459,7 @@ def test_the_remembered_spawn_row_is_cleaned_on_later_requests_to_the_first_requ
     sent = {**host, "content": host["content"] + [REMINDER]}
     memory, first_row = spawned(host, sent)
     assert memory["spawn_row"]["index"] == 1 and memory["spawn_row"]["frame"] == [host]
-    assert row_bytes(restore_queried_turn(later([copy.deepcopy(sent)]), [{"type": "text", "text": "next"}], memory)) == first_row
+    assert row_bytes(relay(later([copy.deepcopy(sent)]), [{"type": "text", "text": "next"}], memory)[0]) == first_row
     assert memory["spawn_row"]["missed"] is None
 
 
@@ -461,7 +472,7 @@ def test_a_remembered_spawn_row_that_is_not_the_recorded_row_forwards_byte_for_b
     host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
     memory, _ = spawned(host, {**host, "content": host["content"] + [REMINDER]})
     payload = later(row)
-    assert restore_queried_turn(payload, [{"type": "text", "text": "next"}], memory) is payload
+    assert relay(payload, [{"type": "text", "text": "next"}], memory) == (payload, False)
     assert memory["spawn_row"]["missed"].startswith("1:") and memory["spawn_row"]["missed"].endswith(":differs")
 
 
@@ -470,7 +481,7 @@ def test_an_image_on_the_remembered_row_survives_cleanup_byte_for_byte():
     host = {**RESULT, "content": [{"type": "text", "text": "screenshot:"}, image]}
     sent = {**host, "content": host["content"] + [REMINDER]}
     memory, first_row = spawned(host, sent)
-    cleaned = restore_queried_turn(later([copy.deepcopy(sent)]), [{"type": "text", "text": "next"}], memory)
+    cleaned, _ = relay(later([copy.deepcopy(sent)]), [{"type": "text", "text": "next"}], memory)
     assert row_bytes(cleaned) == first_row
     assert json.dumps(json.loads(cleaned)["messages"][1]["content"][0]["content"][1]) == json.dumps(image)
 
@@ -483,3 +494,54 @@ def test_a_turn_start_spawn_leaves_no_record_and_close_releases_one():
     gate = Admission("http://127.0.0.1:1", 5, first_turn={"spawn_row": {"frame": [RESULT]}})
     gate.close()
     assert gate.first_turn["spawn_row"] is None
+
+
+def test_a_newest_row_mismatch_still_sends_the_spawn_row_clean_and_the_rest_as_native_sent_it():
+    host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
+    sent = {**host, "content": host["content"] + [REMINDER]}
+    memory, first_row = spawned(host, sent)
+    calls = {"role": "assistant", "content": [{"type": "tool_use", "id": i, "name": "probe", "input": {}} for i in ("ta", "tb")]}
+    results = [{"type": "tool_result", "tool_use_id": i, "content": "r" + i} for i in ("ta", "tb")]
+    payload = wire([copy.deepcopy(sent)], after=[calls, {"role": "user", "content": results[::-1]}])  # native's own order
+    forwarded, unrestored = relay(payload, results, memory)
+    assert unrestored and row_bytes(forwarded) == first_row
+    assert json.loads(forwarded)["messages"][3:] == json.loads(payload)["messages"][3:]
+
+
+def test_a_reissued_first_request_whose_row_changed_takes_the_ordinary_mismatch():
+    host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
+    sent = {**host, "content": host["content"] + [REMINDER]}
+    memory, first_row = spawned(host, sent)
+    assert row_bytes(relay(wire([copy.deepcopy(sent)]), [host], memory)[0]) == first_row  # the same retry: clean
+    changed = wire([{**host, "content": [{"type": "text", "text": "output"}, {"type": "text", "text": " correction"}]}])
+    assert relay(changed, [host], memory) == (changed, True)
+
+
+def test_a_spawn_row_digest_that_cannot_be_computed_forwards_unchanged_and_never_marks_unrestored():
+    host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
+    memory, _ = spawned(host, {**host, "content": host["content"] + [REMINDER]})
+    lone = {**host, "content": [{"type": "text", "text": "output"}, {"type": "text", "text": "x"}]}
+    payload = later([lone]).replace(b'"text":"x"', b'"text":"\\ud800"')  # an escaped lone surrogate
+    assert relay(payload, [{"type": "text", "text": "next"}], memory) == (payload, False)
+    assert memory["spawn_row"]["missed"].endswith(":error")
+
+
+def test_a_relay_closed_during_the_first_digest_keeps_no_record(monkeypatch):
+    host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
+    memory, digest = {}, admission._sent_digest
+    def closing(content):
+        memory["spawn_row_closed"] = True  # what close() sets, racing the first request
+        return digest(content)
+    monkeypatch.setattr(admission, "_sent_digest", closing)
+    restore_queried_turn(wire([{**host, "content": host["content"] + [REMINDER]}]), [host], memory)
+    assert memory["spawn_row"] is None
+
+
+def test_each_step_starts_with_no_spawn_row_outcome():
+    gate = Admission("http://127.0.0.1:1", 5, first_turn={"spawn_row": {"missed": "1:10/20:differs"}})
+    try:
+        gate.rearm(5, [{"type": "text", "text": "next"}])
+        assert gate.first_turn["spawn_row"]["missed"] is None
+    finally:
+        gate.close()
+

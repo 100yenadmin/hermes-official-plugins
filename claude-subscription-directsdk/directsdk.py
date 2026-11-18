@@ -1602,9 +1602,9 @@ class Client:
                 parts = ' '.join(f'{name}={_short_hash(value)[:8]}' for name, value in (
                     ('tools', json.dumps(json.loads(body).get('tools'))), ('sys', json.dumps(system)), ('launch', json.dumps(launch)), ('body', body)))
                 # The relay forwarded the remembered spawn row uncleaned: index:chars now/at spawn:why (log only).
-                spawn = admission.first_turn.get('spawn_row') if isinstance(admission.first_turn, dict) else None
-                if spawn and spawn.get('missed'):
-                    parts += f" spawn_row_kept={spawn['missed']}"
+                kept_row = admission.first_turn.get('spawn_row') if isinstance(admission.first_turn, dict) else None
+                if kept_row and kept_row.get('missed'):
+                    parts += f" spawn_row_kept={kept_row['missed']}"
             except Exception:
                 parts = 'tools=- sys=- launch=- body=-'
             _session_log.info('session step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s %s',

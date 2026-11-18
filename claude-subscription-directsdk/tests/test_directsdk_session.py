@@ -23,6 +23,7 @@ with open(os.environ['SPAWNS'], 'a') as f:
     f.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv[1:], 'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'), 'entrypoint': os.environ.get('CLAUDE_CODE_ENTRYPOINT'), 'compact': [os.environ.get(k) for k in ('DISABLE_COMPACT', 'DISABLE_AUTO_COMPACT')], 'memory': [os.environ.get(k) for k in ('CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'CLAUDE_CODE_DISABLE_CLAUDE_MDS')]}) + '\n')
 history, queue, rpc, answered, limits = [], [], [0], {}, {}
 first_query = True
+queries = [0]
 def out(row):
     print(json.dumps(row), flush=True)
 def persist(block, result, force=False):
@@ -77,6 +78,13 @@ def wire():
     reminder = '\n<system-reminder>userEmail: user@example.com</system-reminder>'
     if first_query and os.environ.get('NATIVE_CONTEXT') and len(history) == 1:
         history[0]['content'].insert(0, {'type':'text','text':reminder})
+    queries[0] += 1
+    if os.environ.get('FAKE_EDIT_SPAWN_ROW') and queries[0] in (2, 3):
+        # The native's second request carries one more block in row 2; its third drops it again.
+        if queries[0] == 2:
+            history[2]['content'].append({'type':'text','text':' SECRETEDIT'})
+        else:
+            history[2]['content'].pop()
     if not first_query and os.environ.get('FAKE_EDIT_OLD_ROW') and len(history[0]['content']) == 1:
         history[0]['content'].append({'type':'text','text':' SECRETEDIT'})  # a live native rewrites a row it already sent
     newest = history[-1]['content'] if history and history[-1]['role'] == 'user' and isinstance(history[-1]['content'], list) else []
@@ -1988,4 +1996,45 @@ def test_a_failing_row_profile_leaves_the_request_and_the_step_intact(rig, caplo
     response = step(rig.client(), messages)
     assert response.choices[0].message.content == 'echo again' and response.usage.model_dump()['native_admission']['session'] == 'reused'
     assert _parity_lines(caplog) == []
+
+
+def _spawn_at_tool_result_row(rig, env):
+    """A native spawned at a tool-result row on the fake subscription login: it keeps its reminder in that row."""
+    def client():
+        c = rig.client()
+        c.env.update(env, NATIVE_KEEP_CONTEXT='1')
+        return c
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(client(), messages)
+    messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': f'R{i}'} for i, c in enumerate(first.choices[0].message.tool_calls)]
+    directsdk._session_shutdown()
+    messages.append(as_history(step(client(), messages)))
+    assert directsdk._session_pool[0].admission.first_turn['spawn_row']['index'] == 2
+    return client, messages
+
+
+def test_the_step_line_shows_a_spawn_row_left_uncleaned_only_on_that_step(rig, caplog):
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    client, messages = _spawn_at_tool_result_row(rig, {'FAKE_EDIT_SPAWN_ROW': '1'})
+    for text in ('again', 'third'):
+        messages.append({'role': 'user', 'content': text})
+        response = step(client(), messages)
+        assert response.usage.model_dump()['native_admission']['session'] == 'reused'
+        messages.append(as_history(response))
+    lines = _session_lines(caplog, 'session step:')[-2:]
+    assert ' spawn_row_kept=2:' in lines[0] and lines[0].endswith(':differs') and 'SECRET' not in lines[0], lines[0]
+    assert 'spawn_row_kept' not in lines[1], lines[1]
+
+
+@pytest.mark.parametrize('record', [False, True])
+def test_a_reused_step_leaves_launch_accounting_alone_with_or_without_a_spawn_row_record(rig, monkeypatch, record):
+    if record:
+        client, messages = _spawn_at_tool_result_row(rig, {})
+    else:
+        client, messages = rig.client, [{'role': 'user', 'content': 'hello'}]
+        messages.append(as_history(step(client(), messages)))
+    monkeypatch.setattr(directsdk, '_session_failures', 1)  # one failed launch elsewhere, since this native's launch
+    messages.append({'role': 'user', 'content': 'again'})
+    assert step(client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    assert directsdk._session_failures == 1  # a reused step is no launch
 

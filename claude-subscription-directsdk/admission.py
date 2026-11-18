@@ -472,28 +472,26 @@ def stream_tool_input(payload):
         return payload
 
 
-def restore_queried_turn(payload, queried, memory=None):
+def restore_queried_turn(payload, queried, memory=None, *, row=None, parsed=None):
     """Restore a uniquely anchored tool-result frame without dropping protected content.
 
     Only trailing bare text is removable. Split/joined text runs are equivalent
     for matching, but never across media, metadata or cache directives. Restore
     the host's original representation and retain unambiguously mapped markers.
-
-    Session mode (``memory``): a native whose first query answers a replayed tool-result row appends its
-    context (the account reminder on a subscription login) inside that row and keeps it, so from its next
-    step on, when the row is no longer the newest, the row went upstream with it while a successor replays
-    it without. The first request records the row it cleaned: its index, Hermes' frame and a digest of the
-    row exactly as native sent it (cache_control aside), which pins both the frame and native's addition.
-    Each later request cleans that row the same way only when it still equals that sent row; anything else
-    forwards as is, and ``memory['spawn_row']['missed']`` says why (log only, never a decision).
+    The frame is the newest user row, or message ``row`` of an already ``parsed`` body (``restore_spawn_row``).
+    With a session's ``memory``, the native's first request records the row it cleaned (see
+    ``restore_spawn_row``); once a record exists, a request whose newest row is at that index (a re-issued first
+    request) restores it only while it still equals the row native sent then.
     """
-    first = isinstance(memory, dict) and 'spawn_row' not in memory
+    first = isinstance(memory, dict) and row is None and 'spawn_row' not in memory
     if first:
         memory['spawn_row'] = None  # only the native's first request records its row
-    kept = memory.get('spawn_row') if isinstance(memory, dict) else None
-    strict = isinstance(queried, list) and any(isinstance(block, dict) and block.get('type') == 'tool_result' for block in queried)
-    # An ordinary user-only frame is outside restoration scope, byte for byte (a remembered spawn row aside).
-    if not strict and kept is None:
+    kept = memory.get('spawn_row') if isinstance(memory, dict) and row is None else None
+    if not isinstance(queried, list) or not queried:
+        return payload
+    strict = any(isinstance(block, dict) and block.get('type') == 'tool_result' for block in queried)
+    # An ordinary user-only frame is outside restoration scope, byte for byte.
+    if not strict:
         return payload
 
     def unmatched():
@@ -573,46 +571,11 @@ def restore_queried_turn(payload, queried, memory=None):
             return unmatched()
         return restored
 
-    def sent_digest(content):
-        plain = json.dumps(_plain_tree(content), sort_keys=True, ensure_ascii=False)
-        return hashlib.sha256(plain.encode('utf-8')).hexdigest(), len(plain)
-
-    def spawn_row(messages, index):
-        """The remembered row cleaned as on the first request, or None (forwarded as is)."""
-        if kept is None or kept['index'] == index:
-            return None  # nothing remembered, or the row is the newest again (a re-issued first request)
-        i = kept['index']
-        row = messages[i] if i < len(messages) else {}
-        content = row.get('content') if row.get('role') == 'user' else None
-        if not isinstance(content, list):
-            kept['missed'] = f'{i}:-/{kept["chars"]}:shape'
-            return None
-        digest, chars = sent_digest(content)
-        if digest != kept['sent']:
-            kept['missed'] = f'{i}:{chars}/{kept["chars"]}:differs'
-            return None
-        try:
-            cleaned = restore_sequence(content, kept['frame'])
-        except QueriedTurnMismatch:
-            kept['missed'] = f'{i}:{chars}/{kept["chars"]}:unmatched'
-            return None
-        # Until the newest row below restores too, the whole request forwards as native sent it.
-        kept['missed'] = f'{i}:{chars}/{kept["chars"]}:request-unrestored'
-        return cleaned
-
     try:
-        body = json.loads(payload)
+        body = json.loads(payload) if parsed is None else parsed
         messages = body['messages']
         last_assistant = max((i for i, m in enumerate(messages) if m.get('role') == 'assistant'), default=-1)
-        index = last_assistant + 1
-        cleaned = spawn_row(messages, index)
-        if cleaned is not None:
-            messages[kept['index']]['content'] = cleaned
-        if not strict:
-            if cleaned is None:
-                return payload
-            kept['missed'] = None
-            return json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        index = last_assistant + 1 if row is None else row
         newest = messages[index] if index < len(messages) else {}
         native = newest.get('content') if newest.get('role') == 'user' else None
         if not isinstance(native, list):
@@ -628,23 +591,71 @@ def restore_queried_turn(payload, queried, memory=None):
         # reminder-pattern stripping can accidentally choose another host span.
         if result_ids != native_ids:
             return unmatched()
+        if kept and kept['index'] == index and _sent_digest(native)[0] != kept['sent']:
+            return unmatched()  # a re-issued first request whose row changed since: the ordinary mismatch
         restored = restore_sequence(native, queried)
         if first and native != restored:
-            # Hermes' frame by reference (released when the relay closes) and a digest of native's row.
-            digest, chars = sent_digest(native)
-            memory['spawn_row'] = {'index': index, 'frame': queried, 'sent': digest, 'chars': chars, 'missed': None}
-        if cleaned is not None:
-            kept['missed'] = None
-        if native == restored and cleaned is None:
+            try:
+                digest, chars = _sent_digest(native)
+            except ValueError:
+                digest = None  # text JSON cannot encode (a lone surrogate): remember nothing
+            if digest is not None:
+                # Hermes' frame by reference (released when the relay closes) and a digest of native's row.
+                memory['spawn_row'] = {'index': index, 'frame': queried, 'sent': digest, 'chars': chars, 'missed': None}
+                if memory.get('spawn_row_closed'):
+                    memory['spawn_row'] = None  # the relay closed meanwhile: keep nothing
+        if native == restored:
             return payload
         newest['content'] = restored
         return json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     except QueriedTurnMismatch:
         raise
     except (ValueError, TypeError, KeyError, AttributeError, IndexError):
-        if not strict:
-            return payload  # a user-only frame never reports a mismatch
         return unmatched()
+
+
+def _sent_digest(content):
+    """sha256 and length of a row's content as sent, cache_control aside (ValueError on text it cannot encode)."""
+    plain = json.dumps(_plain_tree(content), sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(plain.encode('utf-8')).hexdigest(), len(plain)
+
+
+def restore_spawn_row(payload, memory):
+    """Session mode, its own pass after ``restore_queried_turn``: clean the tool-result row a native was spawned at.
+
+    A native whose first query answers a replayed tool-result row appends its context (the account reminder on a
+    subscription login) inside that row and keeps it, so once the row is no longer the newest it went upstream
+    with it while a successor replays it without. The first request recorded the row's index, Hermes' frame and a
+    digest of the row exactly as native sent it (cache_control aside), which pins both the frame and native's
+    addition. This pass cleans only that row, and only while it still equals that sent row, to the first request's
+    content. Anything else, and any failure here, returns its input unchanged; ``kept['missed']`` says why
+    (index:chars now/at spawn:why, log only). Nothing here touches ``unrestored`` or any other decision input."""
+    kept = memory.get('spawn_row') if isinstance(memory, dict) else None
+    if not kept:
+        return payload
+    try:
+        i = kept['index']
+        kept['missed'] = f'{i}:-/{kept["chars"]}:error'
+        body = json.loads(payload)
+        messages = body['messages']
+        if i == max((k for k, m in enumerate(messages) if m.get('role') == 'assistant'), default=-1) + 1:
+            kept['missed'] = None
+            return payload  # the newest row again (a re-issued first request): restore_queried_turn decided it
+        row = messages[i] if i < len(messages) else None
+        content = row.get('content') if isinstance(row, dict) and row.get('role') == 'user' else None
+        if not isinstance(content, list):
+            kept['missed'] = f'{i}:-/{kept["chars"]}:shape'
+            return payload
+        digest, chars = _sent_digest(content)
+        if digest != kept['sent']:
+            kept['missed'] = f'{i}:{chars}/{kept["chars"]}:differs'
+            return payload
+        kept['missed'] = f'{i}:{chars}/{kept["chars"]}:unmatched'
+        cleaned = restore_queried_turn(payload, kept['frame'], row=i, parsed=body)
+        kept['missed'] = None
+        return cleaned
+    except Exception:
+        return payload
 
 
 _ROLE_CODES = {'user': 'u', 'assistant': 'a', 'system': 's'}
@@ -899,6 +910,9 @@ class Admission:
             self.timeout, self.used, self.denied, self.queried = timeout, False, 0, queried
             self.request_id = self.status = self.failure = self.unrestored = None
             self.capture, self.error_body = Capture(), b''
+            kept = self.first_turn.get('spawn_row') if isinstance(self.first_turn, dict) else None
+            if kept:
+                kept['missed'] = None  # each step logs only its own spawn-row outcome
             # Each step may buy its own refresh re-issue (#162), as each per-call request does.
             self.auth_retry_used = False
 
@@ -920,8 +934,10 @@ class Admission:
                         pass
 
     def close(self):
-        if isinstance(self.first_turn, dict) and self.first_turn.get('spawn_row'):
-            self.first_turn['spawn_row'] = None  # the remembered frame may hold base64 images
+        if isinstance(self.first_turn, dict):
+            self.first_turn['spawn_row_closed'] = True  # set first: a first request recording meanwhile drops it
+            if self.first_turn.get('spawn_row'):
+                self.first_turn['spawn_row'] = None  # the remembered frame may hold base64 images
         self.parity = self.parity_prev = None
         self.abort()
         self.server.shutdown()
@@ -1035,6 +1051,7 @@ class Handler(BaseHTTPRequestHandler):
                 # exactly as native built it (the pre-restoration behaviour), so a CLI that
                 # reshapes its tool results degrades to an uncached tail, never a failed turn.
                 gate.unrestored = str(exc)
+            payload = restore_spawn_row(payload, getattr(gate, 'first_turn', None))
             payload = stable_request_context(payload, gate.queried,
                                              session=isinstance(getattr(gate, 'first_turn', None), dict))
             payload = pin_message_breakpoint(payload, gate.queried, gate.first_turn)
