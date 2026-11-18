@@ -262,6 +262,27 @@ def _serves_launch_profile():
     return current_secret_scope() is not None and current_secret_scope_home() is None
 
 
+def _scope_is_process_profile():
+    """True when the bound scope's profile is the one this process was started for: its stamp names the routing
+    process home (core stamps the launch profile's own in-process cron fire that way, and a restart-safe cron worker
+    runs with the fired profile's home as its process home). Unstamped, unbound, a foreign stamp, or a core without
+    these names: False."""
+    try:
+        from agent.secret_scope import current_secret_scope, current_secret_scope_home
+        from hermes_constants import get_routing_process_hermes_home, hermes_home_key
+    except ImportError:
+        return False
+    if current_secret_scope() is None:
+        return False
+    home = current_secret_scope_home()
+    if home is None:
+        return False
+    try:
+        return hermes_home_key(home) == hermes_home_key(get_routing_process_hermes_home())
+    except Exception:
+        return False
+
+
 def _scoped(get_secret, name):
     value = get_secret(name)
     return value.strip() if isinstance(value, str) and value.strip() else None
@@ -294,9 +315,11 @@ def apply_profile_credential(env):
     get_secret, routed = _secret_scope()
     if routed and _serves_launch_profile():
         routed = False  # the launch profile's own turn under multiplexing: its own login, as before (eva fork)
-    if routed and _setting(INHERIT_LOGIN_SETTING) is True:
+    if routed and _setting(INHERIT_LOGIN_SETTING) is True and _scope_is_process_profile():
         # eva fork: the served profile's own config says its login is the one this process inherited (~/.claude
-        # or the gateway's token). Read from that profile's config, so another profile never gains it this way.
+        # or the gateway's token), and this process was started for that profile, so what it inherited is that
+        # login. Read from that profile's config, so another profile never gains it this way; a process started
+        # for another profile (a Desktop backend's Run now of this profile's job) keeps refusing.
         routed = False
     for name in PROFILE_SECRETS:
         value = _scoped(get_secret, name) if get_secret else None

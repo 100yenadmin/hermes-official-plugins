@@ -29,7 +29,7 @@ config_schema:
     type: bool
     default: false
     label: Use the login this Hermes process inherited
-    description: For the profile whose Claude login is the shared ~/.claude (or the gateway's token). Its cron jobs, Run now and other served tasks keep that login under multiplexing instead of being refused. Leave off for any other profile.
+    description: For the profile whose Claude login is the shared ~/.claude (or the gateway's token). Its cron jobs, Run now and other served tasks keep that login under multiplexing instead of being refused. It counts only in a process started for this profile. Leave off for any other profile, and never set it in a machine-wide managed config.
   claude_code_telemetry:
     type: bool
     default: false

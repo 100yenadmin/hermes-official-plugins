@@ -296,7 +296,7 @@ def test_the_launch_profiles_own_cron_fire_keeps_its_login_when_it_says_so(profi
 
 
 @pytest.mark.parametrize("value", ["true", "yes", 1, "on"])
-def test_only_a_literal_true_inherits_the_login(profile, monkeypatch, value):
+def test_only_a_yaml_boolean_true_inherits_the_login(profile, monkeypatch, value):
     """A credential switch: a string or number that merely looks true does not open it."""
     import directsdk_setup
     from hermes_constants import get_hermes_home
@@ -306,32 +306,78 @@ def test_only_a_literal_true_inherits_the_login(profile, monkeypatch, value):
         _apply({"UNRELATED": "kept"})
 
 
-def test_another_profile_never_inherits_the_launch_login_through_the_setting(profile, tmp_path, monkeypatch):
-    """The setting is read from the served profile's own config: the launch profile opting in gives a served profile
-    nothing, in or out of a cron worker. A served profile that sets it itself has chosen the inherited login."""
-    import directsdk_setup
-    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
-    monkeypatch.delenv(TOKEN, raising=False)
-    _settings(get_hermes_home(), inherit_launch_login=True)
-    served = tmp_path / "served-home"
-    served.mkdir()
-    (served / "config.yaml").write_text("plugins:\n  enabled: []\n", encoding="utf-8")
-    for worker in (False, True):
-        if worker:
-            monkeypatch.setenv("_HERMES_CRON_EXTERNAL_WORKER", "exec-1")
-        token = set_hermes_home_override(served)
-        try:
-            with multiplexed({}, home=str(served)), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
-                _apply({"UNRELATED": "kept"})
-        finally:
-            reset_hermes_home_override(token)
-    _settings(served, inherit_launch_login=True)
-    token = set_hermes_home_override(served)
+@contextmanager
+def _process_started_for(home):
+    """This process as one started for ``home`` (a restart-safe cron worker, or a Desktop backend for that profile):
+    core pins it as the routing process home."""
+    import hermes_constants
+    previous = hermes_constants._PINNED_PROCESS_HERMES_HOME
+    hermes_constants.pin_process_hermes_home(home)
     try:
-        with multiplexed({}, home=str(served)):
-            assert _apply({"UNRELATED": "kept"}) == {"UNRELATED": "kept"}
+        yield
+    finally:
+        hermes_constants.pin_process_hermes_home(previous)
+
+
+@contextmanager
+def _served_turn(home):
+    """A task of the profile at ``home``, bound as core binds it: home override plus a scope stamped with it."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+    token = set_hermes_home_override(home)
+    try:
+        with multiplexed({}, home=str(home)):
+            yield
     finally:
         reset_hermes_home_override(token)
+
+
+def _profile_home(tmp_path, name, **settings):
+    home = tmp_path / name
+    home.mkdir()
+    if settings:
+        _settings(home, **settings)
+    else:
+        (home / "config.yaml").write_text("plugins:\n  enabled: []\n", encoding="utf-8")
+    return home
+
+
+def test_another_profile_never_inherits_the_launch_login_through_the_setting(profile, tmp_path, monkeypatch):
+    """The setting is read from the served profile's own config: the launch profile opting in gives a served profile
+    nothing. A served profile opting in gets nothing either while this process was started for another profile:
+    what it inherited is that profile's login."""
+    import directsdk_setup
+    from hermes_constants import get_hermes_home
+    monkeypatch.delenv(TOKEN, raising=False)
+    _settings(get_hermes_home(), inherit_launch_login=True)
+    for served in (_profile_home(tmp_path, "served-plain"), _profile_home(tmp_path, "served-opted", inherit_launch_login=True)):
+        with _served_turn(served), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
+            _apply({"UNRELATED": "kept"})
+
+
+def test_a_backend_started_for_another_profile_never_lends_its_login_to_an_opted_in_profiles_job(profile, tmp_path,
+                                                                                                monkeypatch):
+    """Astra v2 finding: a Desktop backend started for profile X runs eva's job (Run now). Core binds eva's home, so
+    the plugin reads eva's true, but the login this process inherited is X's. The opt-in counts only when the process
+    was started for the profile that set it."""
+    import directsdk_setup
+    monkeypatch.delenv(TOKEN, raising=False)
+    eva = _profile_home(tmp_path, "eva-home", inherit_launch_login=True)
+    other = _profile_home(tmp_path, "other-home")
+    with _process_started_for(other), _served_turn(eva), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
+        _apply({"UNRELATED": "kept"})
+
+
+def test_an_opted_in_profiles_own_cron_worker_keeps_the_inherited_login(profile, tmp_path, monkeypatch):
+    """A restart-safe cron worker for eva's job: started with HERMES_HOME=eva (her process home) and her scope stamped
+    with it. Opted in, the job runs on the login the worker inherited; not opted in, it is refused as before."""
+    import directsdk_setup
+    monkeypatch.delenv(TOKEN, raising=False)
+    plain = _profile_home(tmp_path, "plain-home")
+    with _process_started_for(plain), _served_turn(plain), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
+        _apply({"UNRELATED": "kept"})
+    eva = _profile_home(tmp_path, "eva-home", inherit_launch_login=True)
+    with _process_started_for(eva), _served_turn(eva):
+        assert _apply({"UNRELATED": "kept"}) == {"UNRELATED": "kept"}
 
 
 def test_a_cron_worker_for_a_served_profile_is_still_refused(profile, tmp_path, monkeypatch):
