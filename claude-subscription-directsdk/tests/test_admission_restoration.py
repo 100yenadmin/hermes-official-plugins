@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from admission import Admission, QueriedTurnMismatch, restore_queried_turn, restore_spawn_row
+from admission import Admission, QueriedTurnMismatch, restore_queried_turn
 import directsdk
 
 RESULT = {"type": "tool_result", "tool_use_id": "t1", "content": "output"}
@@ -423,15 +423,63 @@ def test_restoration_is_anchored_on_hermes_ids_and_content_not_native_wording(an
     assert restored["messages"][-1]["content"] == [RESULT]
 
 
-def test_a_remembered_spawn_row_that_no_longer_matches_forwards_unchanged():
-    """A native's later request whose spawn row differs from Hermes' frame in anything but appended plain text
-    (here another result text) goes upstream byte for byte as native sent it."""
-    host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
-    memory = {}
-    first = wire([{**host, "content": [{"type": "text", "text": "output"}, {"type": "text", "text": "\n<system-reminder>context</system-reminder>"}]}])
-    assert strip(json.loads(restore_queried_turn(first, [host], memory))["messages"][1]["content"]) == [host]
-    assert memory["spawn_row"] == (1, [host])
-    later = wire([{**host, "content": [{"type": "text", "text": "changed"}, {"type": "text", "text": "\n<system-reminder>context</system-reminder>"}]}],
-                 after=[{"role": "assistant", "content": [{"type": "text", "text": "done"}]}, {"role": "user", "content": "next"}])
-    assert restore_spawn_row(later, memory) is later
+REMINDER = {"type": "text", "text": "\n<system-reminder>context</system-reminder>"}
+NEXT = [{"role": "assistant", "content": [{"type": "text", "text": "done"}]}, {"role": "user", "content": "next"}]
 
+
+def spawned(host, sent):
+    """A native's first request at a tool-result row, then the memory it leaves and the row it sent."""
+    memory = {}
+    first = json.loads(restore_queried_turn(wire([sent]), [host], memory))
+    return memory, json.dumps(first["messages"][1]["content"], separators=(",", ":"))
+
+
+def later(row):
+    """A later request of that native: the spawn row is no longer the newest; the newest is a user-only frame."""
+    return wire(row, after=NEXT)
+
+
+def row_bytes(payload):
+    return json.dumps(json.loads(payload)["messages"][1]["content"], separators=(",", ":"))
+
+
+def test_the_remembered_spawn_row_is_cleaned_on_later_requests_to_the_first_requests_bytes():
+    host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
+    sent = {**host, "content": host["content"] + [REMINDER]}
+    memory, first_row = spawned(host, sent)
+    assert memory["spawn_row"]["index"] == 1 and memory["spawn_row"]["frame"] == [host]
+    assert row_bytes(restore_queried_turn(later([copy.deepcopy(sent)]), [{"type": "text", "text": "next"}], memory)) == first_row
+    assert memory["spawn_row"]["missed"] is None
+
+
+@pytest.mark.parametrize("row", [
+    # Astra's counterexamples: other text after the original content, and a user text block after the result.
+    [{**RESULT, "content": [{"type": "text", "text": "output"}, {"type": "text", "text": " correction"}]}],
+    [{**RESULT, "content": [{"type": "text", "text": "output"}, REMINDER]}, {"type": "text", "text": "a separate user text"}],
+])
+def test_a_remembered_spawn_row_that_is_not_the_recorded_row_forwards_byte_for_byte(row):
+    host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
+    memory, _ = spawned(host, {**host, "content": host["content"] + [REMINDER]})
+    payload = later(row)
+    assert restore_queried_turn(payload, [{"type": "text", "text": "next"}], memory) is payload
+    assert memory["spawn_row"]["missed"].startswith("1:") and memory["spawn_row"]["missed"].endswith(":differs")
+
+
+def test_an_image_on_the_remembered_row_survives_cleanup_byte_for_byte():
+    image = {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "iVBORw0KGgo="}}
+    host = {**RESULT, "content": [{"type": "text", "text": "screenshot:"}, image]}
+    sent = {**host, "content": host["content"] + [REMINDER]}
+    memory, first_row = spawned(host, sent)
+    cleaned = restore_queried_turn(later([copy.deepcopy(sent)]), [{"type": "text", "text": "next"}], memory)
+    assert row_bytes(cleaned) == first_row
+    assert json.dumps(json.loads(cleaned)["messages"][1]["content"][0]["content"][1]) == json.dumps(image)
+
+
+def test_a_turn_start_spawn_leaves_no_record_and_close_releases_one():
+    memory = {}
+    payload = wire([{"type": "text", "text": "hello"}])
+    assert restore_queried_turn(payload, [{"type": "text", "text": "hello"}], memory) is payload
+    assert memory == {"spawn_row": None}
+    gate = Admission("http://127.0.0.1:1", 5, first_turn={"spawn_row": {"frame": [RESULT]}})
+    gate.close()
+    assert gate.first_turn["spawn_row"] is None

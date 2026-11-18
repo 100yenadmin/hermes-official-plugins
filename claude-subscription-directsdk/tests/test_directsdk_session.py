@@ -1049,6 +1049,7 @@ def test_cold_replay_reads_the_session_first_turn_frame_prefix(rig):
     assert [b['text'] for b in before['messages'][0]['content']] == ['call probe in parallel']
     (session,) = directsdk._session_pool
     assert session.admission.first_turn['permutation'] == (1, 1)
+    assert session.admission.first_turn['spawn_row'] is None  # spawned at a turn start: nothing remembered
     directsdk._session_shutdown()
     messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'X'}
                                      for c in first.choices[0].message.tool_calls]
@@ -1062,8 +1063,8 @@ def test_cold_replay_reads_the_session_first_turn_frame_prefix(rig):
     assert fresh.admission is not session.admission and fresh.admission.first_turn.keys() == {'context', 'spawn_row'}
     assert fresh.admission.first_turn['context'] is None
     # Launched on the tool-result frame: the cleaned row is remembered for the native's later requests.
-    index, frame = fresh.admission.first_turn['spawn_row']
-    assert index == 2 and [b['tool_use_id'] for b in frame] == [c.id for c in first.choices[0].message.tool_calls]
+    kept = fresh.admission.first_turn['spawn_row']
+    assert kept['index'] == 2 and [b['tool_use_id'] for b in kept['frame']] == [c.id for c in first.choices[0].message.tool_calls]
 
 
 def test_a_cold_launch_on_a_tool_result_frame_restores_hermes_results(rig):
