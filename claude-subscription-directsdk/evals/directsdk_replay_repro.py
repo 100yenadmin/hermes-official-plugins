@@ -80,6 +80,8 @@ def describe(entries, p):
             "type": block.get("type", "tool") if isinstance(block, dict) else type(block).__name__,
             "inner_types": sorted({n["type"] for n in cc.nodes(block) if isinstance(n, dict) and isinstance(n.get("type"), str)}),
             "json_chars": len(json.dumps(content(block), ensure_ascii=False)), "text_chars": len(text),
+            "inner": [(n.get("type"), len(n.get("text", ""))) for n in (block.get("content") if isinstance(block, dict) and isinstance(block.get("content"), list) else [])],
+            "has_system_reminder": "<system-reminder>" in text, "has_account_email_reminder": cc.EMAIL_REMINDER in text,
             "sha256": hashlib.sha256(key(entries[p]).encode()).hexdigest()[:12]}
 
 
@@ -239,6 +241,79 @@ def shape(native, binary, model, name, log, subscription, turns=1):
     return report
 
 
+# Phase A cases. Ops: "u" a new user message; "sN" a step answered with N tool calls (their results join the history
+# at once, delivered by the next step); "L" the pool loses its native with no kill line; "K" a logged pool shutdown.
+# The last op is the successor's step: the old native's last request is compared with the successor's first.
+CASES = {
+    "A": ("spawned at a turn start, 3 steps with a 2-call loop, lost",
+          ["u", "s2", "s1", "s0", "K", "u", "s2", "s1", "s1", "L", "s0"]),
+    "B": ("spawned at a tool-result row, 3 steps with a 2-call loop, lost",
+          ["u", "s2", "s1", "L", "s2", "s1", "s1", "L", "s0"]),
+    "D": ("first in its lineage, 3 user turns, lost",
+          ["u", "s2", "s1", "s0", "u", "s2", "s1", "s0", "u", "s1", "L", "s0"]),
+    "D2": ("spawned at a tool-result row, then 2 more user turns, lost",
+           ["u", "s2", "s1", "L", "s2", "s0", "u", "s2", "s1", "s0", "u", "s1", "L", "s0"]),
+}
+
+
+def case(native, binary, model, name, log, subscription):
+    title, ops = CASES[name]
+    report = {"name": title, "ops": ops, "steps": []}
+    native._session_shutdown()
+    native._session_failures, native._session_off = 0, False
+    with tempfile.TemporaryDirectory(prefix=f"replay-case-{name}-") as tmp, ThreadingHTTPServer(("127.0.0.1", 0), cc.Peer) as peer:
+        peer.wires, peer.tool_count, peer.paths, peer.signers = [], 0, [], {}
+        peer.timings, peer.stream, peer.stream_gap, peer.long_tool = [], False, 0, False
+        worker = threading.Thread(target=peer.serve_forever, daemon=True)
+        worker.start()
+        client = native.Client(command=str(binary), env=cc.isolated_env(tmp, peer.server_port, True, subscription), timeout=45)
+        history, turn = [{"role": "system", "content": cc.SYSTEM}], 0
+        try:
+            for op in ops:
+                if op == "u":
+                    turn += 1
+                    history.append({"role": "user", "content": f"Public main question {turn}: run the probes."})
+                elif op == "L":
+                    with native._session_lock:
+                        lost = list(native._session_pool)
+                        native._session_pool.clear()
+                    for session in lost:
+                        session.killed = True  # as in a new gateway process: no kill line
+                        native.kill_process_tree(session.process)
+                        session.process.wait(timeout=10)
+                elif op == "K":
+                    native._session_shutdown()
+                else:
+                    peer.tool_count = int(op[1:])
+                    row = "tool_result" if history[-1]["role"] == "tool" else "user"
+                    start, logs = len(peer.wires), len(log.events)
+                    assistant = client.create(model=model, messages=history, tools=cc.TOOLS).choices[0].message.model_dump()
+                    events = log.events[logs:]
+                    found = [re.search(r"session=(\w+):(\d+) mode=(\S+)", e) for e in events if e.startswith("session step:")]
+                    report["steps"].append({"op": op, "row": row, "mode": found[-1].group(3) if found else "no-step-line",
+                                            "pid": found[-1].group(2) if found else None, "wires": list(range(start, len(peer.wires))),
+                                            "lines": [re.sub(r" (tools|sys|launch|body|id)=\S+", "", e) for e in events if not e.startswith("session step:")]})
+                    history.append(assistant)
+                    history.extend({"role": "tool", "tool_call_id": c["id"], "content": RESULT} for c in assistant.get("tool_calls") or [])
+            *before, last = report["steps"]
+            old_pid = before[-1]["pid"]
+            old_steps = [st for st in before if st["pid"] == old_pid]
+            report.update(old_native_steps=len(old_steps), old_native_spawn_row=old_steps[0]["row"], old_native_spawn_mode=old_steps[0]["mode"],
+                          successor_mode=last["mode"], successor_row=last["row"], new_pid_differs=last["pid"] != old_pid)
+            old = [w for st in old_steps for w in st["wires"]]
+            report["analysis"] = analyse(peer.wires, old, last["wires"][0])
+        except Exception as error:
+            report["error"] = {"type": type(error).__name__, "message": str(error)[:300]}
+        finally:
+            client.close()
+            native._session_shutdown()
+            peer.shutdown()
+            worker.join(timeout=5)
+            report["requests"] = len(peer.wires)
+            report["peer_paths"] = sorted({p["path"] for p in peer.paths})
+    return report
+
+
 def run_isolated(args):
     root, binary = args.root.resolve(), args.binary.resolve()
     sys.path.insert(0, str(root))
@@ -256,6 +331,9 @@ def run_isolated(args):
     output = {"native_version": version, "subscription_emulated": args.subscription, "model": args.model, "warm_turns": args.turns,
               "lookback_blocks": LOOKBACK, "synthetic_offline_not_cache_measurement": True, "shapes": {}}
     for name in args.only:
+        if name in CASES:
+            output["shapes"][name] = case(native, binary, args.model, name, log, args.subscription)
+            continue
         output["shapes"][name] = shape(native, binary, args.model, name, log, args.subscription, args.turns)
         print(f"{name}: {output['shapes'][name].get('shape_mode')} | {output['shapes'][name].get('analysis', {}).get('reading')}"
               f" | negative control: {output['shapes'][name].get('negative_control_reading')}",
@@ -288,6 +366,6 @@ if __name__ == "__main__":
     parser.add_argument("--turns", type=int, default=1, help="complete turns (3 rounds each) before the pending call")
     args = parser.parse_args()
     args.only = args.only.split(",")
-    if any(name not in SHAPES for name in args.only):
-        parser.error("--only takes " + ",".join(SHAPES))
+    if any(name not in SHAPES and name not in CASES for name in args.only):
+        parser.error("--only takes " + ",".join([*SHAPES, *CASES]))
     print(json.dumps(run(args), indent=1))
