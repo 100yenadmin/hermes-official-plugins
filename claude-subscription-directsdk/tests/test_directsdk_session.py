@@ -85,7 +85,7 @@ def wire():
             history[2]['content'].append({'type':'text','text':' SECRETEDIT'})
         else:
             history[2]['content'].pop()
-    if not first_query and os.environ.get('FAKE_EDIT_OLD_ROW') and len(history[0]['content']) == 1:
+    if not first_query and os.environ.get('FAKE_EDIT_OLD_ROW') and (len(history[0]['content']) == 1 or os.environ['FAKE_EDIT_OLD_ROW'] == 'always'):
         history[0]['content'].append({'type':'text','text':' SECRETEDIT'})  # a live native rewrites a row it already sent
     newest = history[-1]['content'] if history and history[-1]['role'] == 'user' and isinstance(history[-1]['content'], list) else []
     if first_query and os.environ.get('NATIVE_KEEP_CONTEXT') and newest and newest[-1].get('type') == 'tool_result':
@@ -2037,4 +2037,85 @@ def test_a_reused_step_leaves_launch_accounting_alone_with_or_without_a_spawn_ro
     messages.append({'role': 'user', 'content': 'again'})
     assert step(client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
     assert directsdk._session_failures == 1  # a reused step is no launch
+
+
+def test_the_self_diff_latch_logs_once_per_native_however_often_old_rows_change(rig, caplog):
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    def client():
+        c = rig.client()
+        c.env['FAKE_EDIT_OLD_ROW'] = 'always'  # row 0 changes again on every request
+        return c
+    messages = [{'role': 'user', 'content': 'SECRETTEXT hello'}]
+    for text in ('a', 'b', 'c', 'd'):
+        messages += [as_history(step(client(), messages)), {'role': 'user', 'content': text}]
+    lines = _parity_lines(caplog)
+    assert len(lines) == 1 and ' self_diff row=0 ' in lines[0], lines
+
+
+def test_parity_notes_are_logged_at_step_end_and_never_from_the_relay(rig, caplog, monkeypatch):
+    import admission
+    caplog.set_level('INFO')
+    real, logged_in_relay = admission.observe_parity, []
+    def watched(gate, payload):
+        before = len(caplog.records)
+        real(gate, payload)
+        logged_in_relay.append(len(caplog.records) - before)
+    monkeypatch.setattr(admission, 'observe_parity', watched)
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(rig.client(), messages)
+    messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'R'} for c in first.choices[0].message.tool_calls]
+    messages.append({'role': 'user', 'content': 'steer'})
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'rebuild:suffix'
+    records = [r for r in caplog.records if r.getMessage().startswith('session parity:')]
+    assert len(records) == 1 and records[0].threadName == threading.current_thread().name
+    assert logged_in_relay and not any(logged_in_relay)
+
+
+def test_a_failed_spawn_after_a_rebuild_leaves_no_hand_over_behind(rig, caplog, monkeypatch):
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(rig.client(), messages)
+    messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': 'R'} for c in first.choices[0].message.tool_calls]
+    messages.append({'role': 'user', 'content': 'steer'})
+    relay, calls = directsdk.relay, []
+    def failing_once(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise OSError('relay failed before it existed')
+        return relay(*args, **kwargs)
+    monkeypatch.setattr(directsdk, 'relay', failing_once)
+    step(rig.client(), messages)  # the rebuilt spawn fails before its relay exists; the step falls back per-call
+    assert getattr(directsdk._parity_handover, 'prev', None) is None and not _parity_lines(caplog)
+    assert all(getattr(s.admission, 'parity_prev', None) is None for s in directsdk._session_pool)
+
+
+def _fake_session(pid, ident, first, consumed, alive=True, profile=([('u', 1, 5)], 1)):
+    from types import SimpleNamespace
+    session = directsdk.NativeSession(ident, first, 'login')
+    session.pid, session.consumed, session.expect, session.busy = pid, list(consumed), 'user', False
+    session.alive = lambda: alive
+    session.admission = SimpleNamespace(parity=profile, close=lambda: None)
+    return session
+
+
+def test_the_hand_over_comes_only_from_the_native_this_rebuild_retires(monkeypatch):
+    """A dead review fork that shares the first answer sits earlier in the pool: it is retired too, but it is not
+    the native this rebuild replaces, so it never hands over."""
+    keys = ['["user", "q0"]', '["assistant", "a1"]', '["user", "q2"]']
+    fork = _fake_session(11, 'fork-ident', keys[1], keys, alive=False)
+    main = _fake_session(22, 'main-ident', keys[1], keys)
+    monkeypatch.setattr(directsdk, '_session_pool', [fork, main])
+    edited = ['["user", "q0 edited"]'] + keys[1:] + ['["user", "q4"]']
+    found, how = directsdk._session_checkout('main-ident', edited, [{'role': 'user'}] * 4, keys[1], 'login')
+    assert found is None and how == 'rebuild:prefix'
+    assert directsdk._parity_handover.prev[0] == 22
+
+
+def test_an_ambiguous_rebuild_hands_over_nothing(monkeypatch):
+    keys = ['["user", "q0"]', '["assistant", "a1"]']
+    twins = [_fake_session(pid, 'main-ident', keys[1], keys) for pid in (31, 32)]
+    monkeypatch.setattr(directsdk, '_session_pool', list(twins))
+    found, how = directsdk._session_checkout('main-ident', keys + ['["user", "q2"]'], [{'role': 'user'}] * 3, keys[1], 'login')
+    assert found is None and how == 'rebuild:ambiguous'
+    assert directsdk._parity_handover.prev is None
 

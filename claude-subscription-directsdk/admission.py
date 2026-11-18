@@ -662,12 +662,15 @@ _ROLE_CODES = {'user': 'u', 'assistant': 'a', 'system': 's'}
 
 
 def _payload_chars(block):
-    """Characters of a block's text-like payloads: text, thinking, nested tool_result text, base64 data."""
+    """Characters of a block's text-like payloads: text, thinking and its signature, nested tool_result text, base64
+    data, and a tool_use input's serialized length."""
     if isinstance(block, str):
         return len(block)
     if not isinstance(block, dict):
         return 0
-    n = sum(len(block[k]) for k in ('text', 'thinking', 'data') if isinstance(block.get(k), str))
+    n = sum(len(block[k]) for k in ('text', 'thinking', 'signature', 'data') if isinstance(block.get(k), str))
+    if block.get('type') == 'tool_use':
+        n += len(json.dumps(block.get('input'), separators=(',', ':'), ensure_ascii=False))
     source = block.get('source')
     if isinstance(source, dict) and isinstance(source.get('data'), str):
         n += len(source['data'])
@@ -691,34 +694,44 @@ def row_profile(messages):
     return rows, stable
 
 
-def _parity_fields(new, old, i):
-    a, b = old[i], (new[i] if i < len(new) else ('-', '-', '-'))
+def _parity_diff(new, old):
+    """The first row of ``old`` that ``new`` changed or lacks, both without trailing per-request system rows, and
+    its fields (``old/new``; a missing row reads ``-``); None when every row of ``old`` is unchanged."""
+    (rows, stable), (before, kept) = new, old
+    i = next((k for k in range(kept) if k >= stable or rows[k] != before[k]), None)
+    if i is None:
+        return None
+    a, b = before[i], (rows[i] if i < stable else ('-', '-', '-'))
     role = a[0] if a[0] == b[0] else f'{a[0]}/{b[0]}'
-    return f'role={role} blocks={a[1]}/{b[1]} chars={a[2]}/{b[2]}'
+    return i, f'role={role} blocks={a[1]}/{b[1]} chars={a[2]}/{b[2]}'
 
 
 def observe_parity(gate, payload):
     """Session mode, log only: profile the rows of each forwarded request (lengths, counts and role codes, never
-    text). Notes once per native when a row an earlier request sent has changed, and on a rebuilt native's first
-    request where its rows first differ from the retired native's last request. Any failure skips the note."""
-    note = getattr(gate, 'parity_note', None)
-    if note is None:
+    text) and queue notes for the session thread, which logs them at step end; nothing is logged here. Notes once
+    per native when a row an earlier request sent has changed, and on a rebuilt native's first request where its
+    rows first differ from the retired native's last request. Any failure skips the note."""
+    if not isinstance(getattr(gate, 'first_turn', None), dict):
         return
     try:
-        rows, stable = row_profile(json.loads(payload)['messages'])
-        previous, gate.parity = gate.parity, (rows, stable)
-        handed, gate.parity_prev = gate.parity_prev, None
+        handed, gate.parity_prev = gate.parity_prev, None  # consumed by the first attempt, whatever happens next
+        profile = row_profile(json.loads(payload)['messages'])
+        previous, gate.parity = gate.parity, profile
+        if gate.cancelled:
+            gate.parity = None  # closed meanwhile: keep nothing
+            return
+        notes = []
         if handed is not None:
-            pid, old, old_stable = handed
-            i = next((k for k in range(old_stable) if k >= len(rows) or rows[k] != old[k]), None)
-            note(f'prev={pid} first_diff=' + ('none role=- blocks=- chars=-' if i is None else f'{i} {_parity_fields(rows, old, i)}')
-                 + f' rows={len(rows)}/{len(old)}')
+            pid, old = handed
+            diff = _parity_diff(profile, old)
+            notes.append(f'prev={pid} first_diff=' + (f'{diff[0]} {diff[1]}' if diff else 'none role=- blocks=- chars=-')
+                         + f' rows={profile[1]}/{old[1]}')
         if previous is not None and not gate.parity_logged:
-            old, old_stable = previous
-            i = next((k for k in range(old_stable) if k >= len(rows) or rows[k] != old[k]), None)
-            if i is not None:
+            diff = _parity_diff(profile, previous)
+            if diff:
                 gate.parity_logged = True
-                note(f'self_diff row={i} {_parity_fields(rows, old, i)} rows={len(rows)}')
+                notes.append(f'self_diff row={diff[0]} {diff[1]} rows={profile[1]}')
+        gate.parity_notes = gate.parity_notes + notes
     except Exception:
         pass
 
@@ -882,9 +895,9 @@ class Admission:
         self.status = None
         self.failure = None
         self.unrestored = None
-        # Log-only row parity (session mode): the latest profile, a retired native's handed-over one, the note.
-        self.parity = self.parity_prev = self.parity_note = None
-        self.parity_logged = False
+        # Log-only row parity (session mode): the latest profile, a retired native's handed-over one, queued notes.
+        self.parity = self.parity_prev = None
+        self.parity_notes, self.parity_logged = [], False
         self.capture = Capture()
         self.error_body = b''
         self.prefix = '/admit/' + secrets.token_urlsafe(32)
@@ -938,8 +951,8 @@ class Admission:
             self.first_turn['spawn_row_closed'] = True  # set first: a first request recording meanwhile drops it
             if self.first_turn.get('spawn_row'):
                 self.first_turn['spawn_row'] = None  # the remembered frame may hold base64 images
-        self.parity = self.parity_prev = None
         self.abort()
+        self.parity = self.parity_prev = None
         self.server.shutdown()
         self.thread.join()
         self.server.server_close()

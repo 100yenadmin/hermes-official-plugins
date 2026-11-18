@@ -1402,8 +1402,10 @@ class Client:
         login = hashlib.sha256(json.dumps(launch).encode('utf-8')).hexdigest()
         first = next((k for k, m in zip(keys, messages) if m.get('role') == 'assistant'), None)
         session, how = _session_checkout(ident, keys, messages, first, login)
+        handed, _parity_handover.prev = getattr(_parity_handover, 'prev', None), None  # never outlives this step
         if session is None:
             session = NativeSession(ident, first, login)
+            session.parity_prev = handed
             if not _session_admit(session):
                 # Every session slot is busy: this step takes the per-call path instead of exceeding the cap.
                 yield from self._run(request, kwargs, body, manifest, names, system, frames)
@@ -1610,6 +1612,12 @@ class Client:
             _session_log.info('session step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s %s',
                            session.ident[:8] + ':' + str(session.pid), how, int(admission.used), admission.denied, bool(admission.unrestored), time.monotonic() - started,
                            usage['input_tokens'], usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0), usage['output_tokens'], thinking, len(calls), assistant.get('stop_reason'), assistant.get('id'), parts)
+            try:  # the relay's queued parity notes, logged here, never from its request path
+                notes, admission.parity_notes = admission.parity_notes, []
+                for text in notes:
+                    _session_log.info('session parity: session=%s %s', session.ident[:8] + ':' + str(session.pid), text)
+            except Exception:
+                pass
             if spawn and not launched:
                 launched = True
                 _session_launched()
@@ -1669,8 +1677,8 @@ class Client:
         # frame, including tool-result frames (#5).
         queried = frames[-1]['message']['content']
         session.admission = relay(upstream, timeout, queried=queried, first_turn={})
-        # A rebuild retired this conversation's native in the checkout just before (same thread): its last profile.
-        session.admission.parity_prev, _parity_handover.prev = getattr(_parity_handover, 'prev', None), None
+        # The native this rebuild retired in the checkout just before: its last row profile (log only).
+        session.admission.parity_prev = getattr(session, 'parity_prev', None)
         # Streamed tool arguments stay on unless this conversation's came back invalid (#164 #221 #326); a session keeps
         # its setting for life, so its request bytes never change between steps.
         session.admission.eager = session_id not in _BUFFER_TOOL_INPUT
@@ -1684,8 +1692,6 @@ class Client:
             request.process, request.admission = session.process, session.admission
         session.request = request
         session.pid = session.process.pid
-        label = session.ident[:8] + ':' + str(session.pid)
-        session.admission.parity_note = lambda text: _session_log.info('session parity: session=%s %s', label, text)
         threading.Thread(target=session.read, daemon=True).start()
         session.send({'type': 'control_request', 'request_id': 'hermes-init', 'request': {'subtype': 'initialize', 'hooks': None}})
         replay_history(frames, session.send, lambda: session.receive(request, timeout), names, session=True)
@@ -2153,6 +2159,7 @@ def _session_checkout(ident, keys, messages, first, login=None):
     system prompt, tools or generation fields is a fork, such as a review on another model: both stay,
     and the idle limit and pool LRU reclaim whichever goes unused."""
     now, stale, matches, how, oversize, diverged = time.monotonic(), [], [], 'cold', None, []
+    _parity_handover.prev, retired = None, []  # log only: the sessions this checkout retires for divergence
     with _session_lock:
         for session in list(_session_pool):
             if session.busy:
@@ -2167,6 +2174,7 @@ def _session_checkout(ident, keys, messages, first, login=None):
                 why = 'ident' if session.ident != ident else ('prefix' if keys[:n] != session.consumed else 'suffix')
                 if why != 'ident':
                     diverged.append((session, list(session.consumed), session.expect, why))
+                retired.append(session)
                 stale.append(session)
                 how = 'rebuild:' + why
         found = matches[0] if len(matches) == 1 else None
@@ -2186,14 +2194,13 @@ def _session_checkout(ident, keys, messages, first, login=None):
             how = 'rebuild:ambiguous'  # never pick by pool order; replay instead
         for session in stale:
             _session_pool.remove(session)
-    _parity_handover.prev = None
-    if how.startswith('rebuild:') and first is not None:
-        try:  # log only: the retired native's last row profile, for the rebuilt native's first request
-            old = next((s for s in stale if s.first == first and s.admission is not None and s.admission.parity), None)
-            if old is not None:
-                _parity_handover.prev = (old.pid, *old.admission.parity)
-        except Exception:
-            pass
+    try:  # log only: the exact native this rebuild retires, when there is exactly one, hands over its last profile
+        old = (oversize if how == 'rebuild:oversize' else stale[-1] if how == 'rebuild:unpaired'
+               else retired[0] if how in ('rebuild:prefix', 'rebuild:suffix', 'rebuild:ident') and len(retired) == 1 else None)
+        if old is not None and old.admission is not None and old.admission.parity:
+            _parity_handover.prev = (old.pid, old.admission.parity)
+    except Exception:
+        pass
     for session, consumed, expect, why in diverged:
         try:
             _session_log.info('session diverged: session=%s %s', session.ident[:8] + ':' + str(session.pid),

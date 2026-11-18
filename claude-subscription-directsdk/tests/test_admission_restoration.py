@@ -545,3 +545,21 @@ def test_each_step_starts_with_no_spawn_row_outcome():
     finally:
         gate.close()
 
+
+
+def test_parity_compares_without_trailing_system_rows_and_reports_a_missing_row():
+    old = admission.row_profile([{"role": "user", "content": "q"}, ASSISTANT, {"role": "user", "content": [RESULT]},
+                                 {"role": "system", "content": "per-request context"}])
+    shorter = admission.row_profile([{"role": "user", "content": "q"}, ASSISTANT, {"role": "system", "content": "per-request context"}])
+    assert (old[1], shorter[1]) == (3, 2)
+    assert admission._parity_diff(shorter, old) == (2, "role=u/- blocks=1/- chars=6/-")
+    assert admission._parity_diff(old, old) is None
+
+
+def test_the_profile_counts_tool_use_inputs_and_thinking_signatures():
+    call = {"type": "tool_use", "id": "t1", "name": "probe", "input": {"key": "value"}}
+    thought = {"type": "thinking", "thinking": "abc", "signature": "s" * 10}
+    assert admission._payload_chars(call) == len('{"key":"value"}')
+    assert admission._payload_chars(thought) == 13
+    assert admission._payload_chars({**call, "input": {"key": "other"}}) == admission._payload_chars(call)  # same length
+    assert admission._payload_chars({**thought, "signature": "s" * 11}) == 14
