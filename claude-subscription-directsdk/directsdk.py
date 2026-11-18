@@ -1602,13 +1602,13 @@ class Client:
             # The step is already admitted: a diagnostic failure logs dashes and never raises.
             try:
                 parts = ' '.join(f'{name}={_short_hash(value)[:8]}' for name, value in (
-                    ('tools', json.dumps(json.loads(body).get('tools'))), ('sys', json.dumps(system)), ('launch', json.dumps(launch)), ('body', body)))
+                    ('tools', json.dumps(json.loads(body).get('tools'))), ('sys', json.dumps(system)), ('launch', json.dumps(launch)), ('body', body), ('model', kwargs['model'])))
                 # The relay forwarded the remembered spawn row uncleaned: index:chars now/at spawn:why (log only).
                 kept_row = admission.first_turn.get('spawn_row') if isinstance(admission.first_turn, dict) else None
                 if kept_row and kept_row.get('missed'):
                     parts += f" spawn_row_kept={kept_row['missed']}"
             except Exception:
-                parts = 'tools=- sys=- launch=- body=-'
+                parts = 'tools=- sys=- launch=- body=- model=-'
             _session_log.info('session step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s %s',
                            session.ident[:8] + ':' + str(session.pid), how, int(admission.used), admission.denied, bool(admission.unrestored), time.monotonic() - started,
                            usage['input_tokens'], usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0), usage['output_tokens'], thinking, len(calls), assistant.get('stop_reason'), assistant.get('id'), parts)
@@ -1678,7 +1678,7 @@ class Client:
         queried = frames[-1]['message']['content']
         session.admission = relay(upstream, timeout, queried=queried, first_turn={})
         # The native this rebuild retired in the checkout just before: its last row profile (log only).
-        session.admission.parity_prev = getattr(session, 'parity_prev', None)
+        session.admission.parity_prev, session.parity_prev = getattr(session, 'parity_prev', None), None
         # Streamed tool arguments stay on unless this conversation's came back invalid (#164 #221 #326); a session keeps
         # its setting for life, so its request bytes never change between steps.
         session.admission.eager = session_id not in _BUFFER_TOOL_INPUT

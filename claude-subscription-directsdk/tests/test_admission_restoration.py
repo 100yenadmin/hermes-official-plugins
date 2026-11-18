@@ -508,13 +508,30 @@ def test_a_newest_row_mismatch_still_sends_the_spawn_row_clean_and_the_rest_as_n
     assert json.loads(forwarded)["messages"][3:] == json.loads(payload)["messages"][3:]
 
 
-def test_a_reissued_first_request_whose_row_changed_takes_the_ordinary_mismatch():
+def test_a_reissued_first_request_restores_as_the_base_relay_does_and_records_the_row_again():
+    """The 401 re-issue route: the newest row at the recorded index restores exactly as the per-call relay (no memory,
+    the base code path) restores it, sets no unrestored, and a later request carrying the reissued row is cleaned."""
     host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
-    sent = {**host, "content": host["content"] + [REMINDER]}
-    memory, first_row = spawned(host, sent)
-    assert row_bytes(relay(wire([copy.deepcopy(sent)]), [host], memory)[0]) == first_row  # the same retry: clean
-    changed = wire([{**host, "content": [{"type": "text", "text": "output"}, {"type": "text", "text": " correction"}]}])
-    assert relay(changed, [host], memory) == (changed, True)
+    memory, _ = spawned(host, {**host, "content": host["content"] + [REMINDER]})
+    reissued = {**host, "content": [{"type": "text", "text": "output"}, {"type": "text", "text": " correction"}]}
+    payload = wire([copy.deepcopy(reissued)])
+    base = restore_queried_turn(payload, [host])
+    assert relay(payload, [host], memory) == (base, False)
+    assert memory["spawn_row"]["sent"] == admission._sent_digest([reissued])[0]
+    forwarded, unrestored = relay(later([copy.deepcopy(reissued)]), [{"type": "text", "text": "next"}], memory)
+    assert row_bytes(forwarded) == row_bytes(base) and not unrestored and memory["spawn_row"]["missed"] is None
+
+
+def test_a_deeply_nested_reissued_row_never_raises_and_matches_the_base_outcome():
+    host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
+    memory, _ = spawned(host, {**host, "content": host["content"] + [REMINDER]})
+    deep = {}
+    for _ in range(600):
+        deep = {"k": deep}
+    payload = wire([{**host, "content": host["content"] + [REMINDER], "meta": deep}])
+    with pytest.raises(QueriedTurnMismatch):
+        restore_queried_turn(payload, [host])  # the base outcome: an ordinary mismatch, forwarded as native sent it
+    assert relay(payload, [host], memory) == (payload, True)
 
 
 def test_a_changed_spawn_row_with_a_lone_surrogate_forwards_unchanged_and_never_marks_unrestored():

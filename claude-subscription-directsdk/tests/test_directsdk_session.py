@@ -1862,22 +1862,24 @@ def _digests(line):
 
 
 def test_the_step_line_carries_keyed_digests_of_each_identity_part(rig, caplog, monkeypatch):
-    """tools=, sys=, launch= and body= tell apart why a conversation was re-keyed; keyed hashes, never text."""
+    """tools=, sys=, launch=, body= and model= tell apart why a conversation was re-keyed; keyed hashes, never text."""
     caplog.set_level('INFO', logger=directsdk._session_log.name)
     other = [dict(TOOLS[0], function=dict(TOOLS[0]['function'], description='probe two'))]
-    def run(system, tools, launch=None):
+    def run(system, tools, launch=None, model='sonnet'):
         client = rig.client()
         if launch:
             client.env['CLAUDE_SUBSCRIPTION_DIRECTSDK_AUDIT_PROBE'] = launch
-        client.create(model='sonnet', messages=[{'role': 'system', 'content': system}, {'role': 'user', 'content': 'hi'}], tools=tools)
+        client.create(model=model, messages=[{'role': 'system', 'content': system}, {'role': 'user', 'content': 'hi'}], tools=tools)
         return _digests(_session_lines(caplog, 'session step:')[-1])
     one, two, three, four = run('SYSTEM ONE', TOOLS), run('SYSTEM TWO', TOOLS), run('SYSTEM ONE', other), run('SYSTEM ONE', TOOLS, 'x')
     assert not any('SYSTEM' in line or 'probe two' in line for line in _session_lines(caplog, 'session step:'))
-    assert all(list(p) == ['tools', 'sys', 'launch', 'body'] and all(len(v) == 8 for v in p.values()) for p in (one, two, three, four))
+    assert all(list(p) == ['tools', 'sys', 'launch', 'body', 'model'] and all(len(v) == 8 for v in p.values()) for p in (one, two, three, four))
     same = lambda a, b, keys: all(a[k] == b[k] for k in keys)
     assert one['sys'] != two['sys'] and same(one, two, ('tools', 'launch', 'body'))
     assert one['tools'] != three['tools'] and one['body'] != three['body'] and same(one, three, ('sys', 'launch'))
-    assert one['launch'] != four['launch'] and same(one, four, ('tools', 'sys', 'body'))
+    assert one['launch'] != four['launch'] and same(one, four, ('tools', 'sys', 'body', 'model'))
+    five = run('SYSTEM ONE', TOOLS, model='opus')
+    assert one['model'] != five['model'] and one['model'] == directsdk._short_hash('sonnet')[:8] != hashlib.sha256(b'sonnet').hexdigest()[:8]
     # Keyed: not the plain sha256 of the input, and a new key changes every digest of the same inputs.
     body = directsdk.request_body({'model': 'sonnet', 'tools': TOOLS})[0]
     assert one['body'] == directsdk._short_hash(body)[:8] != hashlib.sha256(body.encode()).hexdigest()[:8]
@@ -1897,7 +1899,7 @@ def test_a_digest_failure_logs_dashes_and_never_fails_the_step(rig, caplog, monk
     response = step(rig.client(), [{'role': 'user', 'content': 'hi'}])
     assert response.choices[0].message.content == 'echo hi'
     (line,) = _session_lines(caplog, 'session step:')
-    assert line.endswith(' tools=- sys=- launch=- body=-'), line
+    assert line.endswith(' tools=- sys=- launch=- body=- model=-'), line
 
 
 def _plain_tree(value):

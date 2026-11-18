@@ -480,8 +480,8 @@ def restore_queried_turn(payload, queried, memory=None, *, row=None, parsed=None
     the host's original representation and retain unambiguously mapped markers.
     The frame is the newest user row, or message ``row`` of an already ``parsed`` body (``restore_spawn_row``).
     With a session's ``memory``, the native's first request records the row it cleaned (see
-    ``restore_spawn_row``); once a record exists, a request whose newest row is at that index (a re-issued first
-    request) restores it only while it still equals the row native sent then.
+    ``restore_spawn_row``). A re-issued first request at that index restores as any newest row does (anything past
+    Hermes' frame there is native's own addition) and records the row again as sent this time.
     """
     first = isinstance(memory, dict) and row is None and 'spawn_row' not in memory
     if first:
@@ -591,14 +591,12 @@ def restore_queried_turn(payload, queried, memory=None, *, row=None, parsed=None
         # reminder-pattern stripping can accidentally choose another host span.
         if result_ids != native_ids:
             return unmatched()
-        if kept and kept['index'] == index and _sent_digest(native)[0] != kept['sent']:
-            return unmatched()  # a re-issued first request whose row changed since: the ordinary mismatch
         restored = restore_sequence(native, queried)
-        if first and native != restored:
+        if (first or (kept and kept['index'] == index)) and native != restored:
             try:
                 digest, chars = _sent_digest(native)
-            except ValueError:
-                digest = None  # text JSON cannot encode (a lone surrogate): remember nothing
+            except (ValueError, RecursionError):
+                digest = None  # a row the digest cannot take: record nothing new
             if digest is not None:
                 # Hermes' frame by reference (released when the relay closes) and a digest of native's row.
                 memory['spawn_row'] = {'index': index, 'frame': queried, 'sent': digest, 'chars': chars, 'missed': None}
