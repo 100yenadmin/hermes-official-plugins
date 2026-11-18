@@ -77,6 +77,14 @@ def wire():
     reminder = '\n<system-reminder>userEmail: user@example.com</system-reminder>'
     if first_query and os.environ.get('NATIVE_CONTEXT') and len(history) == 1:
         history[0]['content'].insert(0, {'type':'text','text':reminder})
+    newest = history[-1]['content'] if history and history[-1]['role'] == 'user' and isinstance(history[-1]['content'], list) else []
+    if first_query and os.environ.get('NATIVE_KEEP_CONTEXT') and newest and newest[-1].get('type') == 'tool_result':
+        # 2.1.325 on a subscription login (offline capture): a native whose first query answers a replayed tool-result
+        # row appends its account reminder inside that tool_result and keeps it in its own history.
+        last = newest[-1]
+        if isinstance(last['content'], str):
+            last['content'] = [{'type':'text','text':last['content']}]
+        last['content'].append({'type':'text','text':reminder})
     first_query = False
     messages = []
     for message in json.loads(json.dumps(history)):
@@ -1852,4 +1860,39 @@ def test_a_cold_respawn_logs_whether_its_first_row_changed(rig, caplog):
     assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'cold'
     lines = _session_lines(caplog, 'session respawn:')
     assert [line.split(' ', 3)[3] for line in lines] == ['first_row_changed=0 rows=3 prev_rows=4', 'first_row_changed=1 rows=5 prev_rows=4'], lines
+
+
+def _plain_tree(value):
+    if isinstance(value, dict):
+        return {k: _plain_tree(v) for k, v in value.items() if k != 'cache_control'}
+    return [_plain_tree(v) for v in value] if isinstance(value, list) else value
+
+
+@pytest.mark.parametrize('keeps_context', [False, pytest.param(True, marks=pytest.mark.xfail(strict=True, reason=(
+    'Phase A diagnosis, not fixed yet: the relay restores a tool-result row only while it is the newest row, so a '
+    'native spawned there sends the reminder it kept on every later request, and a successor replays the row without it')))])
+def test_a_native_spawned_at_a_tool_result_row_sends_that_row_with_the_same_bytes(rig, keeps_context):
+    """The tool-result row a native was spawned at: its first request, its later requests and a successor's replay
+    forward the same bytes (cache_control aside), or every later request misses the cache written before it."""
+    def client():
+        c = rig.client()
+        if keeps_context:
+            c.env['NATIVE_KEEP_CONTEXT'] = '1'
+        return c
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(client(), messages)
+    messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': f'R{i}'} for i, c in enumerate(first.choices[0].message.tool_calls)]
+    directsdk._session_shutdown()
+    second = step(client(), messages)  # a native spawned at the tool-result row
+    assert second.usage.model_dump()['native_admission']['session'] == 'cold'
+    messages += [as_history(second), {'role': 'user', 'content': 'again'}]
+    third = step(client(), messages)  # the same native's next request
+    assert third.usage.model_dump()['native_admission']['session'] == 'reused'
+    directsdk._session_shutdown()
+    messages += [as_history(third), {'role': 'user', 'content': 'once more'}]
+    assert step(client(), messages).usage.model_dump()['native_admission']['session'] == 'cold'  # a successor replays
+    rows = [_plain_tree([m for m in body['messages'] if m['role'] != 'system'][2]) for body in rig.upstream.bodies[1:4]]
+    assert all(b['type'] == 'tool_result' for b in rows[0]['content'])
+    assert rows[1] == rows[0], 'the spawned native changed the row on its next request'
+    assert rows[2] == rows[0], 'the successor replayed the row with other bytes'
 
