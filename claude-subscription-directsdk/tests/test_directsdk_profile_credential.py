@@ -246,46 +246,100 @@ def test_cores_own_launch_turn_bind_keeps_the_launch_login(profile, tmp_path, mo
     assert seen() == [None]
 
 
-def test_the_launch_profiles_own_cron_fire_keeps_its_login(profile, tmp_path, monkeypatch):
-    """eva's daily cron job, 2026-11-18: a multiplexing gateway fires the launch profile's own job in process, and
-    core binds that fire's scope stamped with the process home (cron/scheduler.py _fire_secret_scope). Its login is
-    the process's own (~/.claude): the fire runs on it instead of "This profile has no Claude login of its own"."""
-    monkeypatch.delenv(TOKEN, raising=False)
-    monkeypatch.delenv("_HERMES_CRON_EXTERNAL_WORKER", raising=False)
+def _settings(home, **settings):
+    """Write ``settings`` as this plugin's settings in ``home``'s config.yaml."""
+    from test_directsdk_config_dir import PLUGIN_NAME
+    lines = "".join("        %s: %s\n" % (key, json.dumps(value)) for key, value in settings.items())
+    (home / "config.yaml").write_text("plugins:\n  enabled: []\n  entries:\n    %s:\n      settings:\n%s"
+                                      % (PLUGIN_NAME, lines), encoding="utf-8")
+
+
+@contextmanager
+def _own_cron_fire():
+    """The launch profile's own job fired in process by a multiplexing gateway, through core's binder
+    (cron/scheduler.py _fire_secret_scope): its scope is stamped with the process home."""
     try:
         from cron.scheduler import _fire_secret_scope
     except ImportError:
         pytest.skip("core without the in-process cron fire scope")
     from agent.secret_scope import current_secret_scope_home, reset_multiplex_context, set_multiplex_context
-    from hermes_constants import get_routing_process_hermes_home, hermes_home_key
-    client, seen = _native(tmp_path, monkeypatch)
     mode = set_multiplex_context(True)
     try:
         with _fire_secret_scope():
-            assert hermes_home_key(current_secret_scope_home()) == hermes_home_key(get_routing_process_hermes_home())
+            assert current_secret_scope_home() is not None  # stamped: session.10's unstamped exemption misses it
+            yield
+    finally:
+        reset_multiplex_context(mode)
+
+
+def test_the_launch_profiles_own_cron_fire_keeps_its_login_when_it_says_so(profile, tmp_path, monkeypatch):
+    """eva's daily cron job, 2026-11-18: core stamps the launch profile's own in-process fire with the process home,
+    so session.10 counted it as served and refused it ("This profile has no Claude login of its own"). A profile whose
+    login is the inherited one says so with inherit_launch_login: true; its fires then run on that login. Without the
+    setting the refusal stands (claude_config_dir=~/.claude is no way out: Claude Code keys its Keychain login by
+    config directory)."""
+    import directsdk_setup
+    from hermes_constants import get_hermes_home
+    monkeypatch.delenv(TOKEN, raising=False)
+    home = get_hermes_home()
+    with _own_cron_fire(), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
+        _apply({"UNRELATED": "kept"})
+    _settings(home, inherit_launch_login=True)
+    client, seen = _native(tmp_path, monkeypatch)
+    try:
+        with _own_cron_fire():
             assert _apply({"UNRELATED": "kept"}) == {"UNRELATED": "kept"}
             assert client.create(**REQUEST).choices[0].message.content == "hello\n"
     finally:
-        reset_multiplex_context(mode)
         client.close()
     assert seen() == [None]
 
 
+@pytest.mark.parametrize("value", ["true", "yes", 1, "on"])
+def test_only_a_literal_true_inherits_the_login(profile, monkeypatch, value):
+    """A credential switch: a string or number that merely looks true does not open it."""
+    import directsdk_setup
+    from hermes_constants import get_hermes_home
+    monkeypatch.delenv(TOKEN, raising=False)
+    _settings(get_hermes_home(), inherit_launch_login=value)
+    with _own_cron_fire(), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
+        _apply({"UNRELATED": "kept"})
+
+
+def test_another_profile_never_inherits_the_launch_login_through_the_setting(profile, tmp_path, monkeypatch):
+    """The setting is read from the served profile's own config: the launch profile opting in gives a served profile
+    nothing, in or out of a cron worker. A served profile that sets it itself has chosen the inherited login."""
+    import directsdk_setup
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+    monkeypatch.delenv(TOKEN, raising=False)
+    _settings(get_hermes_home(), inherit_launch_login=True)
+    served = tmp_path / "served-home"
+    served.mkdir()
+    (served / "config.yaml").write_text("plugins:\n  enabled: []\n", encoding="utf-8")
+    for worker in (False, True):
+        if worker:
+            monkeypatch.setenv("_HERMES_CRON_EXTERNAL_WORKER", "exec-1")
+        token = set_hermes_home_override(served)
+        try:
+            with multiplexed({}, home=str(served)), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
+                _apply({"UNRELATED": "kept"})
+        finally:
+            reset_hermes_home_override(token)
+    _settings(served, inherit_launch_login=True)
+    token = set_hermes_home_override(served)
+    try:
+        with multiplexed({}, home=str(served)):
+            assert _apply({"UNRELATED": "kept"}) == {"UNRELATED": "kept"}
+    finally:
+        reset_hermes_home_override(token)
+
+
 def test_a_cron_worker_for_a_served_profile_is_still_refused(profile, tmp_path, monkeypatch):
-    """Core's restart-safe cron worker is started with HERMES_HOME=<fired profile>: that home is its process home and
-    stamps the fire's scope, while HOME and ~/.claude are still the launch profile's. Inside the worker
-    (_HERMES_CRON_EXTERNAL_WORKER set while it runs a job) a stamp equal to the process home is not "the launch
-    profile": with no login of its own the fire is refused. The same stamp outside a worker keeps the login."""
+    """A cron worker started with HERMES_HOME=<served profile> pins that home as its process home and stamps the
+    profile's scope with it (cron/scheduler.py), while HOME and ~/.claude are still the launch profile's. A stamp equal
+    to the process home is therefore not "the launch profile": with no login of its own the turn is refused."""
     import directsdk_setup
     from hermes_constants import get_routing_process_hermes_home
     monkeypatch.delenv(TOKEN, raising=False)
-    own = str(get_routing_process_hermes_home())
-    monkeypatch.setenv("_HERMES_CRON_EXTERNAL_WORKER", "exec-1")
-    with multiplexed({}, home=own), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
-        _apply({"UNRELATED": "kept"})
-    monkeypatch.delenv("_HERMES_CRON_EXTERNAL_WORKER")
-    with multiplexed({}, home=own):
-        assert _apply({"UNRELATED": "kept"}) == {"UNRELATED": "kept"}
-    # A foreign stamp is refused in or out of a worker.
-    with multiplexed({}), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
+    with multiplexed({}, home=str(get_routing_process_hermes_home())), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
         _apply({"UNRELATED": "kept"})

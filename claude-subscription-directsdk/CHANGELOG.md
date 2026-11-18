@@ -2,7 +2,7 @@
 
 ## [0.4.0+session.12] - Unreleased
 
-- The launch profile's own scheduled cron jobs keep its Claude login again under multiplexing. Core now binds an in-process cron fire's scope stamped with the process home, and session.10 counted any stamped scope as a served profile's, so a launch profile whose login is the shared `~/.claude` had its own jobs refused with "This profile has no Claude login of its own" (eva's daily job, 2026-11-18). A stamp equal to the process home is the launch profile's own again, except inside core's restart-safe cron worker (`_HERMES_CRON_EXTERNAL_WORKER` set), whose process home is the fired profile's while `~/.claude` is still the launch profile's: a fire there with no login of its own is still refused. A foreign stamp is refused as before.
+- New setting `inherit_launch_login` (default off). A profile whose Claude login is the one the Hermes process inherited (the shared `~/.claude`, or the gateway's token) sets it, and its served tasks keep that login under multiplexing: its own cron jobs, Run now, and its jobs in a restart-safe cron worker. Core now stamps the launch profile's own in-process cron fire with the process home, and session.10 counted any stamped scope as a served profile's, so such a profile's own jobs were refused with "This profile has no Claude login of its own" (eva's daily job, 2026-11-18). The setting is read from the served profile's own config: the launch profile opting in gives no other profile its login, and only a literal `true` counts. Setting `claude_config_dir` to `~/.claude` is not a substitute: Claude Code keys its Keychain login by config directory, so an explicit `CLAUDE_CONFIG_DIR=~/.claude` finds no login.
 
 ## [0.4.0+session.11] - Unreleased
 

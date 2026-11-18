@@ -25,6 +25,11 @@ config_schema:
     default: ""
     label: Claude login config directory
     description: Select this profile's logged-in Claude config directory, overriding process environment directories.
+  inherit_launch_login:
+    type: bool
+    default: false
+    label: Use the login this Hermes process inherited
+    description: For the profile whose Claude login is the shared ~/.claude (or the gateway's token). Its cron jobs, Run now and other served tasks keep that login under multiplexing instead of being refused. Leave off for any other profile.
   claude_code_telemetry:
     type: bool
     default: false
