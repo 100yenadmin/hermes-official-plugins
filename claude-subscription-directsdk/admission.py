@@ -647,6 +647,71 @@ def restore_queried_turn(payload, queried, memory=None):
         return unmatched()
 
 
+_ROLE_CODES = {'user': 'u', 'assistant': 'a', 'system': 's'}
+
+
+def _payload_chars(block):
+    """Characters of a block's text-like payloads: text, thinking, nested tool_result text, base64 data."""
+    if isinstance(block, str):
+        return len(block)
+    if not isinstance(block, dict):
+        return 0
+    n = sum(len(block[k]) for k in ('text', 'thinking', 'data') if isinstance(block.get(k), str))
+    source = block.get('source')
+    if isinstance(source, dict) and isinstance(source.get('data'), str):
+        n += len(source['data'])
+    inner = block.get('content')
+    if isinstance(inner, (str, list)):
+        n += sum(_payload_chars(b) for b in ([inner] if isinstance(inner, str) else inner))
+    return n
+
+
+def row_profile(messages):
+    """Per message row: (role code, block count, text-like characters); and how many rows come before the
+    trailing per-request ``role: system`` rows, which the next request never repeats."""
+    rows = []
+    for message in messages:
+        content = message.get('content')
+        blocks = content if isinstance(content, list) else [content]
+        rows.append((_ROLE_CODES.get(message.get('role'), '?'), len(blocks), sum(_payload_chars(b) for b in blocks)))
+    stable = len(rows)
+    while stable and rows[stable - 1][0] == 's':
+        stable -= 1
+    return rows, stable
+
+
+def _parity_fields(new, old, i):
+    a, b = old[i], (new[i] if i < len(new) else ('-', '-', '-'))
+    role = a[0] if a[0] == b[0] else f'{a[0]}/{b[0]}'
+    return f'role={role} blocks={a[1]}/{b[1]} chars={a[2]}/{b[2]}'
+
+
+def observe_parity(gate, payload):
+    """Session mode, log only: profile the rows of each forwarded request (lengths, counts and role codes, never
+    text). Notes once per native when a row an earlier request sent has changed, and on a rebuilt native's first
+    request where its rows first differ from the retired native's last request. Any failure skips the note."""
+    note = getattr(gate, 'parity_note', None)
+    if note is None:
+        return
+    try:
+        rows, stable = row_profile(json.loads(payload)['messages'])
+        previous, gate.parity = gate.parity, (rows, stable)
+        handed, gate.parity_prev = gate.parity_prev, None
+        if handed is not None:
+            pid, old, old_stable = handed
+            i = next((k for k in range(old_stable) if k >= len(rows) or rows[k] != old[k]), None)
+            note(f'prev={pid} first_diff=' + ('none role=- blocks=- chars=-' if i is None else f'{i} {_parity_fields(rows, old, i)}')
+                 + f' rows={len(rows)}/{len(old)}')
+        if previous is not None and not gate.parity_logged:
+            old, old_stable = previous
+            i = next((k for k in range(old_stable) if k >= len(rows) or rows[k] != old[k]), None)
+            if i is not None:
+                gate.parity_logged = True
+                note(f'self_diff row={i} {_parity_fields(rows, old, i)} rows={len(rows)}')
+    except Exception:
+        pass
+
+
 class Capture:
     def __init__(self):
         self.message = None
@@ -806,6 +871,9 @@ class Admission:
         self.status = None
         self.failure = None
         self.unrestored = None
+        # Log-only row parity (session mode): the latest profile, a retired native's handed-over one, the note.
+        self.parity = self.parity_prev = self.parity_note = None
+        self.parity_logged = False
         self.capture = Capture()
         self.error_body = b''
         self.prefix = '/admit/' + secrets.token_urlsafe(32)
@@ -854,6 +922,7 @@ class Admission:
     def close(self):
         if isinstance(self.first_turn, dict) and self.first_turn.get('spawn_row'):
             self.first_turn['spawn_row'] = None  # the remembered frame may hold base64 images
+        self.parity = self.parity_prev = None
         self.abort()
         self.server.shutdown()
         self.thread.join()
@@ -971,6 +1040,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = pin_message_breakpoint(payload, gate.queried, gate.first_turn)
             if gate.eager:
                 payload = stream_tool_input(payload)
+            observe_parity(gate, payload)
             target = gate.upstream
             conn, upstream_socket = self._connect_upstream()
             if conn is None:

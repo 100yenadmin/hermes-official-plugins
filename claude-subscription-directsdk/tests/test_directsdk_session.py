@@ -77,6 +77,8 @@ def wire():
     reminder = '\n<system-reminder>userEmail: user@example.com</system-reminder>'
     if first_query and os.environ.get('NATIVE_CONTEXT') and len(history) == 1:
         history[0]['content'].insert(0, {'type':'text','text':reminder})
+    if not first_query and os.environ.get('FAKE_EDIT_OLD_ROW') and len(history[0]['content']) == 1:
+        history[0]['content'].append({'type':'text','text':' SECRETEDIT'})  # a live native rewrites a row it already sent
     newest = history[-1]['content'] if history and history[-1]['role'] == 'user' and isinstance(history[-1]['content'], list) else []
     if first_query and os.environ.get('NATIVE_KEEP_CONTEXT') and newest and newest[-1].get('type') == 'tool_result':
         # 2.1.325 on a subscription login (offline capture): a native whose first query answers a replayed tool-result
@@ -1922,4 +1924,68 @@ def test_a_native_spawned_at_a_tool_result_row_sends_that_row_with_the_same_byte
     assert all(b['type'] == 'tool_result' for b in rows[0]['content'])
     assert rows[1] == rows[0], 'the spawned native changed the row on its next request'
     assert rows[2] == rows[0], 'the successor replayed the row with other bytes'
+
+
+def _parity_lines(caplog):
+    lines = _session_lines(caplog, 'session parity:')
+    assert not any('SECRET' in line or 'probe' in line or 'R0' in line for line in lines), lines  # never text
+    return lines
+
+
+@pytest.mark.parametrize('edits', [False, True])
+def test_a_native_that_changes_a_row_it_already_sent_logs_one_self_diff(rig, caplog, edits):
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    def client():
+        c = rig.client()
+        if edits:
+            c.env['FAKE_EDIT_OLD_ROW'] = '1'
+        return c
+    messages = [{'role': 'user', 'content': 'SECRETTEXT hello'}]
+    for text in ('SECRETTEXT again', 'SECRETTEXT third'):
+        response = step(client(), messages)
+        messages += [as_history(response), {'role': 'user', 'content': text}]
+    assert step(client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    pid = directsdk._session_pool[0].pid
+    lines = _parity_lines(caplog)
+    if not edits:
+        assert lines == []
+        return
+    (line,) = lines  # once per native, though every later request differs
+    assert line.split(' ', 3)[3] == f'self_diff row=0 role=u blocks=1/2 chars=16/27 rows=3' and f':{pid} ' in line, line
+
+
+def test_a_rebuild_logs_the_first_row_that_differs_from_the_retired_natives_last_request(rig, caplog):
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    # An unexpected suffix (a user row while calls are pending) over an unchanged history: no row differs.
+    messages = [{'role': 'user', 'content': 'call probe in parallel'}]
+    first = step(rig.client(), messages)
+    old = directsdk._session_pool[0].pid
+    messages += [as_history(first)] + [{'role': 'tool', 'tool_call_id': c.id, 'content': f'R{i}' * 50} for i, c in enumerate(first.choices[0].message.tool_calls)]
+    messages.append({'role': 'user', 'content': 'SECRETTEXT steer'})
+    second = step(rig.client(), messages)
+    assert second.usage.model_dump()['native_admission']['session'] == 'rebuild:suffix'
+    (line,) = _parity_lines(caplog)
+    assert line.split(' ', 3)[3] == f'prev={old} first_diff=none role=- blocks=- chars=- rows=3/1', line
+    # A history edit (rebuild:prefix): the edited tool-result row is the first that differs.
+    old = directsdk._session_pool[0].pid
+    messages += [as_history(second)]
+    messages[2] = dict(messages[2], content='SECRETTEXT R0')
+    messages.append({'role': 'user', 'content': 'after'})
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'rebuild:prefix'
+    line = _parity_lines(caplog)[-1]
+    # The retired native had replayed 3 rows (results and steer in one row); the edit shortened row 2's text.
+    assert line.split(' ', 3)[3] == f'prev={old} first_diff=2 role=u blocks=3/3 chars=216/129 rows=5/3', line
+
+
+def test_a_failing_row_profile_leaves_the_request_and_the_step_intact(rig, caplog, monkeypatch):
+    import admission
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    def broken(messages):
+        raise RuntimeError('profile failed')
+    monkeypatch.setattr(admission, 'row_profile', broken)
+    messages = [{'role': 'user', 'content': 'hello'}]
+    messages += [as_history(step(rig.client(), messages)), {'role': 'user', 'content': 'again'}]
+    response = step(rig.client(), messages)
+    assert response.choices[0].message.content == 'echo again' and response.usage.model_dump()['native_admission']['session'] == 'reused'
+    assert _parity_lines(caplog) == []
 

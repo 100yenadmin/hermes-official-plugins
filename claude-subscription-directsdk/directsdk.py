@@ -1669,6 +1669,8 @@ class Client:
         # frame, including tool-result frames (#5).
         queried = frames[-1]['message']['content']
         session.admission = relay(upstream, timeout, queried=queried, first_turn={})
+        # A rebuild retired this conversation's native in the checkout just before (same thread): its last profile.
+        session.admission.parity_prev, _parity_handover.prev = getattr(_parity_handover, 'prev', None), None
         # Streamed tool arguments stay on unless this conversation's came back invalid (#164 #221 #326); a session keeps
         # its setting for life, so its request bytes never change between steps.
         session.admission.eager = session_id not in _BUFFER_TOOL_INPUT
@@ -1682,6 +1684,8 @@ class Client:
             request.process, request.admission = session.process, session.admission
         session.request = request
         session.pid = session.process.pid
+        label = session.ident[:8] + ':' + str(session.pid)
+        session.admission.parity_note = lambda text: _session_log.info('session parity: session=%s %s', label, text)
         threading.Thread(target=session.read, daemon=True).start()
         session.send({'type': 'control_request', 'request_id': 'hermes-init', 'request': {'subtype': 'initialize', 'hooks': None}})
         replay_history(frames, session.send, lambda: session.receive(request, timeout), names, session=True)
@@ -1783,6 +1787,8 @@ _session_pool = []
 _session_reaper = None
 _session_noted = set()
 _session_failures, _session_off = 0, False
+# Log-only parity hand-over from a checkout's rebuild to the spawn that follows it on the same thread.
+_parity_handover = threading.local()
 # The telemetry setting (applied per spawn) and the proxy route are fixed for a session's life: a change starts a new one.
 _SESSION_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
                      'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy', 'NODE_EXTRA_CA_CERTS')
@@ -2180,6 +2186,14 @@ def _session_checkout(ident, keys, messages, first, login=None):
             how = 'rebuild:ambiguous'  # never pick by pool order; replay instead
         for session in stale:
             _session_pool.remove(session)
+    _parity_handover.prev = None
+    if how.startswith('rebuild:') and first is not None:
+        try:  # log only: the retired native's last row profile, for the rebuilt native's first request
+            old = next((s for s in stale if s.first == first and s.admission is not None and s.admission.parity), None)
+            if old is not None:
+                _parity_handover.prev = (old.pid, *old.admission.parity)
+        except Exception:
+            pass
     for session, consumed, expect, why in diverged:
         try:
             _session_log.info('session diverged: session=%s %s', session.ident[:8] + ':' + str(session.pid),
