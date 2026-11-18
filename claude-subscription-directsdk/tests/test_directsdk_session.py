@@ -1,4 +1,5 @@
 """Session mode: one live native session across Hermes steps; parked hermes tool calls; rebuild on divergence."""
+from collections import OrderedDict
 import json
 import os
 from concurrent.futures import ThreadPoolExecutor
@@ -266,6 +267,7 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(directsdk, '_session_failures', 0)
     monkeypatch.setattr(directsdk, '_session_off', False)
     monkeypatch.setattr(directsdk, '_session_noted', set())
+    monkeypatch.setattr(directsdk, '_session_retired', OrderedDict())
     upstream = Upstream()
     native = tmp_path / 'native.py'
     native.write_text(NATIVE)
@@ -1805,3 +1807,49 @@ def test_the_relays_ca_counts_even_when_hermes_exports_the_same_bundle(rig, monk
     assert next_step('four') != 'reused' and len(rig.spawned()) == 2
     configured['on'] = False
     assert next_step('five') != 'reused' and len(rig.spawned()) == 3
+
+
+def _session_lines(caplog, prefix):
+    return [r.getMessage() for r in caplog.records if r.getMessage().startswith(prefix)]
+
+
+# The refused turn carries a cut-off call, so its stop reason also fails the tool_use check: every condition that fired is named.
+@pytest.mark.parametrize('text, why', [('please refuse', 'refusal+stop-mismatch'), ('call ghost', 'not-offered')])
+def test_a_poisoned_step_names_which_condition_retired_it(rig, caplog, text, why):
+    """The kill line's reason=step-failed-or-poisoned covers several conditions; why= names the ones that fired."""
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    step(rig.client(), [{'role': 'user', 'content': text}])
+    (line,) = _session_lines(caplog, 'session kill:')
+    assert line.endswith(' reason=step-failed-or-poisoned why=' + why), line
+
+
+def test_the_step_line_carries_keyed_digests_of_each_identity_part(rig, caplog):
+    """tools=, sys=, launch= and body= tell apart why a conversation was re-keyed; keyed hashes, never text."""
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    other = [dict(TOOLS[0], function=dict(TOOLS[0]['function'], description='probe two'))]
+    for system, tools in (('SYSTEM ONE', TOOLS), ('SYSTEM TWO', TOOLS), ('SYSTEM ONE', other)):
+        rig.client().create(model='sonnet', messages=[{'role': 'system', 'content': system}, {'role': 'user', 'content': 'hi'}], tools=tools)
+    lines = _session_lines(caplog, 'session step:')
+    assert len(lines) == 3 and not any('SYSTEM' in line or 'probe two' in line for line in lines)
+    parts = [dict(field.split('=', 1) for field in line.split(' id=', 1)[1].split()[1:]) for line in lines]
+    assert all(list(p) == ['tools', 'sys', 'launch', 'body'] and all(len(v) == 8 for v in p.values()) for p in parts), parts
+    one, two, three = parts
+    assert one['sys'] != two['sys'] and {k: one[k] for k in ('tools', 'launch', 'body')} == {k: two[k] for k in ('tools', 'launch', 'body')}
+    assert one['tools'] != three['tools'] and one['body'] != three['body'] and (one['sys'], one['launch']) == (three['sys'], three['launch'])
+
+
+def test_a_cold_respawn_logs_whether_its_first_row_changed(rig, caplog):
+    """A session retired for any reason leaves its first row's keyed hash and row count; the next cold step compares."""
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    messages = [{'role': 'user', 'content': 'hello'}]
+    messages += [as_history(step(rig.client(), messages)), {'role': 'user', 'content': 'again'}]
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    assert not _session_lines(caplog, 'session respawn:')
+    directsdk._session_shutdown()
+    messages += [as_history(step(rig.client(), messages)), {'role': 'user', 'content': 'third'}]
+    directsdk._session_shutdown()
+    messages[0] = {'role': 'user', 'content': 'hello, edited'}
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'cold'
+    lines = _session_lines(caplog, 'session respawn:')
+    assert [line.split(' ', 3)[3] for line in lines] == ['first_row_changed=0 rows=3 prev_rows=4', 'first_row_changed=1 rows=5 prev_rows=4'], lines
+

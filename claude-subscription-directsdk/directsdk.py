@@ -1412,6 +1412,7 @@ class Client:
         else:
             spawn = False
         done = yielded = lossy = launched = False
+        why = None  # the kill line's sub-reason for a failed or poisoned step (log only)
         results, rewritten = {}, {}
         try:
             if not spawn:
@@ -1432,6 +1433,8 @@ class Client:
                     session.deliver(results)
             else:
                 self._session_spawn(session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved, upstream)
+                if how == 'cold':
+                    _session_respawned(session, keys)
             emitted, native_error, native_error_code, final = '', None, None, None
             rate_limit = None
             handed, opener_attempted, stopped = None, False, False
@@ -1536,6 +1539,7 @@ class Client:
             # A denied native retry, a native error or a refusal leaves native's own state unknown: answer, then rebuild next step.
             poisoned = refused or bool(admission.denied or native_error) or (final is not None and (final.get('is_error') or final.get('subtype') != 'success'))
             if poisoned and not refused and not admission.denied:
+                why = 'native-error'
                 raise ClaudeAPIError('Native API error: ' + (native_error or str(final.get('subtype'))), NATIVE_ERROR_STATUS.get(str(native_error_code)))
             # Native persisted or truncated a result it got over MCP: its history keeps that rewrite, so answer, then replay
             # next step. Intact results in another order are unrestored too, and keep the session.
@@ -1560,6 +1564,12 @@ class Client:
             # Calls from a turn that stopped for another reason (max_tokens): native's handling of a cut turn is its
             # own, so answer, then replay next step.
             poisoned = poisoned or (bool(calls) and assistant.get('stop_reason') != 'tool_use')
+            # Which of the conditions above fired, for the kill line only (lossy has its own kill reason).
+            why = '+'.join(word for word, hit in (
+                ('refusal', refused), ('denied', admission.denied),
+                ('native-error', native_error or (final is not None and (final.get('is_error') or final.get('subtype') != 'success'))),
+                ('unparsed', admission.capture.unparsed), ('not-offered', not offered),
+                ('stop-mismatch', calls and assistant.get('stop_reason') != 'tool_use')) if hit)
             usage = assistant['usage']
             # Native reports cost only per whole native turn; a step has no list-price figure of its own.
             tail, message, chunk = self._response(kwargs['model'], [assistant], calls, emitted, usage, admission,
@@ -1588,9 +1598,12 @@ class Client:
                 except Exception:
                     _session_log.debug('session opener: step-end handoff failed')
             thinking = usage.get('output_tokens_details', {}).get('thinking_tokens', 0)
-            _session_log.info('session step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s',
+            # Keyed digests of the ident's parts (the tool list is also inside body): which part re-keyed a conversation.
+            parts = ' '.join(f'{name}={_short_hash(value)[:8]}' for name, value in (
+                ('tools', json.dumps(json.loads(body).get('tools'))), ('sys', json.dumps(system)), ('launch', json.dumps(launch)), ('body', body)))
+            _session_log.info('session step: session=%s mode=%s upstream=%d denied=%d unrestored=%d wall=%.2fs in=%d cache_read=%d cache_write=%d out=%d thinking=%d calls=%d stop=%s id=%s %s',
                            session.ident[:8] + ':' + str(session.pid), how, int(admission.used), admission.denied, bool(admission.unrestored), time.monotonic() - started,
-                           usage['input_tokens'], usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0), usage['output_tokens'], thinking, len(calls), assistant.get('stop_reason'), assistant.get('id'))
+                           usage['input_tokens'], usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0), usage['output_tokens'], thinking, len(calls), assistant.get('stop_reason'), assistant.get('id'), parts)
             if spawn and not launched:
                 launched = True
                 _session_launched()
@@ -1609,7 +1622,7 @@ class Client:
             # A session launch or session that fails before admission (a CLI without the session protocol, a native that
             # died while parked) serves this step per-call. Admitted, streamed, cancelled or refused steps stay errors.
             session.detach(request)
-            _session_discard(session)
+            _session_discard(session, why=why or 'raised-' + type(error).__name__)
             done = True
             admission = session.admission
             if admission is not None:
@@ -1628,7 +1641,7 @@ class Client:
                 _session_launched()
             if session is not None and not done:
                 session.detach(request)
-                _session_discard(session, 'native-rewrote-tool-result' if lossy else 'step-failed-or-poisoned')
+                _session_discard(session, 'native-rewrote-tool-result' if lossy else 'step-failed-or-poisoned', None if lossy else why or 'closed')
             with self._lock:
                 self._requests.discard(request)
 
@@ -1764,6 +1777,10 @@ _session_pool = []
 _session_reaper = None
 _session_noted = set()
 _session_failures, _session_off = 0, False
+# The first consumed row (keyed hash) and row count of the last retired session per ident (bounded): the next cold
+# step for that ident logs whether its first row changed. Metadata only, for the cache audit.
+_session_retired = OrderedDict()
+_session_retired_lock = threading.Lock()
 # The telemetry setting (applied per spawn) and the proxy route are fixed for a session's life: a change starts a new one.
 _SESSION_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
                      'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy', 'NODE_EXTRA_CA_CERTS')
@@ -2044,12 +2061,18 @@ class NativeSession:
                 raise RuntimeError('Invalid native stream-json output: ' + repr((getattr(event, 'doc', None) or str(event))[:300])) from event
             return event
 
-    def kill(self, reason):
+    def kill(self, reason, why=None):
         with self.lock:
             if self.killed:
                 return
             self.killed = True
-        _session_log.info('session kill: session=%s reason=%s', self.ident[:8] + ':' + str(self.pid), reason)
+        _session_log.info('session kill: session=%s reason=%s%s', self.ident[:8] + ':' + str(self.pid), reason, f' why={why}' if why else '')
+        if self.consumed:
+            with _session_retired_lock:
+                _session_retired[self.ident] = (_short_hash(self.consumed[0]), len(self.consumed))
+                _session_retired.move_to_end(self.ident)
+                while len(_session_retired) > 256:
+                    _session_retired.popitem(last=False)
         if self.process is not None:
             kill_process_tree(self.process)
             try:
@@ -2234,11 +2257,20 @@ def _session_cancel_owned(client):
         s.kill('cancelled-while-parked')
 
 
-def _session_discard(session, reason='step-failed-or-poisoned'):
+def _session_discard(session, reason='step-failed-or-poisoned', why=None):
     with _session_lock:
         if session in _session_pool:
             _session_pool.remove(session)
-    session.kill(reason)
+    session.kill(reason, why)
+
+
+def _session_respawned(session, keys):
+    """On a cold step for an ident retired earlier in this process: whether the first row changed (hashes and counts only)."""
+    with _session_retired_lock:
+        retired = _session_retired.pop(session.ident, None)
+    if retired is not None:
+        _session_log.info('session respawn: session=%s first_row_changed=%d rows=%d prev_rows=%d', session.ident[:8] + ':' + str(session.pid),
+                          int(retired[0] != _short_hash(keys[0] if keys else None)), len(keys), retired[1])
 
 
 def _session_reap():
