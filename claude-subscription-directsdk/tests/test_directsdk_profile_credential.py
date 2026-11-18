@@ -367,17 +367,41 @@ def test_a_backend_started_for_another_profile_never_lends_its_login_to_an_opted
         _apply({"UNRELATED": "kept"})
 
 
-def test_an_opted_in_profiles_own_cron_worker_keeps_the_inherited_login(profile, tmp_path, monkeypatch):
-    """A restart-safe cron worker for eva's job: started with HERMES_HOME=eva (her process home) and her scope stamped
-    with it. Opted in, the job runs on the login the worker inherited; not opted in, it is refused as before."""
+def test_core_cron_worker_never_honours_the_opt_in(profile, tmp_path, monkeypatch):
+    """Astra round 3: a managed gateway started for X can hand an opted-in profile's job to core's restart-safe
+    worker, which runs with that profile's home as its process home and X's HOME (so X's ~/.claude). The worker
+    can't show which gateway started it, so the opt-in never counts there; such a profile needs its own login.
+    Driven through core's own worker entry (cron/scheduler.py _run_external_worker_payload), so a change to core's
+    worker binding turns this red."""
+    import json
     import directsdk_setup
+    try:
+        from cron import scheduler
+    except ImportError:
+        pytest.skip("core without the restart-safe cron worker")
+    if not hasattr(scheduler, "_run_external_worker_payload"):
+        pytest.skip("core without the restart-safe cron worker")
     monkeypatch.delenv(TOKEN, raising=False)
-    plain = _profile_home(tmp_path, "plain-home")
-    with _process_started_for(plain), _served_turn(plain), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
-        _apply({"UNRELATED": "kept"})
     eva = _profile_home(tmp_path, "eva-home", inherit_launch_login=True)
-    with _process_started_for(eva), _served_turn(eva):
-        assert _apply({"UNRELATED": "kept"}) == {"UNRELATED": "kept"}
+    monkeypatch.setenv("HERMES_HOME", str(eva))  # the worker's env: HERMES_HOME is the fired profile's
+    payload, ack = tmp_path / "payload.json", tmp_path / "exec-1.ready"
+    payload.write_text(json.dumps({"job": {"id": "job-1", "execution_id": "exec-1"}, "profile_home": str(eva),
+                                   "multiplex_active": True}), encoding="utf-8")
+    outcome = []
+
+    def run(*_args, **_kwargs):
+        try:
+            _apply({"UNRELATED": "kept"})
+            outcome.append("kept the inherited login")
+        except directsdk_setup.ClaudeCodeLoggedOut:
+            outcome.append("refused")
+        return True
+
+    monkeypatch.setattr("cron.executions.adopt_claimed_execution",
+                        lambda execution_id: {"id": execution_id, "status": "running"})
+    monkeypatch.setattr(scheduler, "run_one_job", run)
+    assert scheduler._run_external_worker_payload(payload, ack) is True
+    assert outcome == ["refused"]
 
 
 def test_a_cron_worker_for_a_served_profile_is_still_refused(profile, tmp_path, monkeypatch):

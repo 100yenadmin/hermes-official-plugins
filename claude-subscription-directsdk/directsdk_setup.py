@@ -18,6 +18,7 @@ import os
 import shutil
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -262,14 +263,29 @@ def _serves_launch_profile():
     return current_secret_scope() is not None and current_secret_scope_home() is None
 
 
+# Set by core's restart-safe cron worker (cron/scheduler.py) while it runs a job.
+_CRON_WORKER_ENV = "_HERMES_CRON_EXTERNAL_WORKER"
+
+
+def _in_cron_worker():
+    """True inside core's restart-safe cron worker (a managed Linux gateway hands each fire to one). Its process
+    home is the fired profile's whichever gateway started it, so it can't show that the login it inherited is that
+    profile's. Core's worker entry is ``python -m cron.scheduler``; the env marker covers the job itself."""
+    if os.environ.get(_CRON_WORKER_ENV):
+        return True
+    spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+    return getattr(spec, "name", None) == "cron.scheduler"
+
+
 def _scope_is_process_profile():
-    """True when the bound scope's profile is the one this process was started for: its stamp names the routing
-    process home (core stamps the launch profile's own in-process cron fire that way, and a restart-safe cron worker
-    runs with the fired profile's home as its process home). Unstamped, unbound, a foreign stamp, or a core without
-    these names: False."""
+    """True when the bound scope's profile is the one this process was started for: its stamp, and the home the
+    task reads its config from, name the routing process home (core stamps the launch profile's own in-process cron
+    fire that way). Inside a cron worker, unstamped, unbound, a foreign stamp, or a core without these names: False."""
+    if _in_cron_worker():
+        return False
     try:
         from agent.secret_scope import current_secret_scope, current_secret_scope_home
-        from hermes_constants import get_routing_process_hermes_home, hermes_home_key
+        from hermes_constants import get_hermes_home, get_routing_process_hermes_home, hermes_home_key
     except ImportError:
         return False
     if current_secret_scope() is None:
@@ -278,7 +294,8 @@ def _scope_is_process_profile():
     if home is None:
         return False
     try:
-        return hermes_home_key(home) == hermes_home_key(get_routing_process_hermes_home())
+        key = hermes_home_key(home)
+        return key == hermes_home_key(get_routing_process_hermes_home()) == hermes_home_key(get_hermes_home())
     except Exception:
         return False
 
