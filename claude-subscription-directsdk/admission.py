@@ -465,13 +465,18 @@ def stream_tool_input(payload):
         return payload
 
 
-def restore_queried_turn(payload, queried):
+def restore_queried_turn(payload, queried, memory=None, *, row=None):
     """Restore a uniquely anchored tool-result frame without dropping protected content.
 
     Only trailing bare text is removable. Split/joined text runs are equivalent
     for matching, but never across media, metadata or cache directives. Restore
     the host's original representation and retain unambiguously mapped markers.
+    The frame is the newest user row, or message ``row`` when given. With a session's
+    ``memory``, the first request records the row it cleaned (see ``restore_spawn_row``).
     """
+    first = isinstance(memory, dict) and row is None and 'spawn_row' not in memory
+    if first:
+        memory['spawn_row'] = None  # only the native's first request records its row
     if not isinstance(queried, list) or not queried:
         return payload
     strict = any(isinstance(block, dict) and block.get('type') == 'tool_result' for block in queried)
@@ -560,7 +565,8 @@ def restore_queried_turn(payload, queried):
         body = json.loads(payload)
         messages = body['messages']
         last_assistant = max((i for i, m in enumerate(messages) if m.get('role') == 'assistant'), default=-1)
-        newest = messages[last_assistant + 1] if last_assistant + 1 < len(messages) else {}
+        index = last_assistant + 1 if row is None else row
+        newest = messages[index] if index < len(messages) else {}
         native = newest.get('content') if newest.get('role') == 'user' else None
         if not isinstance(native, list):
             return unmatched()
@@ -576,6 +582,8 @@ def restore_queried_turn(payload, queried):
         if result_ids != native_ids:
             return unmatched()
         restored = restore_sequence(native, queried)
+        if first and native != restored:
+            memory['spawn_row'] = (index, queried)  # Hermes' frame, held by reference for the native's life
         if native == restored:
             return payload
         newest['content'] = restored
@@ -584,6 +592,23 @@ def restore_queried_turn(payload, queried):
         raise
     except (ValueError, TypeError, KeyError, AttributeError, IndexError):
         return unmatched()
+
+
+def restore_spawn_row(payload, memory):
+    """Session mode: clean the tool-result row a native was spawned at on every later request, as on its first.
+
+    A native whose first query answers a replayed tool-result row appends its context (the account reminder on a
+    subscription login) inside that row and keeps it in its own history. Restoration covers only the newest row, so
+    from the next step on the row went upstream with the reminder, while a successor replays it without: the
+    native's later requests and every replay differed there. The same exact matching as the first request applies
+    to that one remembered row; a row that no longer matches forwards as is."""
+    kept = memory.get('spawn_row') if isinstance(memory, dict) else None
+    if kept is None:
+        return payload
+    try:
+        return restore_queried_turn(payload, kept[1], row=kept[0])
+    except QueriedTurnMismatch:
+        return payload
 
 
 class Capture:
@@ -897,12 +922,13 @@ class Handler(BaseHTTPRequestHandler):
             if getattr(gate, 'one_shot', False):
                 payload = drop_message_breakpoints(payload)
             try:
-                payload = restore_queried_turn(payload, gate.queried)
+                payload = restore_queried_turn(payload, gate.queried, gate.first_turn)
             except QueriedTurnMismatch as exc:
                 # Restoration is hygiene, not a gate: a frame it cannot prove lossless forwards
                 # exactly as native built it (the pre-restoration behaviour), so a CLI that
                 # reshapes its tool results degrades to an uncached tail, never a failed turn.
                 gate.unrestored = str(exc)
+            payload = restore_spawn_row(payload, getattr(gate, 'first_turn', None))
             payload = stable_request_context(payload, gate.queried,
                                              session=isinstance(getattr(gate, 'first_turn', None), dict))
             payload = pin_message_breakpoint(payload, gate.queried, gate.first_turn)

@@ -1059,7 +1059,11 @@ def test_cold_replay_reads_the_session_first_turn_frame_prefix(rig):
     mark = message_marks(before)[-1]
     assert mark == (0, 0) and prefix(after, mark) == prefix(before, mark)
     (fresh,) = directsdk._session_pool
-    assert fresh.admission is not session.admission and fresh.admission.first_turn == {'context': None}
+    assert fresh.admission is not session.admission and fresh.admission.first_turn.keys() == {'context', 'spawn_row'}
+    assert fresh.admission.first_turn['context'] is None
+    # Launched on the tool-result frame: the cleaned row is remembered for the native's later requests.
+    index, frame = fresh.admission.first_turn['spawn_row']
+    assert index == 2 and [b['tool_use_id'] for b in frame] == [c.id for c in first.choices[0].message.tool_calls]
 
 
 def test_a_cold_launch_on_a_tool_result_frame_restores_hermes_results(rig):
@@ -1891,9 +1895,8 @@ def _plain_tree(value):
     return [_plain_tree(v) for v in value] if isinstance(value, list) else value
 
 
-@pytest.mark.parametrize('keeps_context', [False, pytest.param(True, marks=pytest.mark.xfail(strict=True, reason=(
-    'Phase A diagnosis, not fixed yet: the relay restores a tool-result row only while it is the newest row, so a '
-    'native spawned there sends the reminder it kept on every later request, and a successor replays the row without it')))])
+# keeps_context=False is the control: a native that keeps nothing in the row.
+@pytest.mark.parametrize('keeps_context', [False, True])
 def test_a_native_spawned_at_a_tool_result_row_sends_that_row_with_the_same_bytes(rig, keeps_context):
     """The tool-result row a native was spawned at: its first request, its later requests and a successor's replay
     forward the same bytes (cache_control aside), or every later request misses the cache written before it."""

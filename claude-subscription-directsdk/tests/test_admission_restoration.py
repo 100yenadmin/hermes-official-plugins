@@ -9,7 +9,7 @@ import threading
 
 import pytest
 
-from admission import Admission, QueriedTurnMismatch, restore_queried_turn
+from admission import Admission, QueriedTurnMismatch, restore_queried_turn, restore_spawn_row
 import directsdk
 
 RESULT = {"type": "tool_result", "tool_use_id": "t1", "content": "output"}
@@ -421,3 +421,17 @@ def test_restoration_is_anchored_on_hermes_ids_and_content_not_native_wording(an
     native = [{**RESULT, "content": RESULT["content"] + annotation}]
     restored = json.loads(restore_queried_turn(wire(native), [RESULT]))
     assert restored["messages"][-1]["content"] == [RESULT]
+
+
+def test_a_remembered_spawn_row_that_no_longer_matches_forwards_unchanged():
+    """A native's later request whose spawn row differs from Hermes' frame in anything but appended plain text
+    (here another result text) goes upstream byte for byte as native sent it."""
+    host = {**RESULT, "content": [{"type": "text", "text": "output"}]}
+    memory = {}
+    first = wire([{**host, "content": [{"type": "text", "text": "output"}, {"type": "text", "text": "\n<system-reminder>context</system-reminder>"}]}])
+    assert strip(json.loads(restore_queried_turn(first, [host], memory))["messages"][1]["content"]) == [host]
+    assert memory["spawn_row"] == (1, [host])
+    later = wire([{**host, "content": [{"type": "text", "text": "changed"}, {"type": "text", "text": "\n<system-reminder>context</system-reminder>"}]}],
+                 after=[{"role": "assistant", "content": [{"type": "text", "text": "done"}]}, {"role": "user", "content": "next"}])
+    assert restore_spawn_row(later, memory) is later
+
