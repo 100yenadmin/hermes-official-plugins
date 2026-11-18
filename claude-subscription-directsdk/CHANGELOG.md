@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.4.0+session.12] - Unreleased
+
+- The launch profile's own scheduled cron jobs keep its Claude login again under multiplexing. Core now binds an in-process cron fire's scope stamped with the process home, and session.10 counted any stamped scope as a served profile's, so a launch profile whose login is the shared `~/.claude` had its own jobs refused with "This profile has no Claude login of its own" (eva's daily job, 2026-11-18). A stamp equal to the process home is the launch profile's own again, except inside core's restart-safe cron worker (`_HERMES_CRON_EXTERNAL_WORKER` set), whose process home is the fired profile's while `~/.claude` is still the launch profile's: a fire there with no login of its own is still refused. A foreign stamp is refused as before.
+
 ## [0.4.0+session.11] - Unreleased
 
 - A session retired because its conversation diverged (`rebuild:prefix` or `rebuild:suffix`) now logs one `session diverged:` line first; idle, dead, launch-identity and unpaired retirements log none: where the request left the history the session had consumed (`at`, both lengths), the shape of the change (`insert`, `delete`, `replace-one`, `truncated`, `other`), how many overlapping rows differ, the role and changed field at that row, the lengths of the two keys and their common prefix and suffix, and a short hash of each side, keyed with a random per-process secret so a short message can't be recovered from the log by guessing (the two sides still compare within one gateway process). For an unexpected suffix it logs what the session expected and what came. Ids, counts and hashes only, never message text. The comparison already ignores metadata Hermes adds, so every divergence is a change in replayed bytes.
