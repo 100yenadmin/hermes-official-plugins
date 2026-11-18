@@ -246,12 +246,46 @@ def test_cores_own_launch_turn_bind_keeps_the_launch_login(profile, tmp_path, mo
     assert seen() == [None]
 
 
+def test_the_launch_profiles_own_cron_fire_keeps_its_login(profile, tmp_path, monkeypatch):
+    """eva's daily cron job, 2026-11-18: a multiplexing gateway fires the launch profile's own job in process, and
+    core binds that fire's scope stamped with the process home (cron/scheduler.py _fire_secret_scope). Its login is
+    the process's own (~/.claude): the fire runs on it instead of "This profile has no Claude login of its own"."""
+    monkeypatch.delenv(TOKEN, raising=False)
+    monkeypatch.delenv("_HERMES_CRON_EXTERNAL_WORKER", raising=False)
+    try:
+        from cron.scheduler import _fire_secret_scope
+    except ImportError:
+        pytest.skip("core without the in-process cron fire scope")
+    from agent.secret_scope import current_secret_scope_home, reset_multiplex_context, set_multiplex_context
+    from hermes_constants import get_routing_process_hermes_home, hermes_home_key
+    client, seen = _native(tmp_path, monkeypatch)
+    mode = set_multiplex_context(True)
+    try:
+        with _fire_secret_scope():
+            assert hermes_home_key(current_secret_scope_home()) == hermes_home_key(get_routing_process_hermes_home())
+            assert _apply({"UNRELATED": "kept"}) == {"UNRELATED": "kept"}
+            assert client.create(**REQUEST).choices[0].message.content == "hello\n"
+    finally:
+        reset_multiplex_context(mode)
+        client.close()
+    assert seen() == [None]
+
+
 def test_a_cron_worker_for_a_served_profile_is_still_refused(profile, tmp_path, monkeypatch):
-    """A cron worker started with HERMES_HOME=<served profile> pins that home as its process home and stamps the
-    profile's scope with it (cron/scheduler.py), while HOME and ~/.claude are still the launch profile's. A stamp equal
-    to the process home is therefore not "the launch profile": with no login of its own the turn is refused."""
+    """Core's restart-safe cron worker is started with HERMES_HOME=<fired profile>: that home is its process home and
+    stamps the fire's scope, while HOME and ~/.claude are still the launch profile's. Inside the worker
+    (_HERMES_CRON_EXTERNAL_WORKER set while it runs a job) a stamp equal to the process home is not "the launch
+    profile": with no login of its own the fire is refused. The same stamp outside a worker keeps the login."""
     import directsdk_setup
     from hermes_constants import get_routing_process_hermes_home
     monkeypatch.delenv(TOKEN, raising=False)
-    with multiplexed({}, home=str(get_routing_process_hermes_home())), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
+    own = str(get_routing_process_hermes_home())
+    monkeypatch.setenv("_HERMES_CRON_EXTERNAL_WORKER", "exec-1")
+    with multiplexed({}, home=own), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
+        _apply({"UNRELATED": "kept"})
+    monkeypatch.delenv("_HERMES_CRON_EXTERNAL_WORKER")
+    with multiplexed({}, home=own):
+        assert _apply({"UNRELATED": "kept"}) == {"UNRELATED": "kept"}
+    # A foreign stamp is refused in or out of a worker.
+    with multiplexed({}), pytest.raises(directsdk_setup.ClaudeCodeLoggedOut):
         _apply({"UNRELATED": "kept"})

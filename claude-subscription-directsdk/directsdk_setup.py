@@ -242,19 +242,36 @@ def _secret_scope():
     return get_secret, routed
 
 
+# Set by core's restart-safe cron worker (cron/scheduler.py) while it runs a job; the worker's process home is the
+# fired profile's, not the launch profile whose login ~/.claude holds.
+_CRON_WORKER_ENV = "_HERMES_CRON_EXTERNAL_WORKER"
+
+
 def _serves_launch_profile():
     """True when the bound scope is the launch profile's own. Multiplexing makes every task routed, the launch
-    profile's own turns included (a Desktop backend serving several profiles). Core binds that profile's secrets
-    unstamped ("the stamp marks a FOREIGN home": launch_profile_runtime_scope, model_switch), and its login is the
-    process's own, so it keeps it as a single-profile install does. A stamp, even one equal to the process home, is
-    not enough: a cron worker started with HERMES_HOME=<served profile> stamps that profile's scope with its own
-    home, which is then the process home, while ~/.claude still holds the launch profile's login. No scope bound,
-    or a core without these names: False."""
+    profile's own turns included (a Desktop backend serving several profiles). Core binds that profile's turns
+    unstamped ("the stamp marks a FOREIGN home": launch_profile_runtime_scope, model_switch) and its in-process cron
+    fires stamped with the process home (cron/scheduler.py _install_fire_secret_scope); its login is the process's
+    own, so it keeps it as a single-profile install does. A stamp equal to the process home is not enough inside
+    core's external cron worker: started with HERMES_HOME=<fired profile>, that profile's home is the worker's
+    process home while ~/.claude still holds the launch profile's login. No scope bound, a foreign stamp, or a core
+    without these names: False."""
     try:
         from agent.secret_scope import current_secret_scope, current_secret_scope_home
+        from hermes_constants import get_routing_process_hermes_home, hermes_home_key
     except ImportError:
         return False
-    return current_secret_scope() is not None and current_secret_scope_home() is None
+    if current_secret_scope() is None:
+        return False
+    home = current_secret_scope_home()
+    if home is None:
+        return True
+    if os.environ.get(_CRON_WORKER_ENV):
+        return False
+    try:
+        return hermes_home_key(home) == hermes_home_key(get_routing_process_hermes_home())
+    except Exception:
+        return False
 
 
 def _scoped(get_secret, name):
