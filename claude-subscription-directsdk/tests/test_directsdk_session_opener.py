@@ -121,8 +121,7 @@ def watch_stop(monkeypatch, target):
     monkeypatch.setattr(directsdk.NativeSession, 'receive', watched)
 
 
-@pytest.mark.parametrize('stream', [False, True], ids=['response', 'stream'])
-def test_opener_before_stop_exact_text_and_response_unchanged(opener, monkeypatch, caplog, stream):
+def test_opener_before_stop_exact_text_and_response_unchanged(opener, monkeypatch, caplog, stream=False):
     value = '  Checking PRIVATE_SENTINEL now.\n'
     agent = Agent()
     watch_stop(monkeypatch, agent)
@@ -153,6 +152,26 @@ def test_opener_before_stop_exact_text_and_response_unchanged(opener, monkeypatc
     control_agent = Agent()
     control_agent.interim_assistant_callback = None
     control = run(opener, [text(value), call()], control_agent)
+    assert json.dumps(result.model_dump(), sort_keys=True) == json.dumps(control.model_dump(), sort_keys=True)
+
+
+def test_streamed_request_has_no_opener_and_hermes_streams_the_text(opener, monkeypatch, caplog):
+    """A streamed request shows its text through Hermes' own deltas. A direct opener copy raced those
+    deltas through the relay and posted prefix, whole and tail as separate messages."""
+    value = '  Checking PRIVATE_SENTINEL now.\n'
+    agent = Agent()
+    looked_up = []
+    monkeypatch.setattr(directsdk, '_hermes_interim_agent', lambda: looked_up.append(True) or agent)
+    chunks = list(run(opener, [text(value), call()], agent, stream=True))
+    result = chunks[-1]._response
+    assert looked_up == []
+    assert agent.messages == [] and agent.recorded == []
+    assert 'session opener' not in caplog.text
+    streamed = ''.join(c.choices[0].delta.content or '' for c in chunks[:-1] if getattr(c, 'choices', None))
+    assert streamed == value
+    assert result.choices[0].message.content == value and len(result.choices[0].message.tool_calls) == 1
+    directsdk._session_shutdown()
+    control = run(opener, [text(value), call()], Agent())
     assert json.dumps(result.model_dump(), sort_keys=True) == json.dumps(control.model_dump(), sort_keys=True)
 
 
