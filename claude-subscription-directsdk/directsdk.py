@@ -1061,9 +1061,12 @@ class Client:
         # Session mode serves tool-bearing agent steps only; auxiliary one-shots (titles, summaries) stay per-call.
         session = kwargs.get('tools') and not kwargs.get('hermes_auxiliary') and _session_enabled(self.env if self.env is not None else os.environ)
         if session:
-            # A streamed request already shows its text delta by delta; a second, direct copy of the same text
-            # races those deltas through Hermes' relay and posts prefix, whole and tail as separate messages.
-            interim_agent = _hermes_interim_agent() if early_opener_enabled() and not kwargs.get('stream') else None
+            interim_agent = _hermes_interim_agent() if early_opener_enabled() else None
+            if interim_agent is not None and kwargs.get('stream') and (
+                    getattr(interim_agent, 'stream_delta_callback', None) is not None or getattr(interim_agent, '_stream_callback', None) is not None):
+                # Its deltas already reach a display; a second, direct copy of the same text races them through
+                # Hermes' relay and posts prefix, whole and tail as separate messages.
+                interim_agent = None
             run = self._run_session(request, kwargs, body, manifest, names, system, frames, interim_agent)
         else:
             run = self._run(request, kwargs, body, manifest, names, system, frames)

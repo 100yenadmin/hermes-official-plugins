@@ -121,7 +121,8 @@ def watch_stop(monkeypatch, target):
     monkeypatch.setattr(directsdk.NativeSession, 'receive', watched)
 
 
-def test_opener_before_stop_exact_text_and_response_unchanged(opener, monkeypatch, caplog, stream=False):
+@pytest.mark.parametrize('stream', [False, True], ids=['response', 'stream-no-display'])
+def test_opener_before_stop_exact_text_and_response_unchanged(opener, monkeypatch, caplog, stream):
     value = '  Checking PRIVATE_SENTINEL now.\n'
     agent = Agent()
     watch_stop(monkeypatch, agent)
@@ -155,16 +156,15 @@ def test_opener_before_stop_exact_text_and_response_unchanged(opener, monkeypatc
     assert json.dumps(result.model_dump(), sort_keys=True) == json.dumps(control.model_dump(), sort_keys=True)
 
 
-def test_streamed_request_has_no_opener_and_hermes_streams_the_text(opener, monkeypatch, caplog):
-    """A streamed request shows its text through Hermes' own deltas. A direct opener copy raced those
-    deltas through the relay and posted prefix, whole and tail as separate messages."""
+def test_streamed_request_to_a_delta_display_has_no_opener(opener, monkeypatch, caplog):
+    """When Hermes shows the deltas live, a direct opener copy raced them through the relay and posted prefix,
+    whole and tail as separate messages. The deltas carry the text alone; the response is unchanged."""
     value = '  Checking PRIVATE_SENTINEL now.\n'
     agent = Agent()
-    looked_up = []
-    monkeypatch.setattr(directsdk, '_hermes_interim_agent', lambda: looked_up.append(True) or agent)
+    agent.stream_delta_callback = lambda text: None
+    monkeypatch.setattr(directsdk, '_hermes_interim_agent', lambda: agent)
     chunks = list(run(opener, [text(value), call()], agent, stream=True))
     result = chunks[-1]._response
-    assert looked_up == []
     assert agent.messages == [] and agent.recorded == []
     assert 'session opener' not in caplog.text
     streamed = ''.join(c.choices[0].delta.content or '' for c in chunks[:-1] if getattr(c, 'choices', None))
@@ -173,7 +173,6 @@ def test_streamed_request_has_no_opener_and_hermes_streams_the_text(opener, monk
     directsdk._session_shutdown()
     control = run(opener, [text(value), call()], Agent())
     assert json.dumps(result.model_dump(), sort_keys=True) == json.dumps(control.model_dump(), sort_keys=True)
-
 
 def test_two_tools_then_tail_handed_and_full_text_recorded(opener, caplog):
     agent = Agent()
