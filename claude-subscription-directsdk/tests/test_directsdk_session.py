@@ -20,7 +20,7 @@ import directsdk
 NATIVE = r'''
 import json, os, re, sys, urllib.request
 with open(os.environ['SPAWNS'], 'a') as f:
-    f.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv[1:], 'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'), 'entrypoint': os.environ.get('CLAUDE_CODE_ENTRYPOINT'), 'compact': [os.environ.get(k) for k in ('DISABLE_COMPACT', 'DISABLE_AUTO_COMPACT')], 'memory': [os.environ.get(k) for k in ('CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'CLAUDE_CODE_DISABLE_CLAUDE_MDS')]}) + '\n')
+    f.write(json.dumps({'pid': os.getpid(), 'argv': sys.argv[1:], 'config_dir': os.environ.get('CLAUDE_CONFIG_DIR'), 'entrypoint': os.environ.get('CLAUDE_CODE_ENTRYPOINT'), 'compact': [os.environ.get(k) for k in ('DISABLE_COMPACT', 'DISABLE_AUTO_COMPACT')], 'memory': [os.environ.get(k) for k in ('CLAUDE_CODE_DISABLE_AUTO_MEMORY', 'CLAUDE_CODE_DISABLE_CLAUDE_MDS')], 'cache_ttl': os.environ.get('CLAUDE_CODE_PROMPT_CACHE_TTL')}) + '\n')
 history, queue, rpc, answered, limits = [], [], [0], {}, {}
 first_query = True
 queries = [0]
@@ -123,6 +123,14 @@ def query():
         raw = urllib.request.urlopen(urllib.request.Request(os.environ['ANTHROPIC_BASE_URL'] + '/v1/messages', data=body, headers={'Content-Type':'application/json'}), timeout=30).read().decode()
     except urllib.error.HTTPError as error:
         out({'type':'assistant','error':'rate_limit' if error.code == 429 else 'unknown','message':{'role':'assistant','model':'<synthetic>','content':[{'type':'text','text':'API Error: %d' % error.code}]}})
+        out({'type':'result','subtype':'success','is_error':True,'num_turns':1})
+        return
+    except Exception:  # a response cut short: native reports a connection error and ends the turn
+        out({'type':'assistant','error':'unknown','message':{'role':'assistant','model':'<synthetic>','content':[{'type':'text','text':'API Error: Connection error.'}]}})
+        out({'type':'result','subtype':'success','is_error':True,'num_turns':1})
+        return
+    if 'message_start' not in raw:  # the relay ended a stalled response: native reports a connection error
+        out({'type':'assistant','error':'unknown','message':{'role':'assistant','model':'<synthetic>','content':[{'type':'text','text':'API Error: Connection error.'}]}})
         out({'type':'result','subtype':'success','is_error':True,'num_turns':1})
         return
     message, cut, partial = None, set(), {}
@@ -238,9 +246,22 @@ class Upstream:
                 results = [b for m in messages[-2:] for b in (m['content'] if isinstance(m['content'], list) else []) if b.get('type') == 'tool_result']
                 n = len(outer.bodies)
                 text = ''.join(b.get('text', '') for b in content if b.get('type') == 'text')
+                if 'stall' in text:
+                    # Headers, then silence past the relay's idle limit: a mid-stream transport failure (UpstreamIdle).
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'text/event-stream')
+                    self.end_headers()
+                    self.wfile.write(b'event: ping\ndata: {"type": "ping"}\n\n')
+                    self.wfile.flush()
+                    time.sleep(1.5)
+                    self.close_connection = True
+                    return
                 if 'limit' in text:
                     error = json.dumps({'type': 'error', 'error': {'type': 'rate_limit_error', 'message': 'slow down'}}).encode()
                     self.send_response(429)
+                    if 'used up' in text:  # the plan window itself is spent, not a throttle while it is open
+                        self.send_header('anthropic-ratelimit-unified-status', 'rejected')
+                        self.send_header('anthropic-ratelimit-unified-reset', '1800000000')
                     self.send_header('Content-Type', 'application/json')
                     self.send_header('Content-Length', str(len(error)))
                     self.end_headers()
@@ -311,8 +332,8 @@ class SimpleFixture:
         self.client, self.spawned, self.upstream = client, spawned, upstream
 
 
-def step(client, messages, stream=False):
-    result = client.create(model='sonnet', messages=messages, tools=TOOLS, stream=stream)
+def step(client, messages, stream=False, **extra):
+    result = client.create(model='sonnet', messages=messages, tools=TOOLS, stream=stream, **extra)
     if stream:
         chunks = list(result)
         final = chunks[-1]
@@ -1720,7 +1741,7 @@ def test_session_kill_never_signals_a_reaped_process(monkeypatch):
     assert calls == ['wait']
 
 
-def test_close_during_active_session_turn_kills_native_and_next_turn_replays(rig):
+def test_cancel_during_active_session_turn_kills_native_and_next_turn_replays(rig):
     client = rig.client()
     messages = [{'role': 'user', 'content': 'hello'}]
     first = step(client, messages)
@@ -1732,12 +1753,32 @@ def test_close_during_active_session_turn_kills_native_and_next_turn_replays(rig
         while len(rig.upstream.bodies) < 2 and time.monotonic() < deadline:
             time.sleep(.01)
         assert len(rig.upstream.bodies) == 2
-        client.close()
+        client.cancel()
         with pytest.raises(RuntimeError, match='cancelled'):
             future.result(timeout=3)
     process.wait(timeout=3)
     assert not directsdk._session_pool
     assert step(rig.client(), messages).usage.native_admission.session == 'cold'
+
+
+def test_close_during_active_session_turn_leaves_the_step_running(rig):
+    """Main #378 on session steps: Hermes' auxiliary cache closes clients bound to another live loop, so close()
+    must not cancel a step in flight; the step answers and its session stays for the next turn."""
+    client = rig.client()
+    messages = [{'role': 'user', 'content': 'hello'}]
+    first = step(client, messages)
+    messages += [as_history(first), {'role': 'user', 'content': 'slow turn'}]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(step, client, messages)
+        deadline = time.monotonic() + 3
+        while len(rig.upstream.bodies) < 2 and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert len(rig.upstream.bodies) == 2
+        client.close()
+        second = future.result(timeout=5)
+    assert second.usage.native_admission.session == 'reused'
+    messages += [as_history(second), {'role': 'user', 'content': 'three'}]
+    assert step(rig.client(), messages).usage.native_admission.session == 'reused' and len(rig.spawned()) == 1
 
 
 def test_a_session_step_streams_its_tool_calls_as_written(rig):
@@ -2121,3 +2162,38 @@ def test_an_ambiguous_rebuild_hands_over_nothing(monkeypatch):
     assert found is None and how == 'rebuild:ambiguous'
     assert directsdk._parity_handover.prev is None
 
+
+
+def test_a_session_step_carries_a_used_up_windows_reopening(rig):
+    """Main 72eb3b8 on session steps: a 429 whose unified status is rejected tells core when the window reopens."""
+    with pytest.raises(directsdk.ClaudeAPIError, match='Incomplete upstream response') as used_up:
+        step(rig.client(), [{'role': 'user', 'content': 'hit the limit, window used up'}])
+    assert used_up.value.status_code == 429 and used_up.value.body == {'resets_at': 1800000000}
+    # A throttle while the window is open names no reopening, so core never benches the route for hours.
+    with pytest.raises(directsdk.ClaudeAPIError, match='Incomplete upstream response') as throttle:
+        step(rig.client(), [{'role': 'user', 'content': 'hit the limit'}])
+    assert throttle.value.status_code == 429 and throttle.value.body is None
+
+
+def test_a_session_relay_failure_names_its_transport_class(rig, monkeypatch):
+    """Main b1d956b on session steps: a mid-stream relay failure keeps core's premature-close wording."""
+    monkeypatch.setattr(sys.modules[directsdk.Admission.__module__], 'UPSTREAM_IDLE_SECONDS', 0.3)
+    with pytest.raises(directsdk.ClaudeAPIError) as cut:
+        step(rig.client(), [{'role': 'user', 'content': 'stall'}])
+    assert 'relay failure UpstreamIdle' in str(cut.value) and '[response ended prematurely]' in str(cut.value)
+
+
+def test_a_delegated_childs_session_native_writes_a_5m_cache_and_is_never_reused_at_1h(rig):
+    """Main 6e427b9 on session steps: the child's native starts with the 5m tier; the same history asked without it
+    (an ordinary 1h request) must not reuse that native, which read its tier at spawn."""
+    messages = [{'role': 'user', 'content': 'hello'}]
+    first = step(rig.client(), messages, hermes_cache_ttl='5m')
+    assert first.usage.model_dump()['native_admission']['session'] == 'cold'
+    assert [s['cache_ttl'] for s in rig.spawned()] == ['5m']
+    messages += [as_history(first), {'role': 'user', 'content': 'two'}]
+    child = step(rig.client(), messages, hermes_cache_ttl='5m')
+    assert child.usage.model_dump()['native_admission']['session'] == 'reused' and len(rig.spawned()) == 1
+    messages += [as_history(child), {'role': 'user', 'content': 'three'}]
+    ordinary = step(rig.client(), messages)
+    assert ordinary.usage.model_dump()['native_admission']['session'] != 'reused'
+    assert [s['cache_ttl'] for s in rig.spawned()] == ['5m', None]

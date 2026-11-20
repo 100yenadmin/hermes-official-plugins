@@ -74,6 +74,49 @@ Over SSH, forward the callback port first (`ssh -N -L 43827:127.0.0.1:43827 user
 | `HERMES_SPOTIFY_CLIENT_ID` | Your Spotify app's Client ID (the login wizard sets it) |
 | `HERMES_SPOTIFY_REDIRECT_URI` | Redirect URI, if you registered something other than the default |
 
+### Logging in again after a scope change
+
+The requested scopes are fixed at login time. The default set includes
+`ugc-image-upload`, which the playlist cover upload needs. A profile that was
+logged in before that scope was added keeps its old token, so Spotify answers
+the upload with "insufficient client scope". Run `hermes spotify login` again
+to pick up the new scope.
+
+## Playlist covers
+
+`spotify_playlists` with `action: "upload_cover"` replaces a playlist's cover
+image. It takes an `image_url` - an `http(s)` URL or a `data:` URL - and
+`playlist_id`:
+
+```json
+{"action": "upload_cover", "playlist_id": "3lK9HyA9p04GNo4UcjuKvP",
+ "image_url": "https://example.com/cover.png"}
+```
+
+The image is fetched through Hermes' image-source resolver, so the usual size
+and URL-policy checks apply, and it is re-encoded as JPEG: Spotify's cover
+endpoint accepts only JPEG, in a base64 body of at most 256 KB. An image that
+does not fit is shrunk until it does. Local file paths are not accepted; host
+an image and pass its URL, or send the bytes as a `data:` URL.
+
+## Gateway slash commands
+
+`/spotify` answers one terse line instead of spending a full agent turn, in the CLI and in every
+messaging gateway (Discord, Telegram, Slack, ...):
+
+| Command | Does |
+|---|---|
+| `/spotify play [query]` | no query resumes; with one, plays the top track match |
+| `/spotify pause` | pauses |
+| `/spotify skip` | skips and names the next track |
+| `/spotify np` | now playing: track, progress, device |
+| `/spotify queue <track>` | queues the top track match |
+
+Anything else prints the usage line. The subcommands call the same tools the model does, so
+playback state, device selection and Premium restrictions behave identically; without a stored
+login they answer "Spotify not configured — run `hermes spotify login`". One `/spotify` command
+keeps clear of Hermes' own `/pause` and `/queue`.
+
 ## Free vs Premium
 
 Search, playlists, albums, library, queue reads, device lists and playback state work on a Free
@@ -81,6 +124,20 @@ account. Playback control (play, pause, skip, seek, volume, shuffle/repeat, queu
 needs Premium and an active Spotify Connect device: open Spotify on any phone, desktop or speaker.
 
 Full guide: <https://hermes-agent.nousresearch.com/docs/user-guide/features/spotify>
+
+## Default device
+
+Playback with no `device_id` goes to whichever device Spotify considers active, which is often a
+phone that is not playing anything. Name the device you mean instead, in `~/.hermes/config.yaml`:
+
+```yaml
+spotify:
+  default_device_name: "Kitchen Sonos"
+```
+
+A playback or queue action that names no device now targets that device. An explicit `device_id`
+in the tool call still wins, and a default device that is offline is reported by name along with
+the devices that are available, rather than silently falling back to Spotify's choice.
 
 ## Development
 

@@ -9,7 +9,7 @@ import test_directsdk_session as T
 from test_directsdk_session import rig  # noqa: F401
 
 BASE = {'window': 'five_hour', 'overage_status': 'allowed', 'using_overage': False}
-FULL = {**BASE, 'status': 'allowed_warning', 'utilization': 0.875,
+FULL = {**BASE, 'status': 'allowed_warning', 'window_utilization': 0.875,
         'surpassed_threshold': 0.8, 'resets_at': 1800000000}
 
 
@@ -20,6 +20,16 @@ def test_summary_optional_fields_present_and_only_allowlisted_fields():
                             'surpassedThreshold': 0.8, 'resetsAt': 1800000000.9,
                             'ignored': 'PRIVATE_SENTINEL'}})
     assert summary == FULL
+
+
+def test_summary_keeps_the_events_window_apart_from_the_account_wide_figure_the_reserve_reads():
+    """The event's own utilization stays the fork's log value; main's reserve (#398) reads the larger of the
+    account-wide five-hour and seven-day windows, which are never confused."""
+    summary = directsdk._rate_limit_summary({'rate_limit_info': {
+        'rateLimitType': 'seven_day', 'overageStatus': 'allowed', 'utilization': 0.4,
+        'unifiedWindows': {'five_hour': {'utilization': 0.97}, 'seven_day': {'utilization': 0.4},
+                           'seven_day_opus': {'utilization': 0.99}, 'overage': {'utilization': float('nan')}}}})
+    assert summary['window_utilization'] == 0.4 and summary['utilization'] == 0.97
 
 
 def test_summary_optional_fields_absent():

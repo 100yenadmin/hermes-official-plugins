@@ -27,7 +27,7 @@ def test_extract_subject_candidates_prefers_titles_and_paths(memory_wiki_core):
     names = [c.name for c in candidates]
     assert "memory wiki" in names
     assert "web/src/App.tsx" in names
-    assert "search_files" in names
+    assert "search_files" not in names
 
 
 def test_extract_subject_candidates_merges_duplicate_slugs_and_accumulates_score(memory_wiki_core):
@@ -81,7 +81,7 @@ def test_extract_subject_candidates_nested_tool_calls_and_malformed_tool_calls(m
     )
 
     names = {candidate.name for candidate in candidates}
-    assert "search_files" in names
+    assert "search_files" not in names
 
 
 def test_extract_subject_candidates_first_user_keyword_phrase_and_package_mentions(memory_wiki_core):
@@ -115,7 +115,7 @@ def test_extract_subject_candidates_hyphenated_title_alias(memory_wiki_core):
     assert by_slug["memory-wiki"].name == "memory wiki"
 
 
-def test_build_memory_overview_aggregates_subjects_and_daily_logs(memory_wiki_core, tmp_path):
+def test_build_memory_overview_aggregates_subjects_and_daily_logs(memory_wiki_core, tmp_path, hermes_home):
     build_memory_overview = memory_wiki_core.build_memory_overview
     from hermes_state import SessionDB
 
@@ -150,7 +150,7 @@ def test_build_memory_overview_aggregates_subjects_and_daily_logs(memory_wiki_co
     assert day["message_count"] == 5
     assert {session["id"] for session in day["sessions"]} == {"s-memory", "s-fastapi"}
     assert {subject["slug"] for subject in day["subjects"]} >= {"memory-wiki", "fastapi"}
-    assert any(item["kind"] == "tool" and "search_files" in item["text"] for item in day["work_items"])
+    assert all(item["kind"] != "tool" for item in day["work_items"])
 
 
 def test_memory_subject_and_daily_log_detail_lookup_and_query_filter(memory_wiki_core, tmp_path):
@@ -192,7 +192,7 @@ class _MemoryWikiFakeDB:
         self.list_limits = []
         self.message_session_ids = []
 
-    def list_sessions_rich(self, *, limit, include_children, order_by_last_active):
+    def list_sessions_rich(self, *, limit, include_children, order_by_last_active, exclude_sources=None):
         self.list_limits.append(limit)
         assert include_children is False
         assert order_by_last_active is True
@@ -308,3 +308,90 @@ def test_build_memory_notes_missing_files_yield_empty_lists(memory_wiki_core, he
     notes = build_memory_notes()
 
     assert notes == {"memory": [], "user": [], "memory_count": 0, "user_count": 0}
+
+
+def _dated_session(db, db_path, session_id, messages, *, hidden=False):
+    # The plugin-facing SessionDB carries no hide setter or db_path; seed both columns directly.
+    import sqlite3
+    from datetime import datetime
+
+    day_a = datetime(2026, 10, 20, 12).timestamp()
+    db.create_session(session_id, "cli")
+    for offset, content in messages:
+        db.append_message(session_id, "user", "Updated: " + content, timestamp=day_a + offset)
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "UPDATE sessions SET started_at = ?, hidden = ? WHERE id = ?", (day_a, int(hidden), session_id)
+        )
+    return day_a
+
+
+def test_build_hidden_session_subjects_and_daily_logs(memory_wiki_core, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        _dated_session(db, tmp_path / "state.db", "hidden", [(0, "Update hidden/project.py")], hidden=True)
+        subjects = memory_wiki_core.build_memory_subjects(db)
+        logs = memory_wiki_core.build_daily_logs(db)
+        assert any(subject["slug"] == "hidden-project-py" for subject in subjects)
+        assert logs[0]["sessions"][0]["id"] == "hidden"
+        assert logs[0]["message_count"] == 1
+    finally:
+        db.close()
+
+
+def test_build_forever_session_buckets_messages_by_day(memory_wiki_core, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        started = _dated_session(db, tmp_path / "state.db", "forever", [
+            (0, "Update alpha/first.py"),
+            (60, "Review alpha/second.py"),
+            (86400, "Fix beta/third.py"),
+        ], hidden=True)
+        logs = memory_wiki_core.build_daily_logs(db)
+        assert [day["date"] for day in logs] == ["2026-10-21", "2026-10-20"]
+        for day, count, first, last, path, absent in [
+            (logs[0], 1, started + 86400, started + 86400, "beta-third-py", "alpha-first-py"),
+            (logs[1], 2, started, started + 60, "alpha-first-py", "beta-third-py"),
+        ]:
+            assert day["session_count"] == 1
+            assert [session["id"] for session in day["sessions"]] == ["forever"]
+            assert day["message_count"] == count
+            assert day["started_at_min"] == first
+            assert day["last_active_max"] == last
+            slugs = {subject["slug"] for subject in day["subjects"]}
+            assert path in slugs
+            assert absent not in slugs
+            assert len(day["work_items"]) == count
+            assert all(first <= item["timestamp"] <= last for item in day["work_items"])
+            assert memory_wiki_core.get_daily_log(db, day["date"]) == day
+    finally:
+        db.close()
+
+
+def test_build_single_day_session_unchanged(memory_wiki_core, tmp_path):
+    from hermes_state import SessionDB
+
+    db = SessionDB(db_path=tmp_path / "state.db")
+    try:
+        started = _dated_session(db, tmp_path / "state.db", "normal", [(0, "Update normal/file.py")])
+        session = memory_wiki_core._recent_sessions(db, limit=100)[0]
+        messages = db.get_messages(session["id"])
+        candidates = memory_wiki_core.extract_subject_candidates(session, messages)
+        # One session: the day ranks subjects exactly as the session's candidates rank (#48).
+        subjects = [{"slug": c.slug, "name": c.name, "count": 1} for c in candidates]
+        assert memory_wiki_core.build_daily_logs(db) == [{
+            "date": "2026-10-20",
+            "started_at_min": started,
+            "last_active_max": started,
+            "session_count": 1,
+            "message_count": 1,
+            "subjects": subjects[:20],
+            "sessions": [memory_wiki_core._session_info(session)],
+            "work_items": memory_wiki_core._work_items_for_session(session, messages),
+        }]
+    finally:
+        db.close()

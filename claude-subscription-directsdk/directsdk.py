@@ -55,6 +55,10 @@ INERT_MCP = Path(__file__).with_name('inert_mcp.py').read_text(encoding='utf-8')
 
 logger = logging.getLogger(__name__)
 
+# Read at import and written next to each request's tools.json: Hermes imports this module from a frozen copy in
+# the temp directory, and a temp cleaner can remove that copy while the process runs (hermes-agent#156493).
+INERT_MCP = Path(__file__).with_name('inert_mcp.py').read_text(encoding='utf-8')
+
 
 # Hermes picks retry vs fallback from an error's status_code (main loop and auxiliary ladder alike).
 class ClaudeCodeMissing(RuntimeError):
@@ -70,13 +74,44 @@ def _request_id(value):
 class ClaudeAPIError(RuntimeError):
     """A failed upstream or native-answered request; status_code is None when there is no HTTP equivalent."""
 
-    def __init__(self, message, status_code=None, *, request_id=None):
+    def __init__(self, message, status_code=None, *, request_id=None, resets_at=None):
         request_id = _request_id(request_id)
         if request_id:
             message += f' (request_id={request_id})'
         super().__init__(message)
         self.status_code = status_code
         self.request_id = request_id
+        # Core reads a limit's reopening (epoch seconds) from body['resets_at']; native's own text names a
+        # clock time (`resets 3:45pm`) that core cannot parse.
+        self.body = {'resets_at': resets_at} if resets_at else None
+
+
+# The relay records a transport failure as an exception class name (``UpstreamIdle``,
+# ``ConnectionResetError``). Core's classifier reads the message, not this plugin's types, so a
+# status-less wrapper used to reach it as an unclassifiable error: no same-provider retry, no
+# fallback, and no compression network-failure guard (#396). Name the failure with wording core
+# already matches, keeping the original label for reports. Mid-stream failures use core's
+# premature-close wording, never its server-disconnect wording: on a large session with a
+# non-reasoning model core reads a disconnect as a probable context overflow and compresses.
+_TRANSPORT_PHRASES = {
+    "UpstreamIdle": "response ended prematurely",
+    "ConnectionResetError": "connection reset",
+    "ConnectionAbortedError": "connection reset",
+    "BrokenPipeError": "connection reset",
+    "RemoteProtocolError": "response ended prematurely",
+    "LocalProtocolError": "response ended prematurely",
+    "IncompleteRead": "response ended prematurely",
+    "ConnectionRefusedError": "connection refused",
+    "TimeoutError": "timed out",
+    "socket.timeout": "timed out",
+}
+
+
+def transport_phrase(failure):
+    """Canonical transport wording for a relay failure label, or "" when it names no transport."""
+    if not isinstance(failure, str) or not failure:
+        return ""
+    return _TRANSPORT_PHRASES.get(failure.rsplit(".", 1)[-1], "")
 
 
 class RequestRejected(ValueError):
@@ -370,7 +405,7 @@ def native_format_schema(node):
 def request_body(kwargs):
     allowed = {'model', 'messages', 'tools', 'stream', 'stream_options', 'max_tokens', 'max_completion_tokens',
                'temperature', 'top_p', 'stop', 'extra_body', 'extra_headers', 'timeout', 'tool_choice', 'parallel_tool_calls', 'n', 'response_format',
-               'hermes_auxiliary'}
+               'hermes_auxiliary', 'hermes_cache_ttl'}
     unknown = set(kwargs) - allowed
     if unknown:
         raise RequestRejected('Unsupported request parameters: ' + ', '.join(sorted(unknown)))
@@ -566,11 +601,16 @@ class Request:
         return self.process
 
 
-def send_native(process, data, timeout, cancel, cancelled):
-    """Bound every native stdin write/close, including session control replies."""
-    stalled = threading.Event()
-    timer = threading.Timer(timeout, lambda: (stalled.set(), cancel()))
-    timer.start()
+def send_native(process, data, timeout, cancel, cancelled, watch=None):
+    """Bound every native stdin write/close, including session control replies. ``watch`` is a per-call request's
+    one ``_StdinWatch`` (its replay writes many frames); without one, a Timer bounds this single write."""
+    if watch is not None:
+        stalled, timer = watch.stalled, None
+        watch.__enter__()
+    else:
+        stalled = threading.Event()
+        timer = threading.Timer(timeout, lambda: (stalled.set(), cancel()))
+        timer.start()
     try:
         if data is None:
             process.stdin.close()
@@ -581,7 +621,10 @@ def send_native(process, data, timeout, cancel, cancelled):
         if not cancelled():
             raise
     finally:
-        timer.cancel()
+        if timer is not None:
+            timer.cancel()
+        else:
+            watch.__exit__(None, None, None)
     if stalled.is_set():
         raise TimeoutError('Claude request timed out')
     if cancelled():
@@ -795,14 +838,21 @@ def _rate_limit_summary(event) -> "dict | None":
                'using_overage': bool(info.get('isUsingOverage')) or window == 'overage'}
     if isinstance(info.get('status'), str):
         summary['status'] = info['status']
-    for native, key, convert in (('utilization', 'utilization', float),
+    # The event's own window (the fork's `rate limit:` log line and allowance watch read it as before).
+    for native, key, convert in (('utilization', 'window_utilization', float),
                                  ('surpassedThreshold', 'surpassed_threshold', float),
+                                 # Epoch seconds: when the plan window frees up, and when the extra-usage allowance does.
                                  ('resetsAt', 'resets_at', int),
-                                 # When the extra-usage allowance frees up (main's extra_usage policy reads it).
                                  ('overageResetsAt', 'overage_resets_at', int)):
         value = info.get(native)
         if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
             summary[key] = convert(value)
+    # The fuller account-wide plan window (0..1 fractions in unifiedWindows), for an extra_usage reserve (#398).
+    windows = info.get('unifiedWindows') if isinstance(info.get('unifiedWindows'), dict) else {}
+    used = [w.get('utilization') for name, w in windows.items() if name in ('five_hour', 'seven_day') and isinstance(w, dict)]
+    used = [u for u in used if isinstance(u, (int, float)) and not isinstance(u, bool) and math.isfinite(u)]
+    if used:
+        summary['utilization'] = max(used)
     return summary
 
 
@@ -810,7 +860,7 @@ def _log_rate_limit(summary):
     summary = summary or {}
     _session_log.info('rate limit: window=%s status=%s utilization=%s surpassed=%s resets_at=%s overage=%s using_overage=%d',
                       summary.get('window') or '-', summary.get('status') or '-',
-                      '%.3f' % summary['utilization'] if 'utilization' in summary else '-',
+                      '%.3f' % summary['window_utilization'] if 'window_utilization' in summary else '-',
                       '%.2f' % summary['surpassed_threshold'] if 'surpassed_threshold' in summary else '-',
                       str(summary['resets_at']) if 'resets_at' in summary else '-',
                       summary.get('overage_status') or '-', bool(summary.get('using_overage')))
@@ -822,6 +872,46 @@ def _stderr_tail(native_stderr):
     learn the stream was empty."""
     text = ' '.join(line.strip() for line in native_stderr if line.strip())
     return f' (native stderr: {text[:400]})' if text else ''
+
+
+class _StdinWatch:
+    """One watchdog thread for every stdin write of a request.
+
+    A child that stops reading stdin blocks a plain write past the timeout; ``on_stall`` kills it then. A
+    ``threading.Timer`` per write was one thread started per replayed frame (602 for a 300-round history).
+    Here a write only records when it began. The thread never sleeps past ``timeout``, so it always wakes before
+    the deadline of a write that began while it slept, and then sleeps until exactly that deadline.
+    """
+
+    def __init__(self, timeout, on_stall):
+        self.timeout, self.on_stall = timeout, on_stall
+        self.stalled = threading.Event()
+        self._began = None
+        self._done = threading.Event()
+        self._thread = None
+
+    def __enter__(self):
+        self._began = time.monotonic()
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, daemon=True, name='claude-directsdk-stdin-watch')
+            self._thread.start()
+        return self
+
+    def __exit__(self, *_):
+        self._began = None
+
+    def _run(self):
+        wait = self.timeout
+        while not self._done.wait(wait):
+            began = self._began
+            wait = self.timeout if began is None else began + self.timeout - time.monotonic()
+            if wait <= 0:
+                self.stalled.set()
+                self.on_stall()
+                return
+
+    def stop(self):
+        self._done.set()
 
 
 class Stream:
@@ -982,7 +1072,7 @@ class Client:
         command = command or source_env.get('CLAUDE_SUBSCRIPTION_DIRECTSDK_COMMAND') or 'claude'
         self.command = ([command] if isinstance(command, str) else list(command)) + list(args or [])
         self.timeout = timeout if isinstance(timeout, (int, float)) else 180
-        self._lock, self._requests, self._closed = threading.Lock(), set(), False
+        self._lock, self._requests = threading.Lock(), set()
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self.create))
 
     def cancel(self):
@@ -995,15 +1085,12 @@ class Client:
         _session_cancel_owned(self)
 
     def close(self):
-        with self._lock:
-            self._closed = True
-            requests = tuple(self._requests)
-        for request in requests:
-            stream = request.stream() if request.stream else None
-            if stream is not None:
-                stream.close()
-            else:
-                request.cancel()
+        # No-op by design (#378): Hermes' auxiliary cache closes a client bound to a different
+        # live event loop, and cancelling its requests here kills parallel tool calls that are
+        # still running on that loop. Each request owns and reaps its own native process, so
+        # nothing shared is leaked by leaving them alone; Stream.close()/cancel() remain the
+        # explicit per-request stop path.
+        return None
 
     def _workdir(self):
         """The shared cwd, else the one private cwd of this process."""
@@ -1039,8 +1126,6 @@ class Client:
     def _register(self):
         request = Request(self)
         with self._lock:
-            if self._closed:
-                raise RuntimeError('Claude client is closed')
             self._requests.add(request)
         return request
 
@@ -1081,10 +1166,10 @@ class Client:
         finally:
             stream.close()
 
-    def _native_env(self):
+    def _native_env(self, cache_ttl=None):
         """The child env for one native spawn (per-call request or session step), with main's per-request steps.
         Returns ``(env, resolved, upstream, billed)``: ``billed`` is the env with its login applied and before the
-        quiet-traffic flags, which ``check_extra_usage`` asks about."""
+        quiet-traffic flags, which ``check_extra_usage`` asks about. ``cache_ttl`` is the request's hermes_cache_ttl."""
         env = _with_login_identity(_with_windows_essentials(dict(self.env if self.env is not None else os.environ)))
         if self.env is None:
             # Explicit env= is a controlled fixture and keeps its login; only Hermes' own env is filtered.
@@ -1116,6 +1201,10 @@ class Client:
         env.update(ENABLE_TOOL_SEARCH='false', CLAUDE_CODE_MAX_RETRIES='0', DISABLE_AUTO_COMPACT='1', DISABLE_COMPACT='1')
         # Telemetry and feature flags follow the user's claude_code_telemetry setting, read per spawn.
         apply_traffic_policy(env)
+        # Hermes asked for a 5m cache on this request (a delegated child). A `-p` turn is native's main
+        # conversation bucket, so its own variable is the one that applies; a tier the user exported wins.
+        if cache_ttl == '5m':
+            env.setdefault('CLAUDE_CODE_PROMPT_CACHE_TTL', '5m')
         egress_env(env, upstream)
         # Hermes owns budgets; native's replayed reminder invalidates cached history.
         env['CLAUDE_CODE_TOTAL_TOKENS_REMINDER'] = 'off'
@@ -1131,6 +1220,7 @@ class Client:
         reader = None
         err_drain = None
         slot = None
+        watch = None
         native_stderr = deque(maxlen=40)
         try:
             timeout = kwargs.get('timeout', self.timeout)
@@ -1148,7 +1238,7 @@ class Client:
                     (root / 'tools.json').write_text(json.dumps(manifest), encoding='utf-8')
                     (root / 'inert_mcp.py').write_text(INERT_MCP, encoding='utf-8')
                     mcp = {'mcpServers': {'hermes': {'command': sys.executable, 'args': [str(root / 'inert_mcp.py'), str(root / 'tools.json')]}}}
-                env, resolved, upstream, billed = self._native_env()
+                env, resolved, upstream, billed = self._native_env(kwargs.get('hermes_cache_ttl'))
                 # Wait for a free slot (#329), then check extra usage: calls that ran meanwhile may have crossed the limit.
                 slot = yield from concurrency.acquire(max_concurrent(), request.cancelled, timeout,
                                                       lambda: self._chunk(kwargs['model'], {}))
@@ -1219,9 +1309,13 @@ class Client:
                             raise RuntimeError('Invalid native stream-json output: ' + repr((getattr(event, 'doc', None) or str(event))[:300]) + _stderr_tail(native_stderr)) from event
                         deadline = time.monotonic() + timeout
                         return event
+                # A child that stops reading stdin blocks a plain write past the timeout: kill it then. One watchdog
+                # thread for the whole request, not a Timer thread per replayed frame (main dfb81eb).
+                watch = _StdinWatch(timeout, request.cancel)
+
                 def send(row):
                     send_native(p, None if row is None else json.dumps(row, allow_nan=False) + '\n',
-                                timeout, request.cancel, request.cancelled.is_set)
+                                timeout, request.cancel, request.cancelled.is_set, watch=watch)
 
                 def replay_exited():
                     # cancel() kills native, so the reader's None can win the race with receive()'s check.
@@ -1232,6 +1326,7 @@ class Client:
                     raise RuntimeError(f'Native exited before replay acknowledgment (exit={p.returncode}){_stderr_tail(native_stderr)}')
                 replay_history(frames, send, receive, names, exited=replay_exited, tail=lambda: _stderr_tail(native_stderr))
                 send(None)
+                watch.stop()
                 assistants, results, stopped, emitted = [], [], False, ''
                 rate_limit = None
                 tool_stream = _ToolStream(hermes_names)
@@ -1303,8 +1398,12 @@ class Client:
                             first += ', upstream said: ' + admission.error_text()[:500]
                         # The first attempt's real HTTP status; a 200 cut short or a relay failure has none.
                         status = admission.status if isinstance(admission.status, int) and admission.status >= 400 else None
-                        raise ClaudeAPIError(f'Incomplete upstream response ({first})' + (': ' + native_error if native_error else ''),
-                                             status, request_id=admission.request_id)
+                        message = f'Incomplete upstream response ({first})' + (': ' + native_error if native_error else '')
+                        phrase = transport_phrase(admission.failure)
+                        if phrase and phrase not in message.lower():
+                            # Keep the transport class visible to core's message-based classifier.
+                            message += f' [{phrase}]'
+                        raise ClaudeAPIError(message, status, request_id=admission.request_id, resets_at=admission.reset_at)
                     assistants = [admission.capture.message]
                     stopped = True
                 native_failure_handled = admission.denied or (admission.used and assistants[0].get('stop_reason') == 'refusal')
@@ -1355,6 +1454,8 @@ class Client:
                 yield chunk
         finally:
             try:
+                if watch is not None:
+                    watch.stop()
                 request.cancel()
                 if request.admission is not None:
                     request.admission.close()
@@ -1388,7 +1489,7 @@ class Client:
         keys = [_message_key(m) for m in messages]
         # Every step re-runs baseline's launch guards; the launch configuration is part of reuse identity.
         try:
-            env, resolved, upstream, billed = self._native_env()
+            env, resolved, upstream, billed = self._native_env(kwargs.get('hermes_cache_ttl'))
             # The extra_usage setting refuses each step before anything is billed, as main does per call (#43).
             check_extra_usage(resolved, billed, upstream)
         except BaseException:
@@ -1537,8 +1638,13 @@ class Client:
                 if admission.error_text():
                     first_attempt += ', upstream said: ' + admission.error_text()[:500]
                 status = admission.status if isinstance(admission.status, int) and admission.status >= 400 else None
-                raise ClaudeAPIError(f'Incomplete upstream response ({first_attempt})' + (': ' + native_error if native_error else ''), status,
-                                     request_id=admission.request_id)
+                message = f'Incomplete upstream response ({first_attempt})' + (': ' + native_error if native_error else '')
+                phrase = transport_phrase(admission.failure)
+                if phrase and phrase not in message.lower():
+                    # Keep the transport class visible to core's message-based classifier, as per-call does (main b1d956b).
+                    message += f' [{phrase}]'
+                # A used-up plan window's reopening, as per-call carries it (main 72eb3b8).
+                raise ClaudeAPIError(message, status, request_id=admission.request_id, resets_at=admission.reset_at)
             assistant = admission.capture.message
             refused = assistant.get('stop_reason') == 'refusal'
             # A denied native retry, a native error or a refusal leaves native's own state unknown: answer, then rebuild next step.
@@ -1801,7 +1907,8 @@ _session_failures, _session_off = 0, False
 # Log-only parity hand-over from a checkout's rebuild to the spawn that follows it on the same thread.
 _parity_handover = threading.local()
 # The telemetry setting (applied per spawn) and the proxy route are fixed for a session's life: a change starts a new one.
-_SESSION_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
+# CLAUDE_CODE_PROMPT_CACHE_TTL: native reads its cache tier at spawn, so a 5m (delegated child) native is never reused at 1h.
+_SESSION_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_PROMPT_CACHE_TTL', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
                      'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy', 'NODE_EXTRA_CA_CERTS')
 _SESSION_LAUNCH_PREFIXES = ('ANTHROPIC_', 'CLAUDE_SUBSCRIPTION_DIRECTSDK_', 'CLAUDE_CODE_USE_')
 
