@@ -443,6 +443,9 @@ def run(args):
         saved = dict(os.environ)
         env = isolated_env(tmp, 1, False)
         env.update(TMPDIR=tempfile.gettempdir(), HERMES_DISABLE_LAZY_INSTALLS="1")
+        # Windows: without SystemRoot this process cannot even import asyncio (Winsock), and the native child
+        # takes its Windows essentials from here; keep them, as the plugin does for every child.
+        env.update({k: v for k, v in saved.items() if k.upper() in ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT")})
         os.environ.clear()
         os.environ.update(env)
         try:

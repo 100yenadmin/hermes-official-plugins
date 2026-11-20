@@ -55,10 +55,6 @@ INERT_MCP = Path(__file__).with_name('inert_mcp.py').read_text(encoding='utf-8')
 
 logger = logging.getLogger(__name__)
 
-# Read at import and written next to each request's tools.json: Hermes imports this module from a frozen copy in
-# the temp directory, and a temp cleaner can remove that copy while the process runs (hermes-agent#156493).
-INERT_MCP = Path(__file__).with_name('inert_mcp.py').read_text(encoding='utf-8')
-
 
 # Hermes picks retry vs fallback from an error's status_code (main loop and auxiliary ladder alike).
 class ClaudeCodeMissing(RuntimeError):
@@ -838,7 +834,7 @@ def _rate_limit_summary(event) -> "dict | None":
                'using_overage': bool(info.get('isUsingOverage')) or window == 'overage'}
     if isinstance(info.get('status'), str):
         summary['status'] = info['status']
-    # The event's own window (the fork's `rate limit:` log line and allowance watch read it as before).
+    # The event's own window (the fork's `rate limit:` log line prints it, as before).
     for native, key, convert in (('utilization', 'window_utilization', float),
                                  ('surpassedThreshold', 'surpassed_threshold', float),
                                  # Epoch seconds: when the plan window frees up, and when the extra-usage allowance does.
@@ -1504,7 +1500,10 @@ class Client:
         launch = [resolved, sorted((k, v) for k, v in env.items() if k in _SESSION_LAUNCH_KEYS or k.startswith(_SESSION_LAUNCH_PREFIXES)),
                   [upstream.url, repr(upstream.proxy), bool(upstream.opted_in), upstream.context is not None,
                    _file_digest(env.get('NODE_EXTRA_CA_CERTS'))]]
-        ident = hashlib.sha256(json.dumps([kwargs['model'], body, system, launch]).encode('utf-8')).hexdigest()
+        # The cache tier native reads at spawn (a delegated child's 5m) is part of reuse identity, so a 5m native never
+        # answers a 1h request; it stays out of ``login``, so a child sharing the chat's history forks off it instead
+        # of retiring the chat's native as a changed launch.
+        ident = hashlib.sha256(json.dumps([kwargs['model'], body, system, launch, env.get('CLAUDE_CODE_PROMPT_CACHE_TTL')]).encode('utf-8')).hexdigest()
         login = hashlib.sha256(json.dumps(launch).encode('utf-8')).hexdigest()
         first = next((k for k, m in zip(keys, messages) if m.get('role') == 'assistant'), None)
         session, how = _session_checkout(ident, keys, messages, first, login)
@@ -1907,8 +1906,7 @@ _session_failures, _session_off = 0, False
 # Log-only parity hand-over from a checkout's rebuild to the spawn that follows it on the same thread.
 _parity_handover = threading.local()
 # The telemetry setting (applied per spawn) and the proxy route are fixed for a session's life: a change starts a new one.
-# CLAUDE_CODE_PROMPT_CACHE_TTL: native reads its cache tier at spawn, so a 5m (delegated child) native is never reused at 1h.
-_SESSION_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_PROMPT_CACHE_TTL', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
+_SESSION_LAUNCH_KEYS = ('HOME', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', 'DO_NOT_TRACK', *QUIET_TRAFFIC,
                      'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy', 'NODE_EXTRA_CA_CERTS')
 _SESSION_LAUNCH_PREFIXES = ('ANTHROPIC_', 'CLAUDE_SUBSCRIPTION_DIRECTSDK_', 'CLAUDE_CODE_USE_')
 

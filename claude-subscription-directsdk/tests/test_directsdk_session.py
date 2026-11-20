@@ -2195,5 +2195,19 @@ def test_a_delegated_childs_session_native_writes_a_5m_cache_and_is_never_reused
     assert child.usage.model_dump()['native_admission']['session'] == 'reused' and len(rig.spawned()) == 1
     messages += [as_history(child), {'role': 'user', 'content': 'three'}]
     ordinary = step(rig.client(), messages)
-    assert ordinary.usage.model_dump()['native_admission']['session'] != 'reused'
+    assert ordinary.usage.model_dump()['native_admission']['session'] == 'cold'
     assert [s['cache_ttl'] for s in rig.spawned()] == ['5m', None]
+
+
+def test_a_5m_delegated_review_of_the_chats_history_leaves_the_chat_session_alive(rig):
+    """A child sharing the chat's history at the 5m tier forks off it (cold), never retires the chat's 1h native."""
+    client = rig.client()
+    messages = [{'role': 'user', 'content': 'hello'}]
+    messages += [as_history(step(client, messages)), {'role': 'user', 'content': 'again'}]
+    chat = rig.spawned()[0]['pid']
+    review = client.create(model='opus', messages=messages, tools=TOOLS, hermes_cache_ttl='5m')
+    assert review.usage.model_dump()['native_admission']['session'] == 'cold'
+    assert alive(chat)
+    assert step(client, messages).usage.model_dump()['native_admission']['session'] == 'reused'
+    assert rig.spawned()[0]['pid'] == chat and [s['cache_ttl'] for s in rig.spawned()] == [None, '5m']
+    client.close()
