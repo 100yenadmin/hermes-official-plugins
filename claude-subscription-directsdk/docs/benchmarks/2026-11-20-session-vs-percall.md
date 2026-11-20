@@ -36,7 +36,7 @@ In October, per-call missed the cache at every user turn after an answer with th
 ## Limits (what this does not prove)
 - n = 4 pairs; CIs are wide, and the thinking-token difference is inconclusive (per-call ~21% more, CI includes no difference).
 - Bench histories are small; the large-history cost is from an offline replay timing, not a live run.
-- The bench Hermes is a pinned core, not the production profile's; her LCM-X compaction and system-prompt drift affect both modes equally but were not exercised.
+- The bench Hermes is a pinned core, not the production profile's; its LCM-X compaction and system-prompt drift affect both modes equally but were not exercised.
 - Not measured: first-words latency on Telegram, and the early opener's behaviour per mode.
 
 ## Data
