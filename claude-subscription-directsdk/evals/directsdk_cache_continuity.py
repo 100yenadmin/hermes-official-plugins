@@ -322,7 +322,8 @@ def scenario(native, binary, model, name, log, subscription=False, stream=False,
                 if session:
                     valid = valid and len(modes) == 1 and "session-fallback" != mode
                 if name in REASONING and main:
-                    # Thinking never toggles, and the request carries this turn's effort where native puts it.
+                    # Thinking never toggles, and the request carries the native's launch effort (never less than
+                    # the turn asked) at the top level and in native's sticky per-message effort row.
                     receipt["thinking"] = wire.get("thinking")
                     receipt["effort"] = (wire.get("output_config") or {}).get("effort")
                     # Every row that carries an effort (native's per-message effort rows are sticky from the next
@@ -336,6 +337,7 @@ def scenario(native, binary, model, name, log, subscription=False, stream=False,
                     # per-message rows) is the native's own, so the prefix bytes never change.
                     receipt["effort_ok"] = (receipt["thinking"] == {"type": "adaptive", "display": "summarized"}
                                             and receipt["effort"] == want
+                                            and bool(receipt["row_efforts"])
                                             and all(e == want for _, e in receipt["row_efforts"]))
                     valid = valid and receipt["effort_ok"]
                 receipt["valid"] = valid
