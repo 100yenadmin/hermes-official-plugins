@@ -37,7 +37,12 @@ TOOLS = [{"type": "function", "function": {"name": name, "description": "Public 
          for name in ("probe", "probe2", LONG_NAME)]
 SCENARIOS = {"S1": "per-call", "S2": "session alive", "S3": "idle restart",
              "S4": "LRU restart", "S5": "gateway restart", "S6": "review fork",
-             "S7": "model swap and back", "S8": "restart after first turn"}
+             "S7": "model swap and back", "S8": "restart after first turn",
+             "S9": "effort changes every turn, reasoning off included"}
+# S9: one conversation, Hermes' reasoning per turn (its voice-turn route sends reasoning off for a voice note).
+S9_REASONING = [{"enabled": True, "effort": "high"}, {"enabled": False}, {"enabled": True, "effort": "high"},
+                {"enabled": True, "effort": "medium"}, {"enabled": True, "effort": "none"}, {"enabled": True, "effort": "high"}]
+S9_EFFORT = ["high", "low", "high", "medium", "low", "high"]
 SYSTEM = "PUBLIC SYNTHETIC SYSTEM\n" * 300
 PUBLIC_EMAIL = "public@example.invalid"
 PUBLIC_UUID = "00000000-0000-0000-0000-000000000000"
@@ -234,11 +239,12 @@ def scenario(native, binary, model, name, log, subscription=False, stream=False,
 
         client = new_client()
 
-        def request(messages, chosen_model, turn, round_number, tool_count, main=True):
+        def request(messages, chosen_model, turn, round_number, tool_count, main=True, extra_body=None):
             peer.tool_count = tool_count
             peer.long_tool = main and round_number == 2
             original, start, logs = copy.deepcopy(messages), len(peer.wires), len(log.events)
-            result = client.create(model=chosen_model, messages=messages, tools=TOOLS, stream=stream)
+            result = client.create(model=chosen_model, messages=messages, tools=TOOLS, stream=stream,
+                                   **({"extra_body": extra_body} if extra_body is not None else {}))
             if stream:
                 chunks, content_times = [], []
                 for chunk in result:
@@ -309,6 +315,16 @@ def scenario(native, binary, model, name, log, subscription=False, stream=False,
                              and 1 <= len(markers) <= 2 and receipt["match"] is not False)
                 if session:
                     valid = valid and len(modes) == 1 and "session-fallback" != mode
+                if name == "S9" and main:
+                    # Thinking never toggles, and the request carries this turn's effort where native puts it.
+                    receipt["thinking"] = wire.get("thinking")
+                    receipt["effort"] = (wire.get("output_config") or {}).get("effort")
+                    tail = wire["messages"][-1] if wire["messages"] else {}
+                    receipt["tail_effort"] = (tail.get("output_config") or {}).get("effort") if tail.get("role") == "system" else None
+                    want = S9_EFFORT[turn - 1]
+                    receipt["effort_ok"] = (receipt["thinking"] == {"type": "adaptive", "display": "summarized"}
+                                            and receipt["effort"] == want and receipt["tail_effort"] in (None, want))
+                    valid = valid and receipt["effort_ok"]
                 receipt["valid"] = valid
                 report["pass"] &= valid
                 report["receipts"].append(receipt)
@@ -320,7 +336,7 @@ def scenario(native, binary, model, name, log, subscription=False, stream=False,
                     if name == "S3" or (turn > 1 and name in ("S4", "S5")) or (name == "S8" and turn == 2):
                         boundary["mode_expected"] = "cold or rebuild:*"
                         boundary["mode_ok"] = mode == "cold" or mode.startswith("rebuild:")
-                    elif (name in ("S2", "S6") and turn > 1) or (name == "S8" and turn > 2):
+                    elif (name in ("S2", "S6", "S9") and turn > 1) or (name == "S8" and turn > 2):
                         boundary["mode_expected"], boundary["mode_ok"] = "reused", mode == "reused"
                     report["pass"] &= boundary.get("mode_ok", True)
                     report["boundaries"].append(boundary)
@@ -369,7 +385,8 @@ def scenario(native, binary, model, name, log, subscription=False, stream=False,
                 history.append({"role": "user", "content": f"Public main question {turn}: run the probes."})
                 chosen_model = "claude-sonnet-5" if name == "S7" and turn in (3, 4) else model
                 for round_number, tool_count in enumerate((2, 1, 1, 0), 1):
-                    assistant = request(history, chosen_model, turn, round_number, tool_count)
+                    assistant = request(history, chosen_model, turn, round_number, tool_count,
+                                        extra_body={"reasoning": S9_REASONING[turn - 1]} if name == "S9" else None)
                     history.append(assistant)
                     history.extend({"role": "tool", "tool_call_id": call["id"],
                                     "content": (f"Public synthetic result turn {turn} round {round_number}\n" * 100)[:2048]}
@@ -469,7 +486,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args.only = args.only.split(",")
     if not args.only or any(name not in SCENARIOS for name in args.only):
-        parser.error("--only must select S1 through S8")
+        parser.error("--only must select S1 through S9")
     result = run(args)
     print(json.dumps(result, indent=2))
     sys.exit(int(any(s["pass"] is False for s in result["scenarios"].values())))

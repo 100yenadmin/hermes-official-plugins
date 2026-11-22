@@ -2231,3 +2231,57 @@ def test_a_5m_delegated_review_of_the_chats_history_leaves_the_chat_session_aliv
     assert step(client, messages).usage.model_dump()['native_admission']['session'] == 'reused'
     assert rig.spawned()[0]['pid'] == chat and [s['cache_ttl'] for s in rig.spawned()] == [None, '5m']
     client.close()
+
+
+def test_one_native_serves_a_conversation_across_effort_changes_and_a_reasoning_off_turn(rig):
+    """Hermes changes the reasoning for single turns (its voice-turn route sends reasoning off). An effort change keeps
+    the message cache, so the conversation keeps its native; a new native would rewrite the whole history."""
+    messages = [{'role': 'system', 'content': 'sys'}, {'role': 'user', 'content': 'first turn'}]
+    modes = []
+    for turn, reasoning in enumerate(({'enabled': True, 'effort': 'high'}, {'enabled': False},
+                                      {'enabled': True, 'effort': 'medium'}, {'enabled': True, 'effort': 'high'})):
+        answer = step(rig.client(), messages, extra_body={'reasoning': reasoning})
+        modes.append(answer.usage.model_dump()['native_admission']['session'])
+        messages += [as_history(answer), {'role': 'user', 'content': f'turn {turn + 2}'}]
+    assert modes == ['cold', 'reused', 'reused', 'reused']
+    assert len(rig.spawned()) == 1
+
+
+def test_a_step_that_names_no_effort_does_not_join_a_native_launched_at_a_named_one(rig):
+    """A step with no effort runs at native's own default, so it never reuses a native that was launched at an effort."""
+    messages = [{'role': 'system', 'content': 'sys'}, {'role': 'user', 'content': 'first turn'}]
+    first = step(rig.client(), messages, extra_body={'reasoning': {'enabled': True, 'effort': 'high'}})
+    messages += [as_history(first), {'role': 'user', 'content': 'second turn'}]
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] != 'reused'
+
+
+def test_session_identity_counts_an_effort_only_as_named():
+    def body(**out):
+        return json.dumps({'thinking': {'type': 'adaptive', 'display': 'summarized'}, 'output_config': out, 'max_tokens': 9})
+    assert directsdk._ident_body(body(effort='high')) == directsdk._ident_body(body(effort='low'))
+    assert directsdk._ident_body(body(effort='high')) != directsdk._ident_body(json.dumps({'thinking': {'type': 'adaptive', 'display': 'summarized'}, 'max_tokens': 9}))
+    # Everything else still keys the session: a format, the thinking parameters, the output cap.
+    assert directsdk._ident_body(body(effort='high')) != directsdk._ident_body(body(effort='high', format={'type': 'json_schema'}))
+    assert directsdk._ident_body(body(effort='high')) != directsdk._ident_body(body(effort='high').replace('summarized', 'updates'))
+    assert directsdk._ident_body(body(effort='high')) != directsdk._ident_body(body(effort='high').replace('9', '8'))
+
+
+def test_the_relay_sends_the_steps_effort_where_native_put_its_own():
+    import admission
+    sent = {'model': 'm', 'thinking': {'type': 'adaptive'}, 'output_config': {'effort': 'high'},
+            'messages': [{'role': 'user', 'content': 'q'},
+                         {'role': 'system', 'content': 'earlier context', 'output_config': {'effort': 'high'}},
+                         {'role': 'assistant', 'content': 'a'}, {'role': 'user', 'content': 'q2'},
+                         {'role': 'system', 'content': 'context', 'output_config': {'effort': 'high'}}]}
+    out = json.loads(admission.step_effort(json.dumps(sent).encode(), 'low'))
+    assert out['output_config'] == {'effort': 'low'}
+    assert out['messages'][-1]['output_config'] == {'effort': 'low'}
+    # History is replayed as sent; only the request's own effort changes.
+    assert out['messages'][1]['output_config'] == {'effort': 'high'}
+    assert {k: v for k, v in out.items() if k not in ('output_config', 'messages')} == {k: v for k, v in sent.items() if k not in ('output_config', 'messages')}
+    # The same effort, no effort, or a payload that does not parse forwards byte for byte.
+    raw = json.dumps(sent).encode()
+    assert admission.step_effort(raw, 'high') is raw
+    plain = json.dumps({'messages': [{'role': 'user', 'content': 'q'}]}).encode()
+    assert admission.step_effort(plain, 'low') is plain
+    assert admission.step_effort(b'not json', 'low') == b'not json'

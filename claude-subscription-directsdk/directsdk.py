@@ -438,7 +438,15 @@ def request_body(kwargs):
         if effort not in (None, 'none', 'low', 'medium', 'high', 'xhigh', 'max'):
             raise RequestRejected('Unsupported native reasoning effort')
         if reasoning.get('enabled') is False or effort == 'none':
-            if accepts_thinking_disable(kwargs.get('model')):
+            if supports_adaptive_thinking(kwargs.get('model')) and kwargs.get('hermes_auxiliary') is not True:
+                # A conversation step keeps thinking on at the lowest effort: Hermes turns reasoning off for single
+                # turns (its voice-turn route, a thinking-only truncation's continuation), and toggling the thinking
+                # parameters drops the conversation's message cache, a full history rewrite each way. Effort alone
+                # keeps it (owner decision 2026-11-23: it adds thinking, never removes any). Auxiliary one-shots
+                # share no conversation cache and keep the off below.
+                body['thinking'] = {'type': 'adaptive', 'display': 'summarized'}
+                body['output_config'] = {'effort': 'low'}
+            elif accepts_thinking_disable(kwargs.get('model')):
                 body['thinking'] = {'type': 'disabled'}
                 # Native clear-thinking context edits are invalid when thinking is disabled.
                 body['context_management'] = {'edits': []}
@@ -1503,7 +1511,7 @@ class Client:
         # The cache tier native reads at spawn (a delegated child's 5m) is part of reuse identity, so a 5m native never
         # answers a 1h request; it stays out of ``login``, so a child sharing the chat's history forks off it instead
         # of retiring the chat's native as a changed launch.
-        ident = hashlib.sha256(json.dumps([kwargs['model'], body, system, launch, env.get('CLAUDE_CODE_PROMPT_CACHE_TTL')]).encode('utf-8')).hexdigest()
+        ident = hashlib.sha256(json.dumps([kwargs['model'], _ident_body(body), system, launch, env.get('CLAUDE_CODE_PROMPT_CACHE_TTL')]).encode('utf-8')).hexdigest()
         login = hashlib.sha256(json.dumps(launch).encode('utf-8')).hexdigest()
         first = next((k for k, m in zip(keys, messages) if m.get('role') == 'assistant'), None)
         session, how = _session_checkout(ident, keys, messages, first, login)
@@ -1528,14 +1536,14 @@ class Client:
                 if session.expect == 'user':
                     frame = copy.deepcopy(frames[-1])
                     # Anchor on the whole frame as sent.
-                    session.admission.rearm(timeout, frame['message']['content'])
+                    session.admission.rearm(timeout, frame['message']['content'], effort=_step_effort(body))
                     session.send(frame)
                 else:
                     results = {m['tool_call_id']: (m['content'], bool(m.get('is_error'))) for m in messages[n:]}
                     # Native replays the MCP results it holds, in its own call order, not Hermes' tool messages: anchor on that.
                     called = [c.get('id') for c in messages[n - 1].get('tool_calls') or []]
                     order = [i for i in called if i in results] + [i for i in results if i not in called]
-                    session.admission.rearm(timeout, [{'type': 'tool_result', 'tool_use_id': tool_id, 'content': [{'type': 'text', 'text': results[tool_id][0]}], **({'is_error': True} if results[tool_id][1] else {})}
+                    session.admission.rearm(timeout, effort=_step_effort(body), queried=[{'type': 'tool_result', 'tool_use_id': tool_id, 'content': [{'type': 'text', 'text': results[tool_id][0]}], **({'is_error': True} if results[tool_id][1] else {})}
                                                       for tool_id in order])
                     session.deliver(results)
             else:
@@ -1791,6 +1799,7 @@ class Client:
         # frame, including tool-result frames (#5).
         queried = frames[-1]['message']['content']
         session.admission = relay(upstream, timeout, queried=queried, first_turn={})
+        session.admission.effort = _step_effort(body)
         # The native this rebuild retired in the checkout just before: its last row profile (log only).
         session.admission.parity_prev, session.parity_prev = getattr(session, 'parity_prev', None), None
         # Streamed tool arguments stay on unless this conversation's came back invalid (#164 #221 #326); a session keeps
@@ -2029,6 +2038,24 @@ def _json_key(value):
 
 def _utf16_len(text):
     return len(text) if text.isascii() else len(text.encode('utf-16-le', 'surrogatepass')) // 2
+
+
+def _step_effort(body):
+    """The effort a session step asks for, None when it names none."""
+    return (json.loads(body).get('output_config') or {}).get('effort')
+
+
+def _ident_body(body):
+    """``body`` as session reuse identity: a named effort counts only as being named.
+
+    A kept-alive native takes each step's effort from the relay (``Admission.effort``), and an effort change keeps the
+    message cache (live-probed 2026-11-23), so one conversation keeps one native across effort changes. Whether an
+    effort is named at all still counts: a step that names none runs at the native's own default."""
+    parsed = json.loads(body)
+    out = parsed.get('output_config')
+    if isinstance(out, dict) and out.get('effort'):
+        parsed['output_config'] = {**out, 'effort': '*'}
+    return json.dumps(parsed, sort_keys=True, separators=(',', ':'))
 
 
 def _gen_fields(body):

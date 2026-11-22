@@ -73,7 +73,7 @@ def test_sonnet_5_5_never_receives_the_thinking_disable():
     def body(model):
         return json.loads(directsdk.request_body({
             'model': model, 'messages': [{'role': 'user', 'content': 'go'}],
-            'extra_body': {'reasoning': {'enabled': False}}})[0])
+            'extra_body': {'reasoning': {'enabled': False}}, 'hermes_auxiliary': True})[0])
     for route in ('sonnet', 'sonnet-5-5', 'sonnet-5.5', 'claude-sonnet-5-5', 'claude-sonnet-5-5[1m]'):
         assert 'thinking' not in body(route), route
         assert 'context_management' not in body(route), route
@@ -89,7 +89,7 @@ def test_haiku_5_5_never_receives_the_thinking_disable():
     def body(model, reasoning):
         return json.loads(directsdk.request_body({
             'model': model, 'messages': [{'role': 'user', 'content': 'go'}],
-            'extra_body': {'reasoning': reasoning}})[0])
+            'extra_body': {'reasoning': reasoning}, 'hermes_auxiliary': True})[0])
     for route in ('haiku', 'haiku-5-5', 'haiku-5.5', 'claude-haiku-5-5', 'claude-haiku-5-5[1m]'):
         assert 'thinking' not in body(route, {'enabled': False}), route
         assert 'context_management' not in body(route, {'enabled': False}), route
