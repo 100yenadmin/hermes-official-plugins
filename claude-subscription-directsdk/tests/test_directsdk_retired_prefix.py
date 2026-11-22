@@ -61,3 +61,23 @@ def test_the_relay_runs_the_mark_before_observing_parity():
     import inspect
     source = inspect.getsource(admission.Handler.do_POST)
     assert source.index('mark_retired_prefix(gate, payload)') < source.index('observe_parity(gate, payload)')
+
+
+def test_the_copied_mark_keeps_ttls_non_increasing_and_ignores_schema_fields():
+    old = convo(9)
+    msgs = convo(9, tail=31, marked_end=False)
+    msgs[-1]['content'][-1]['cache_control'] = {'type': 'ephemeral', 'ttl': '5m'}  # native's end mark, 5m
+    b = {'model': 'm', 'messages': msgs, 'system': [{'type': 'text', 'text': 's', 'cache_control': {'type': 'ephemeral', 'ttl': '1h'}}],
+         'tools': [{'name': 't', 'input_schema': {'type': 'object', 'properties': {'cache_control': {'type': 'string'}}}}]}
+    out = json.loads(admission.mark_retired_prefix(gate_for(old), json.dumps(b).encode()))
+    # Copies the next genuine mark (5m), never the earlier 1h system mark and never the schema property.
+    assert out['messages'][8]['content'][-1]['cache_control'] == {'type': 'ephemeral', 'ttl': '5m'}
+    # Same JSON key order reversed: the result does not depend on serialization order.
+    rev = json.dumps({k: b[k] for k in ('tools', 'system', 'messages', 'model')}).encode()
+    assert json.loads(admission.mark_retired_prefix(gate_for(old), rev))['messages'][8]['content'][-1]['cache_control'] == {'type': 'ephemeral', 'ttl': '5m'}
+
+
+def test_no_genuine_mark_anywhere_means_no_new_mark():
+    old = convo(9)
+    payload = json.dumps({'model': 'm', 'messages': convo(9, tail=31, marked_end=False)}).encode()
+    assert admission.mark_retired_prefix(gate_for(old), payload) is payload

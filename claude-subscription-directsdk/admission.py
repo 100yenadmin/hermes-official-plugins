@@ -748,22 +748,36 @@ def mark_retired_prefix(gate, payload):
         if not isinstance(content, list) or not content or not isinstance(content[-1], dict) \
                 or 'cache_control' in content[-1]:
             return payload
-        mark = next((n.get('cache_control') for n in _nodes(body) if isinstance(n.get('cache_control'), dict)), None)
-        content[-1]['cache_control'] = dict(mark) if mark else {'type': 'ephemeral'}
+        mark = _donor_mark(body, kept - 1, len(content) - 1)
+        if mark is None:
+            return payload
+        content[-1]['cache_control'] = dict(mark)
         return json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     except Exception:
         return payload
 
 
-def _nodes(value):
-    stack = [value]
-    while stack:
-        node = stack.pop()
-        if isinstance(node, dict):
-            yield node
-            stack.extend(node.values())
-        elif isinstance(node, list):
-            stack.extend(node)
+def _donor_mark(body, row, block):
+    """The cache mark the new one copies: the next genuine mark after (row, block) in API order (tools, system,
+    messages), else the one before it, so TTLs stay non-increasing (the API rejects a 1h mark after a 5m one). Only
+    protocol positions count (a tool's own, system blocks, message content blocks), never a field inside a schema."""
+    marks = []
+    for tool in body.get('tools') or []:
+        if isinstance(tool, dict):
+            marks.append(((-2, 0), tool.get('cache_control')))
+    system = body.get('system')
+    for k, b in enumerate(system if isinstance(system, list) else []):
+        if isinstance(b, dict):
+            marks.append(((-1, k), b.get('cache_control')))
+    for r, message in enumerate(body.get('messages') or []):
+        content = message.get('content') if isinstance(message, dict) else None
+        for k, b in enumerate(content if isinstance(content, list) else []):
+            if isinstance(b, dict):
+                marks.append(((r, k), b.get('cache_control')))
+    marks = [(at, m) for at, m in marks if isinstance(m, dict) and m.get('type') == 'ephemeral']
+    after = [m for at, m in marks if at > (row, block)]
+    before = [m for at, m in marks if at < (row, block)]
+    return after[0] if after else (before[-1] if before else None)
 
 
 def observe_parity(gate, payload):
