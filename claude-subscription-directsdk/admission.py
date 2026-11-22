@@ -751,7 +751,8 @@ def mark_retired_prefix(gate, payload):
         mark = _donor_mark(body, kept - 1, len(content) - 1)
         if mark is None:
             return payload
-        content[-1]['cache_control'] = dict(mark)
+        # Only the tier travels: a system mark's `scope` (global) has no meaning on a message block.
+        content[-1]['cache_control'] = {k: mark[k] for k in ('type', 'ttl') if k in mark}
         return json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     except Exception:
         return payload

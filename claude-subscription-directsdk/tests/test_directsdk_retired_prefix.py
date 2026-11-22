@@ -81,3 +81,12 @@ def test_no_genuine_mark_anywhere_means_no_new_mark():
     old = convo(9)
     payload = json.dumps({'model': 'm', 'messages': convo(9, tail=31, marked_end=False)}).encode()
     assert admission.mark_retired_prefix(gate_for(old), payload) is payload
+
+
+def test_a_fallback_to_a_system_mark_copies_only_its_tier():
+    old = convo(9)
+    msgs = convo(9, tail=31, marked_end=False)
+    b = {'model': 'm', 'messages': msgs,
+         'system': [{'type': 'text', 'text': 's', 'cache_control': {'type': 'ephemeral', 'ttl': '1h', 'scope': 'global'}}]}
+    out = json.loads(admission.mark_retired_prefix(gate_for(old), json.dumps(b).encode()))
+    assert out['messages'][8]['content'][-1]['cache_control'] == {'type': 'ephemeral', 'ttl': '1h'}
