@@ -1514,10 +1514,12 @@ class Client:
         ident = hashlib.sha256(json.dumps([kwargs['model'], _ident_body(body), system, launch, env.get('CLAUDE_CODE_PROMPT_CACHE_TTL')]).encode('utf-8')).hexdigest()
         login = hashlib.sha256(json.dumps(launch).encode('utf-8')).hexdigest()
         first = next((k for k, m in zip(keys, messages) if m.get('role') == 'assistant'), None)
-        session, how = _session_checkout(ident, keys, messages, first, login)
+        effort = _step_effort(body)
+        session, how = _session_checkout(ident, keys, messages, first, login, effort)
         handed, _parity_handover.prev = getattr(_parity_handover, 'prev', None), None  # never outlives this step
         if session is None:
             session = NativeSession(ident, first, login)
+            session.effort = effort
             session.parity_prev = handed
             if not _session_admit(session):
                 # Every session slot is busy: this step takes the per-call path instead of exceeding the cap.
@@ -1536,14 +1538,14 @@ class Client:
                 if session.expect == 'user':
                     frame = copy.deepcopy(frames[-1])
                     # Anchor on the whole frame as sent.
-                    session.admission.rearm(timeout, frame['message']['content'], effort=_step_effort(body))
+                    session.admission.rearm(timeout, frame['message']['content'])
                     session.send(frame)
                 else:
                     results = {m['tool_call_id']: (m['content'], bool(m.get('is_error'))) for m in messages[n:]}
                     # Native replays the MCP results it holds, in its own call order, not Hermes' tool messages: anchor on that.
                     called = [c.get('id') for c in messages[n - 1].get('tool_calls') or []]
                     order = [i for i in called if i in results] + [i for i in results if i not in called]
-                    session.admission.rearm(timeout, effort=_step_effort(body), queried=[{'type': 'tool_result', 'tool_use_id': tool_id, 'content': [{'type': 'text', 'text': results[tool_id][0]}], **({'is_error': True} if results[tool_id][1] else {})}
+                    session.admission.rearm(timeout, [{'type': 'tool_result', 'tool_use_id': tool_id, 'content': [{'type': 'text', 'text': results[tool_id][0]}], **({'is_error': True} if results[tool_id][1] else {})}
                                                       for tool_id in order])
                     session.deliver(results)
             else:
@@ -1799,7 +1801,6 @@ class Client:
         # frame, including tool-result frames (#5).
         queried = frames[-1]['message']['content']
         session.admission = relay(upstream, timeout, queried=queried, first_turn={})
-        session.admission.effort = _step_effort(body)
         # The native this rebuild retired in the checkout just before: its last row profile (log only).
         session.admission.parity_prev, session.parity_prev = getattr(session, 'parity_prev', None), None
         # Streamed tool arguments stay on unless this conversation's came back invalid (#164 #221 #326); a session keeps
@@ -2045,17 +2046,32 @@ def _step_effort(body):
     return (json.loads(body).get('output_config') or {}).get('effort')
 
 
+_EFFORT_RANK = {'low': 0, 'medium': 1, 'high': 2, 'xhigh': 3, 'max': 4}
+
+
+def _effort_covers(native, step):
+    """Whether a native launched at effort ``native`` may answer a step asking for ``step``: never less effort.
+
+    Unknown levels only match themselves (identity already keeps named and unnamed apart)."""
+    if native == step:
+        return True
+    return native in _EFFORT_RANK and step in _EFFORT_RANK and _EFFORT_RANK[native] >= _EFFORT_RANK[step]
+
+
 def _ident_body(body):
     """``body`` as session reuse identity: a named effort counts only as being named.
 
-    A kept-alive native takes each step's effort from the relay (``Admission.effort``), and an effort change keeps the
-    message cache (live-probed 2026-11-23), so one conversation keeps one native across effort changes. Whether an
-    effort is named at all still counts: a step that names none runs at the native's own default."""
+    Claude Code writes its launch effort into its environment row near the top of the conversation (a per-message
+    effort row, sticky for every later turn), so a kept-alive native thinks at its launch effort for life, and a
+    native launched at another effort sends a different conversation prefix: a full cache rewrite. One conversation
+    therefore keeps one native across effort changes, as long as that native's effort covers the step
+    (``_effort_covers``); a step asking for more rebuilds it once, at the higher effort. Whether an effort is named
+    at all still counts, and key order is kept (a schema's property order is part of the request)."""
     parsed = json.loads(body)
     out = parsed.get('output_config')
     if isinstance(out, dict) and out.get('effort'):
         parsed['output_config'] = {**out, 'effort': '*'}
-    return json.dumps(parsed, sort_keys=True, separators=(',', ':'))
+    return json.dumps(parsed, separators=(',', ':'))
 
 
 def _gen_fields(body):
@@ -2091,6 +2107,7 @@ def _native_text(content):
 class NativeSession:
     def __init__(self, ident, first, login=None):
         self.ident, self.first, self.login = ident, first, login
+        self.effort = None  # the effort native was launched at, which it keeps for life (``_ident_body``)
         self.consumed, self.expect = [], None
         self.process = self.admission = self.root = self.pid = None
         self.manifest = []
@@ -2306,7 +2323,7 @@ def _divergence(consumed, keys, messages, expect, why):
             f'common_chars={common} hash={_short_hash(old)}/{_short_hash(new)}')
 
 
-def _session_checkout(ident, keys, messages, first, login=None):
+def _session_checkout(ident, keys, messages, first, login=None, effort=None):
     """The idle session whose consumed history prefixes this request and expects its suffix, marked busy.
 
     A session of the same conversation (same first answer) is retired when that conversation diverged
@@ -2323,7 +2340,13 @@ def _session_checkout(ident, keys, messages, first, login=None):
             if not session.alive() or now - session.last_used > _session_idle_limit(session):
                 stale.append(session)
             elif session.ident == ident and keys[:n] == session.consumed and _session_expects(session.expect, messages[n:]):
-                matches.append(session)
+                if _effort_covers(getattr(session, 'effort', None), effort):
+                    matches.append(session)
+                else:
+                    # The step asks for more effort than this native was launched at: replay on one launched higher.
+                    retired.append(session)
+                    stale.append(session)
+                    how = 'rebuild:effort'
             elif first is not None and session.first == first and (session.ident == ident or session.login != login):
                 # This conversation diverged (compaction, edit, interrupt, changed prompt/tools/model).
                 why = 'ident' if session.ident != ident else ('prefix' if keys[:n] != session.consumed else 'suffix')
@@ -2351,7 +2374,7 @@ def _session_checkout(ident, keys, messages, first, login=None):
             _session_pool.remove(session)
     try:  # log only: the exact native this rebuild retires, when there is exactly one, hands over its last profile
         old = (oversize if how == 'rebuild:oversize' else stale[-1] if how == 'rebuild:unpaired'
-               else retired[0] if how in ('rebuild:prefix', 'rebuild:suffix', 'rebuild:ident') and len(retired) == 1 else None)
+               else retired[0] if how in ('rebuild:prefix', 'rebuild:suffix', 'rebuild:ident', 'rebuild:effort') and len(retired) == 1 else None)
         if old is not None and old.admission is not None and old.admission.parity:
             _parity_handover.prev = (old.pid, old.admission.parity)
     except Exception:

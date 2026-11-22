@@ -38,11 +38,15 @@ TOOLS = [{"type": "function", "function": {"name": name, "description": "Public 
 SCENARIOS = {"S1": "per-call", "S2": "session alive", "S3": "idle restart",
              "S4": "LRU restart", "S5": "gateway restart", "S6": "review fork",
              "S7": "model swap and back", "S8": "restart after first turn",
-             "S9": "effort changes every turn, reasoning off included"}
-# S9: one conversation, Hermes' reasoning per turn (its voice-turn route sends reasoning off for a voice note).
-S9_REASONING = [{"enabled": True, "effort": "high"}, {"enabled": False}, {"enabled": True, "effort": "high"},
-                {"enabled": True, "effort": "medium"}, {"enabled": True, "effort": "none"}, {"enabled": True, "effort": "high"}]
-S9_EFFORT = ["high", "low", "high", "medium", "low", "high"]
+             "S9": "effort changes every turn, reasoning off included",
+             "S10": "a conversation that starts on a reasoning-off turn"}
+# Hermes' reasoning per turn (its voice-turn route sends reasoning off for a voice note), and the effort native must
+# think at: its launch effort, which only ever goes up within a conversation (S10's turn 2 rebuilds once).
+REASONING = {"S9": [{"enabled": True, "effort": "high"}, {"enabled": False}, {"enabled": True, "effort": "high"},
+                    {"enabled": True, "effort": "medium"}, {"enabled": True, "effort": "none"}, {"enabled": True, "effort": "high"}],
+             "S10": [{"enabled": False}, {"enabled": True, "effort": "high"}, {"enabled": False},
+                     {"enabled": True, "effort": "medium"}, {"enabled": True, "effort": "high"}, {"enabled": False}]}
+NATIVE_EFFORT = {"S9": ["high"] * 6, "S10": ["low"] + ["high"] * 5}
 SYSTEM = "PUBLIC SYNTHETIC SYSTEM\n" * 300
 PUBLIC_EMAIL = "public@example.invalid"
 PUBLIC_UUID = "00000000-0000-0000-0000-000000000000"
@@ -291,7 +295,9 @@ def scenario(native, binary, model, name, log, subscription=False, stream=False,
                            "upstream_requests": len(wires)}
                 # S7's first sonnet request starts a new model cache; returning to
                 # opus must still extend the last prefix opus actually wrote.
-                exempt = main and name == "S7" and turn == 3 and round_number == 1
+                # S10's turn 2 moves to a native launched higher: native's effort row near the top changes, a
+                # one-time rewrite, which is the price of never thinking less than asked.
+                exempt = main and ((name == "S7" and turn == 3) or (name == "S10" and turn == 2)) and round_number == 1
                 receipt["exempt"] = exempt
                 if main and chosen_model in previous and not exempt:
                     old, at, old_turn = previous[chosen_model]
@@ -315,15 +321,22 @@ def scenario(native, binary, model, name, log, subscription=False, stream=False,
                              and 1 <= len(markers) <= 2 and receipt["match"] is not False)
                 if session:
                     valid = valid and len(modes) == 1 and "session-fallback" != mode
-                if name == "S9" and main:
+                if name in REASONING and main:
                     # Thinking never toggles, and the request carries this turn's effort where native puts it.
                     receipt["thinking"] = wire.get("thinking")
                     receipt["effort"] = (wire.get("output_config") or {}).get("effort")
+                    # Every row that carries an effort (native's per-message effort rows are sticky from the next
+                    # user turn), by message index.
+                    receipt["row_efforts"] = [[i, m["output_config"].get("effort")] for i, m in enumerate(wire["messages"])
+                                              if isinstance(m.get("output_config"), dict)]
                     tail = wire["messages"][-1] if wire["messages"] else {}
                     receipt["tail_effort"] = (tail.get("output_config") or {}).get("effort") if tail.get("role") == "system" else None
-                    want = S9_EFFORT[turn - 1]
+                    want = NATIVE_EFFORT[name][turn - 1]
+                    # Never less than asked, and every effort the request names (top level and native's sticky
+                    # per-message rows) is the native's own, so the prefix bytes never change.
                     receipt["effort_ok"] = (receipt["thinking"] == {"type": "adaptive", "display": "summarized"}
-                                            and receipt["effort"] == want and receipt["tail_effort"] in (None, want))
+                                            and receipt["effort"] == want
+                                            and all(e == want for _, e in receipt["row_efforts"]))
                     valid = valid and receipt["effort_ok"]
                 receipt["valid"] = valid
                 report["pass"] &= valid
@@ -336,7 +349,9 @@ def scenario(native, binary, model, name, log, subscription=False, stream=False,
                     if name == "S3" or (turn > 1 and name in ("S4", "S5")) or (name == "S8" and turn == 2):
                         boundary["mode_expected"] = "cold or rebuild:*"
                         boundary["mode_ok"] = mode == "cold" or mode.startswith("rebuild:")
-                    elif (name in ("S2", "S6", "S9") and turn > 1) or (name == "S8" and turn > 2):
+                    elif name == "S10" and turn == 2:
+                        boundary["mode_expected"], boundary["mode_ok"] = "rebuild:effort", mode == "rebuild:effort"
+                    elif (name in ("S2", "S6", "S9") and turn > 1) or (name in ("S8", "S10") and turn > 2):
                         boundary["mode_expected"], boundary["mode_ok"] = "reused", mode == "reused"
                     report["pass"] &= boundary.get("mode_ok", True)
                     report["boundaries"].append(boundary)
@@ -386,7 +401,7 @@ def scenario(native, binary, model, name, log, subscription=False, stream=False,
                 chosen_model = "claude-sonnet-5" if name == "S7" and turn in (3, 4) else model
                 for round_number, tool_count in enumerate((2, 1, 1, 0), 1):
                     assistant = request(history, chosen_model, turn, round_number, tool_count,
-                                        extra_body={"reasoning": S9_REASONING[turn - 1]} if name == "S9" else None)
+                                        extra_body={"reasoning": REASONING[name][turn - 1]} if name in REASONING else None)
                     history.append(assistant)
                     history.extend({"role": "tool", "tool_call_id": call["id"],
                                     "content": (f"Public synthetic result turn {turn} round {round_number}\n" * 100)[:2048]}
@@ -486,7 +501,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     args.only = args.only.split(",")
     if not args.only or any(name not in SCENARIOS for name in args.only):
-        parser.error("--only must select S1 through S9")
+        parser.error("--only must select S1 through S10")
     result = run(args)
     print(json.dumps(result, indent=2))
     sys.exit(int(any(s["pass"] is False for s in result["scenarios"].values())))

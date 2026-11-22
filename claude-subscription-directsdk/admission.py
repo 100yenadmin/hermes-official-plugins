@@ -471,32 +471,6 @@ def drop_message_breakpoints(payload):
         return payload
 
 
-def step_effort(payload, effort):
-    """Session mode: send this step's effort where native put its own.
-
-    A kept-alive native was launched at one ``--effort`` and writes it into each request: the top-level
-    ``output_config.effort`` and the per-request system message that ends ``messages``. A conversation keeps its
-    native across effort changes (an effort change keeps the message cache), so the relay sets the step's effort in
-    those two places. Earlier messages are history and stay as native replays them. A payload that does not parse,
-    or names no effort, forwards as is."""
-    try:
-        body = json.loads(payload)
-        changed = False
-        out = body.get('output_config')
-        if isinstance(out, dict) and out.get('effort') and out['effort'] != effort:
-            out['effort'], changed = effort, True
-        messages = body.get('messages') or []
-        last = messages[-1] if messages else None
-        if isinstance(last, dict) and last.get('role') == 'system' and isinstance(last.get('output_config'), dict) \
-                and last['output_config'].get('effort') and last['output_config']['effort'] != effort:
-            last['output_config']['effort'], changed = effort, True
-        if not changed:
-            return payload
-        return json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
-    except (ValueError, TypeError, AttributeError, KeyError):
-        return payload
-
-
 def stream_tool_input(payload):
     """Ask the API to stream every tool's arguments as the model writes them (``eager_input_streaming``).
 
@@ -946,8 +920,6 @@ class Admission:
         self.reset_at = None
         self.failure = None
         self.unrestored = None
-        # Session mode: the current step's effort, set on the outgoing request (``step_effort``); None leaves native's.
-        self.effort = None
         # Log-only row parity (session mode): the latest profile, a retired native's handed-over one, queued notes.
         self.parity = self.parity_prev = None
         self.parity_notes, self.parity_logged = [], False
@@ -996,11 +968,11 @@ class Admission:
             return text
         return message if isinstance(message, str) else text
 
-    def rearm(self, timeout, queried, effort=None):
+    def rearm(self, timeout, queried):
         """Session mode: admit exactly one more upstream request (the next Hermes step), under that step's timeout,
-        anchored on that step's queried frame, at that step's effort."""
+        anchored on that step's queried frame."""
         with self.lock:
-            self.timeout, self.used, self.denied, self.queried, self.effort = timeout, False, 0, queried, effort
+            self.timeout, self.used, self.denied, self.queried = timeout, False, 0, queried
             self.request_id = self.status = self.failure = self.unrestored = self.reset_at = None
             self.capture, self.error_body = Capture(), b''
             kept = self.first_turn.get('spawn_row') if isinstance(self.first_turn, dict) else None
@@ -1153,8 +1125,6 @@ class Handler(BaseHTTPRequestHandler):
             payload = stable_request_context(payload, gate.queried,
                                              session=isinstance(getattr(gate, 'first_turn', None), dict))
             payload = pin_message_breakpoint(payload, gate.queried, gate.first_turn)
-            if gate.effort:
-                payload = step_effort(payload, gate.effort)
             if gate.eager:
                 payload = stream_tool_input(payload)
             observe_parity(gate, payload)

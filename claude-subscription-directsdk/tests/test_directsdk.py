@@ -265,10 +265,11 @@ class Contract(unittest.TestCase):
     def test_fail_closed_and_cancellation(self):
         import directsdk
 
+        # An auxiliary one-shot keeps the nearest real off (a conversation step keeps thinking on: test_directsdk_reasoning_off).
         # `sonnet` resolves to Sonnet 5.5, which rejects the disable; Sonnet 5 accepts it.
         disabled = json.loads(
             directsdk.request_body(
-                {**self.request(), "model": "claude-sonnet-5", "extra_body": {"reasoning": {"enabled": False}}}
+                {**self.request(), "model": "claude-sonnet-5", "extra_body": {"reasoning": {"enabled": False}}, "hermes_auxiliary": True}
             )[0]
         )
         self.assertEqual(disabled["thinking"], {"type": "disabled"})
@@ -279,7 +280,7 @@ class Contract(unittest.TestCase):
         for route in ("fable", "opus", "claude-opus-5-5", "claude-opus-5-5[1m]"):
             mandatory = json.loads(
                 directsdk.request_body(
-                    {**self.request(), "model": route, "extra_body": {"reasoning": {"enabled": False}}}
+                    {**self.request(), "model": route, "extra_body": {"reasoning": {"enabled": False}}, "hermes_auxiliary": True}
                 )[0]
             )
             self.assertNotIn("thinking", mandatory, route)
@@ -287,7 +288,7 @@ class Contract(unittest.TestCase):
         # Opus 5 still accepts the disable; the Opus 5.5 gate must not swallow it by prefix.
         opus5 = json.loads(
             directsdk.request_body(
-                {**self.request(), "model": "claude-opus-5", "extra_body": {"reasoning": {"enabled": False}}}
+                {**self.request(), "model": "claude-opus-5", "extra_body": {"reasoning": {"enabled": False}}, "hermes_auxiliary": True}
             )[0]
         )
         self.assertEqual(opus5["thinking"], {"type": "disabled"})

@@ -2264,24 +2264,29 @@ def test_session_identity_counts_an_effort_only_as_named():
     assert directsdk._ident_body(body(effort='high')) != directsdk._ident_body(body(effort='high', format={'type': 'json_schema'}))
     assert directsdk._ident_body(body(effort='high')) != directsdk._ident_body(body(effort='high').replace('summarized', 'updates'))
     assert directsdk._ident_body(body(effort='high')) != directsdk._ident_body(body(effort='high').replace('9', '8'))
+    # Key order is part of the request (a schema's property order): it still keys the session.
+    first = json.dumps({'output_config': {'effort': 'high', 'format': {'schema': {'properties': {'a': {}, 'b': {}}}}}})
+    swapped = json.dumps({'output_config': {'effort': 'high', 'format': {'schema': {'properties': {'b': {}, 'a': {}}}}}})
+    assert directsdk._ident_body(first) != directsdk._ident_body(swapped)
 
 
-def test_the_relay_sends_the_steps_effort_where_native_put_its_own():
-    import admission
-    sent = {'model': 'm', 'thinking': {'type': 'adaptive'}, 'output_config': {'effort': 'high'},
-            'messages': [{'role': 'user', 'content': 'q'},
-                         {'role': 'system', 'content': 'earlier context', 'output_config': {'effort': 'high'}},
-                         {'role': 'assistant', 'content': 'a'}, {'role': 'user', 'content': 'q2'},
-                         {'role': 'system', 'content': 'context', 'output_config': {'effort': 'high'}}]}
-    out = json.loads(admission.step_effort(json.dumps(sent).encode(), 'low'))
-    assert out['output_config'] == {'effort': 'low'}
-    assert out['messages'][-1]['output_config'] == {'effort': 'low'}
-    # History is replayed as sent; only the request's own effort changes.
-    assert out['messages'][1]['output_config'] == {'effort': 'high'}
-    assert {k: v for k, v in out.items() if k not in ('output_config', 'messages')} == {k: v for k, v in sent.items() if k not in ('output_config', 'messages')}
-    # The same effort, no effort, or a payload that does not parse forwards byte for byte.
-    raw = json.dumps(sent).encode()
-    assert admission.step_effort(raw, 'high') is raw
-    plain = json.dumps({'messages': [{'role': 'user', 'content': 'q'}]}).encode()
-    assert admission.step_effort(plain, 'low') is plain
-    assert admission.step_effort(b'not json', 'low') == b'not json'
+def test_a_step_asking_for_more_effort_than_its_native_rebuilds_once_at_the_higher_effort(rig):
+    """A native thinks at its launch effort for life, so a conversation that started on a reasoning-off turn (low) moves
+    to a native launched at the higher effort when a later step asks for it; lower asks keep reusing that one."""
+    messages = [{'role': 'system', 'content': 'sys'}, {'role': 'user', 'content': 'first turn'}]
+    modes = []
+    for turn, reasoning in enumerate(({'enabled': False}, {'enabled': True, 'effort': 'high'}, {'enabled': False},
+                                      {'enabled': True, 'effort': 'medium'}, {'enabled': True, 'effort': 'high'})):
+        answer = step(rig.client(), messages, extra_body={'reasoning': reasoning})
+        modes.append(answer.usage.model_dump()['native_admission']['session'])
+        messages += [as_history(answer), {'role': 'user', 'content': f'turn {turn + 2}'}]
+    assert modes == ['cold', 'rebuild:effort', 'reused', 'reused', 'reused']
+    assert len(rig.spawned()) == 2
+
+
+def test_effort_cover_never_lowers_the_effort_a_step_asked_for():
+    covers = directsdk._effort_covers
+    assert covers('high', 'low') and covers('high', 'high') and covers('max', 'xhigh') and covers(None, None)
+    assert not covers('low', 'high') and not covers('high', 'xhigh') and not covers('medium', 'max')
+    # Unknown levels only match themselves.
+    assert covers('turbo', 'turbo') and not covers('turbo', 'low') and not covers('high', 'turbo')
