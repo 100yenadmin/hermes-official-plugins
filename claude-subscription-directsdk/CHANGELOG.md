@@ -1,5 +1,9 @@
 # Changelog
 
+## [0.4.0+session.15] - Unreleased
+
+- `session step:` ends in `gen=thinking:<type>,effort:<level>,format:<json|->,max_tokens:<n>,temperature:<v>,top_p:<v>,stops:<count>,ctx_edits:<count>` (`-` when unset; `gen=-` if it cannot be read). These are the generation settings inside `body=`, which key session reuse and, for thinking and effort, decide whether Anthropic keeps the message cache. When `body=` changes between steps of a conversation, `gen=` names the setting that did. Settings only, never message or tool content. Log only: nothing about reuse, kills or replay changed.
+
 ## [0.4.0+session.14] - Unreleased
 
 Merged with main at 269ddcb: everything main shipped for this plugin since e726eb7 reaches the session-mode build (the `extra_usage_reserve_percent` setting, a used-up window's reopening, transport wording for relay failures, the delegated child's 5m cache, vendor-prefixed model ids, CLI version resolution, `Client.close()` no longer cancelling parallel calls, the max_concurrent waiter deadline, the relay's prompt close, one stdin watchdog thread per request).

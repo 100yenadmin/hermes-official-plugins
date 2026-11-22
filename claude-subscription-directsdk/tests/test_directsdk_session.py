@@ -1914,12 +1914,15 @@ def test_the_step_line_carries_keyed_digests_of_each_identity_part(rig, caplog, 
         return _digests(_session_lines(caplog, 'session step:')[-1])
     one, two, three, four = run('SYSTEM ONE', TOOLS), run('SYSTEM TWO', TOOLS), run('SYSTEM ONE', other), run('SYSTEM ONE', TOOLS, 'x')
     assert not any('SYSTEM' in line or 'probe two' in line for line in _session_lines(caplog, 'session step:'))
+    for p in (one, two, three, four):
+        assert p.pop('gen', '').startswith('thinking:')
     assert all(list(p) == ['tools', 'sys', 'launch', 'body', 'model'] and all(len(v) == 8 for v in p.values()) for p in (one, two, three, four))
     same = lambda a, b, keys: all(a[k] == b[k] for k in keys)
     assert one['sys'] != two['sys'] and same(one, two, ('tools', 'launch', 'body'))
     assert one['tools'] != three['tools'] and one['body'] != three['body'] and same(one, three, ('sys', 'launch'))
     assert one['launch'] != four['launch'] and same(one, four, ('tools', 'sys', 'body', 'model'))
     five = run('SYSTEM ONE', TOOLS, model='opus')
+    five.pop('gen', None)
     assert one['model'] != five['model'] and one['model'] == directsdk._short_hash('sonnet')[:8] != hashlib.sha256(b'sonnet').hexdigest()[:8]
     # Keyed: not the plain sha256 of the input, and a new key changes every digest of the same inputs.
     body = directsdk.request_body({'model': 'sonnet', 'tools': TOOLS})[0]
@@ -1928,7 +1931,24 @@ def test_the_step_line_carries_keyed_digests_of_each_identity_part(rig, caplog, 
     assert one['tools'] == directsdk._short_hash(plain_tools)[:8] != hashlib.sha256(plain_tools.encode()).hexdigest()[:8]
     monkeypatch.setattr(directsdk, '_LOG_HASH_KEY', os.urandom(32))
     rekeyed = run('SYSTEM ONE', TOOLS)
+    rekeyed.pop('gen', None)
     assert all(rekeyed[k] != one[k] for k in one), (rekeyed, one)
+
+
+def test_the_step_line_names_the_generation_settings_that_key_the_body(rig, caplog):
+    """When body= changes, gen= says which setting did (thinking, effort, max_tokens...): settings only, never content."""
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    def run(**extra):
+        rig.client().create(model='sonnet', messages=[{'role': 'user', 'content': 'SECRETTEXT hi'}], tools=TOOLS, **extra)
+        return _digests(_session_lines(caplog, 'session step:')[-1])
+    plain = run()
+    high = run(max_tokens=1234, extra_body={'reasoning': {'enabled': True, 'effort': 'high'}})
+    assert plain['body'] != high['body']
+    fields = dict(kv.split(':', 1) for kv in high['gen'].split(','))
+    assert fields['effort'] == 'high' and fields['max_tokens'] == '1234' and fields['thinking'] in ('adaptive', '-')
+    assert list(fields) == ['thinking', 'effort', 'format', 'max_tokens', 'temperature', 'top_p', 'stops', 'ctx_edits']
+    assert dict(kv.split(':', 1) for kv in plain['gen'].split(','))['effort'] == '-'
+    assert not any('SECRETTEXT' in line or 'probe' in line for line in _session_lines(caplog, 'session step:'))
 
 
 def test_a_digest_failure_logs_dashes_and_never_fails_the_step(rig, caplog, monkeypatch):

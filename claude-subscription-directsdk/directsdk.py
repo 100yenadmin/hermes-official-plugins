@@ -1713,6 +1713,10 @@ class Client:
             try:
                 parts = ' '.join(f'{name}={_short_hash(value)[:8]}' for name, value in (
                     ('tools', json.dumps(json.loads(body).get('tools'))), ('sys', json.dumps(system)), ('launch', json.dumps(launch)), ('body', body), ('model', kwargs['model'])))
+                try:  # which generation setting changed when `body=` changes (log only; settings, never content)
+                    parts += ' ' + _gen_fields(body)
+                except Exception:
+                    parts += ' gen=-'
                 # The relay forwarded the remembered spawn row uncleaned: index:chars now/at spawn:why (log only).
                 kept_row = admission.first_turn.get('spawn_row') if isinstance(admission.first_turn, dict) else None
                 if kept_row and kept_row.get('missed'):
@@ -2025,6 +2029,20 @@ def _json_key(value):
 
 def _utf16_len(text):
     return len(text) if text.isascii() else len(text.encode('utf-16-le', 'surrogatepass')) // 2
+
+
+def _gen_fields(body):
+    """Log-only: the generation settings in a session's body, which key reuse and can drop the message cache when they
+    change (thinking, effort). Settings only, never message or tool content; a schema format shows as `json`."""
+    parsed = json.loads(body)
+    out = parsed.get('output_config') or {}
+    thinking = parsed.get('thinking') or {}
+    stop = parsed.get('stop_sequences')
+    values = [('thinking', thinking.get('type')), ('effort', out.get('effort')), ('format', 'json' if out.get('format') else None),
+              ('max_tokens', parsed.get('max_tokens')), ('temperature', parsed.get('temperature')), ('top_p', parsed.get('top_p')),
+              ('stops', len(stop) if isinstance(stop, list) else None),
+              ('ctx_edits', len((parsed.get('context_management') or {}).get('edits') or []) if 'context_management' in parsed else None)]
+    return 'gen=' + ','.join(f'{k}:{"-" if v is None else v}' for k, v in values)
 
 
 def _session_oversize(message):
