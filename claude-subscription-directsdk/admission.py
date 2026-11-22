@@ -723,6 +723,49 @@ def _parity_diff(new, old):
     return i, f'role={role} blocks={a[1]}/{b[1]} chars={a[2]}/{b[2]}'
 
 
+def mark_retired_prefix(gate, payload):
+    """Session mode, a rebuilt native's first request: one more cache mark where the retired native's last request ended.
+
+    That request's cache entry ends there, but a rebuild's request carries more rows after it and its only message
+    mark is at its end; the API looks back only about 20 blocks from a mark, so a long tail rewrites the whole
+    conversation even when every earlier row is unchanged (live probe 2026-11-23: a 31-block tail read 0, the same
+    request with this mark read the old entry). Marks only when the parity hand-over (``gate.parity_prev``) shows
+    every row of the retired native's last request unchanged here, the request has rows after them, that row's last
+    block has no mark, and fewer than 4 marks are present. Reads the hand-over without consuming it (``observe_parity``
+    does), changes nothing else, and any failure forwards the payload as is."""
+    handed = getattr(gate, 'parity_prev', None)
+    if handed is None or not isinstance(getattr(gate, 'first_turn', None), dict):
+        return payload
+    try:
+        body = json.loads(payload)
+        messages = body['messages']
+        profile = row_profile(messages)
+        old = handed[1]
+        kept = old[1]
+        if kept < 1 or kept >= profile[1] or _parity_diff(profile, old) is not None or _breakpoints(body) >= 4:
+            return payload
+        content = messages[kept - 1].get('content')
+        if not isinstance(content, list) or not content or not isinstance(content[-1], dict) \
+                or 'cache_control' in content[-1]:
+            return payload
+        mark = next((n.get('cache_control') for n in _nodes(body) if isinstance(n.get('cache_control'), dict)), None)
+        content[-1]['cache_control'] = dict(mark) if mark else {'type': 'ephemeral'}
+        return json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    except Exception:
+        return payload
+
+
+def _nodes(value):
+    stack = [value]
+    while stack:
+        node = stack.pop()
+        if isinstance(node, dict):
+            yield node
+            stack.extend(node.values())
+        elif isinstance(node, list):
+            stack.extend(node)
+
+
 def observe_parity(gate, payload):
     """Session mode, log only: profile the rows of each forwarded request (lengths, counts and role codes, never
     text) and queue notes for the session thread, which logs them at step end; nothing is logged here. Notes once
@@ -1127,6 +1170,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = pin_message_breakpoint(payload, gate.queried, gate.first_turn)
             if gate.eager:
                 payload = stream_tool_input(payload)
+            payload = mark_retired_prefix(gate, payload)
             observe_parity(gate, payload)
             target = gate.upstream
             conn, upstream_socket = self._connect_upstream()
