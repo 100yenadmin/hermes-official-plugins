@@ -870,6 +870,18 @@ def _row_fields(new, old, row):
     return f' row_kinds={_row_kinds(old, row)}/{_row_kinds(new, row)} row_chars={chars(old)}/{chars(new)}'
 
 
+def remember_sent(gate):
+    """Log only: once a request has gone upstream (``conn.request`` returned), record its profile as its conversation's
+    latest for a later cold spawn's ``cold_prev=`` line; a request that never left (connection refused) is not recorded."""
+    remember, profile = getattr(gate, 'remember', None), getattr(gate, 'parity', None)
+    if remember is None or not profile or getattr(gate, 'cancelled', False):
+        return
+    try:
+        remember(profile)
+    except Exception:
+        pass
+
+
 def observe_parity(gate, payload):
     """Session mode, log only: profile the rows of each forwarded request (lengths, counts and role codes, never
     text) and queue notes for the session thread, which logs them at step end; nothing is logged here. Notes once
@@ -893,12 +905,6 @@ def observe_parity(gate, payload):
         if gate.cancelled:
             gate.parity = None  # closed meanwhile: keep nothing
             return
-        remember = getattr(gate, 'remember', None)
-        if remember is not None:
-            try:  # this conversation's latest forwarded request, for a later cold spawn's `cold_prev=` (log only)
-                remember(profile)
-            except Exception:
-                pass
         notes = []
         if handed is not None:
             pid, old = handed
@@ -1418,6 +1424,7 @@ class Handler(BaseHTTPRequestHandler):
                 pad = b'\n' + bytes(secrets.choice(b' \t') for _ in range(secrets.randbelow(257)))
                 wire = gzip.compress(payload + pad, compresslevel=3, mtime=0)
             conn.request('POST', route, wire, {**headers, 'Content-Encoding': 'gzip'} if compressed else headers)
+            remember_sent(gate)
             response = conn.getresponse()
             prefix = b''
             if compressed and response.status in (400, 403, 415):

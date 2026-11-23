@@ -2316,7 +2316,7 @@ def test_a_cold_native_logs_the_first_row_it_no_longer_repeats_from_its_conversa
 
 
 def test_a_cold_prior_comes_from_the_last_forwarded_request_even_when_that_step_failed(rig, caplog):
-    """The relay records every forwarded request, so a native killed mid-step (the request went upstream, the step
+    """The relay records every request it sent upstream, so a native killed mid-step (the request went upstream, the step
     never finished) still leaves its last request as the comparison for the cold spawn that follows."""
     caplog.set_level('INFO', logger=directsdk._session_log.name)
     messages = [{'role': 'user', 'content': 'SECRETTEXT hello'}]
@@ -2328,6 +2328,9 @@ def test_a_cold_prior_comes_from_the_last_forwarded_request_even_when_that_step_
     import admission
     body = json.dumps({'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': 'x'}]}] * 4}).encode()
     admission.observe_parity(session.admission, body)
+    # Profiled but not yet sent (a refused connection stops here): the last sent request stays the comparison.
+    assert directsdk._LAST_PROFILE[key][1][1] == 1
+    admission.remember_sent(session.admission)  # what the relay calls once conn.request() returned
     assert directsdk._LAST_PROFILE[key] == (session.pid, session.admission.parity) and session.admission.parity[1] == 4
 
 
