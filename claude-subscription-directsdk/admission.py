@@ -726,9 +726,12 @@ def _byte_diff(new, old):
         return None
     a = earlier[i]
     b = digests[i] if i < stable else ()
-    k = next((j for j in range(max(len(a), len(b))) if j >= len(a) or j >= len(b) or a[j] != b[j]), 0)
-    kind_a = a[k][0] if k < len(a) else '-'
-    kind_b = b[k][0] if k < len(b) else '-'
+    k = next((j for j in range(max(len(a), len(b))) if j >= len(a) or j >= len(b) or a[j] != b[j]), None)
+    if k is None:  # the blocks are identical: only the role changed
+        k, kind_a, kind_b = '-', '-', '-'
+    else:
+        kind_a = a[k][0] if k < len(a) else '-'
+        kind_b = b[k][0] if k < len(b) else '-'
     role_a, role_b = before[i][0], (rows[i][0] if i < stable else '-')
     role = role_a if role_a == role_b else f'{role_a}/{role_b}'
     return i, f'byte_role={role} byte_block={k} byte_kinds={kind_a}/{kind_b}'
@@ -876,15 +879,16 @@ def observe_parity(gate, payload):
             notes.append(f'prev={pid} first_diff=' + (f'{diff[0]} {diff[1]}' if diff else 'none role=- blocks=- chars=-')
                          + f' rows={profile[1]}/{old[1]}' + _byte_field(byte))
         if previous is not None:
-            diff = _parity_diff(profile, previous) if not gate.parity_logged else None
+            counts = _parity_diff(profile, previous)
             byte = _byte_diff(profile, previous) if len(profile) > 2 and len(previous) > 2 else False
-            if diff:
+            if counts and not gate.parity_logged:
                 # Once per native. A count change and an earlier same-length edit can arrive together: the byte field
                 # names the earliest changed row.
                 gate.parity_logged = True
-                notes.append(f'self_diff row={diff[0]} {diff[1]} rows={profile[1]}' + _byte_field(byte))
-            elif byte and _parity_diff(profile, previous) is None and getattr(gate, 'parity_self_left', _SELF_NOTES) > 0:
-                # A same-length change the counts cannot see; a few per native, since the first may be routine.
+                notes.append(f'self_diff row={counts[0]} {counts[1]} rows={profile[1]}' + _byte_field(byte))
+            elif byte and (counts is None or byte[0] < counts[0]) and getattr(gate, 'parity_self_left', _SELF_NOTES) > 0:
+                # A same-length change the counts cannot see, alone or before a later count change; a few per native,
+                # since the first may be routine.
                 gate.parity_self_left = getattr(gate, 'parity_self_left', _SELF_NOTES) - 1
                 notes.append(f'self_bytes rows={profile[1]}' + _byte_field(byte))
         gate.parity_notes = gate.parity_notes + notes

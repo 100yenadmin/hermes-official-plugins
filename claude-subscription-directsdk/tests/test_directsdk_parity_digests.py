@@ -128,7 +128,7 @@ def test_a_key_order_change_is_a_byte_change():
 def test_a_role_only_change_is_a_byte_change():
     a = [{'role': 'user', 'content': 'same'}, {'role': 'assistant', 'content': 'x'}]
     b = [{'role': 'assistant', 'content': 'same'}, {'role': 'assistant', 'content': 'x'}]
-    assert admission._byte_diff(profile(b), profile(a)) == (0, 'byte_role=u/a byte_block=0 byte_kinds=str/str')
+    assert admission._byte_diff(profile(b), profile(a)) == (0, 'byte_role=u/a byte_block=- byte_kinds=-/-')
 
 
 def test_three_part_profiles_keep_the_count_diff_and_the_retired_prefix_mark_working():
@@ -157,3 +157,13 @@ def test_a_suffix_divergence_counts_results_a_native_cannot_take():
             {'role': 'tool', 'tool_call_id': 'b', 'content': [{'type': 'image_url', 'image_url': {'url': 'x'}}]}]
     line = directsdk._divergence(consumed, consumed + [None, None], [{}] + tail, {'a', 'b'}, 'suffix')
     assert line.endswith('nonstr=1') and 'matched_ids=2' in line
+
+
+def test_a_later_mixed_change_still_names_its_earlier_same_length_edit():
+    g = gate()
+    admission.observe_parity(g, body(rows('alpha', 'bravo', 'charlie')))
+    admission.observe_parity(g, body(rows('alpha', 'bravo', 'charlie!', 'delta', 'echo')))  # count change: the self_diff
+    admission.observe_parity(g, body(rows('alphb', 'bravo', 'charlie!!', 'delta', 'echo', 'fox', 'golf')))  # mixed
+    assert g.parity_notes[1:] == ['self_bytes rows=7 byte_diff=0 byte_role=u byte_block=0 byte_kinds=text/text']
+    admission.observe_parity(g, body(rows('alphb', 'bravo', 'charlie!!!', 'delta', 'echo', 'fox', 'golf', 'h', 'i')))
+    assert len(g.parity_notes) == 2  # a count change alone after the latch stays quiet
