@@ -2022,7 +2022,7 @@ def test_a_native_that_changes_a_row_it_already_sent_logs_one_self_diff(rig, cap
         assert lines == []
         return
     (line,) = lines  # once per native, though every later request differs
-    assert line.split(' ', 3)[3] == f'self_diff row=0 role=u blocks=1/2 chars=16/27 rows=3' and f':{pid} ' in line, line
+    assert line.split(' ', 3)[3] == f'self_diff row=0 role=u blocks=1/2 chars=16/27 rows=3 byte_diff=0 byte_role=u byte_block=1 byte_kinds=-/text' and f':{pid} ' in line, line
 
 
 def test_a_rebuild_logs_the_first_row_that_differs_from_the_retired_natives_last_request(rig, caplog):

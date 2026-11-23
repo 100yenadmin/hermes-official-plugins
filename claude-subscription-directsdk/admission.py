@@ -683,20 +683,23 @@ _ROW_KEY = secrets.token_bytes(32)
 _BLOCK_KINDS = frozenset(('text', 'thinking', 'redacted_thinking', 'tool_use', 'tool_result', 'image', 'document'))
 
 
-def _unmarked(value):
-    """A copy without any ``cache_control`` key at any depth: marks move between requests and are not row bytes."""
-    if isinstance(value, dict):
-        return {k: _unmarked(v) for k, v in value.items() if k != 'cache_control'}
-    if isinstance(value, list):
-        return [_unmarked(v) for v in value]
-    return value
+def _unmarked(block):
+    """A block without its cache mark, and a tool_result's nested blocks without theirs: marks move between requests
+    and are not row bytes. Only those protocol positions; a ``cache_control`` key inside tool input is data and stays."""
+    if not isinstance(block, dict):
+        return block
+    out = {k: v for k, v in block.items() if k != 'cache_control'}
+    if block.get('type') == 'tool_result' and isinstance(block.get('content'), list):
+        out['content'] = [{k: v for k, v in b.items() if k != 'cache_control'} if isinstance(b, dict) else b
+                          for b in block['content']]
+    return out
 
 
 def _block_kind(block):
     if isinstance(block, str):
         return 'str'
     kind = block.get('type') if isinstance(block, dict) else None
-    return kind if kind in _BLOCK_KINDS else '?'
+    return kind if isinstance(kind, str) and kind in _BLOCK_KINDS else '?'
 
 
 def row_digests(messages):
@@ -707,7 +710,7 @@ def row_digests(messages):
         content = message.get('content')
         blocks = content if isinstance(content, list) else [content]
         rows.append(tuple((_block_kind(b), hmac.new(_ROW_KEY, json.dumps(_unmarked(b), sort_keys=True,
-                    ensure_ascii=False, separators=(',', ':')).encode('utf-8'), hashlib.sha256).digest()[:8])
+                    ensure_ascii=False, separators=(',', ':')).encode('utf-8', 'surrogatepass'), hashlib.sha256).digest()[:8])
                     for b in blocks))
     return rows
 
@@ -718,7 +721,7 @@ def _byte_diff(new, old):
     if len(new) < 3 or len(old) < 3:
         return None
     (rows, stable, digests), (before, kept, earlier) = new[:3], old[:3]
-    i = next((k for k in range(kept) if k >= stable or digests[k] != earlier[k]), None)
+    i = next((k for k in range(kept) if k >= stable or digests[k] != earlier[k] or rows[k][0] != before[k][0]), None)
     if i is None:
         return None
     a = earlier[i]
@@ -834,6 +837,9 @@ def _donor_mark(body, row, block):
     return after[0] if after else (before[-1] if before else None)
 
 
+_SELF_NOTES = 3  # byte-only self notes per native: the first may be routine, so a few, not one
+
+
 def _byte_field(byte):
     """` byte_diff=<row> byte_role= byte_block= byte_kinds=`, `none`, or `-` when no digests were available."""
     if byte is False:
@@ -869,16 +875,18 @@ def observe_parity(gate, payload):
             byte = _byte_diff(profile, old) if len(profile) > 2 and len(old) > 2 else False
             notes.append(f'prev={pid} first_diff=' + (f'{diff[0]} {diff[1]}' if diff else 'none role=- blocks=- chars=-')
                          + f' rows={profile[1]}/{old[1]}' + _byte_field(byte))
-        if previous is not None and not gate.parity_logged:
-            diff = _parity_diff(profile, previous)
+        if previous is not None:
+            diff = _parity_diff(profile, previous) if not gate.parity_logged else None
+            byte = _byte_diff(profile, previous) if len(profile) > 2 and len(previous) > 2 else False
             if diff:
+                # Once per native. A count change and an earlier same-length edit can arrive together: the byte field
+                # names the earliest changed row.
                 gate.parity_logged = True
-                notes.append(f'self_diff row={diff[0]} {diff[1]} rows={profile[1]}')
-            elif not getattr(gate, 'parity_bytes_logged', False) and len(profile) > 2 and len(previous) > 2:
-                byte = _byte_diff(profile, previous)
-                if byte:  # a same-length change the counts missed, once per native
-                    gate.parity_bytes_logged = True
-                    notes.append(f'self_bytes rows={profile[1]}' + _byte_field(byte))
+                notes.append(f'self_diff row={diff[0]} {diff[1]} rows={profile[1]}' + _byte_field(byte))
+            elif byte and _parity_diff(profile, previous) is None and getattr(gate, 'parity_self_left', _SELF_NOTES) > 0:
+                # A same-length change the counts cannot see; a few per native, since the first may be routine.
+                gate.parity_self_left = getattr(gate, 'parity_self_left', _SELF_NOTES) - 1
+                notes.append(f'self_bytes rows={profile[1]}' + _byte_field(byte))
         gate.parity_notes = gate.parity_notes + notes
     except Exception:
         pass
@@ -1053,7 +1061,7 @@ class Admission:
         self.unrestored = None
         # Log-only row parity (session mode): the latest profile, a retired native's handed-over one, queued notes.
         self.parity = self.parity_prev = None
-        self.parity_notes, self.parity_logged, self.parity_bytes_logged = [], False, False
+        self.parity_notes, self.parity_logged, self.parity_self_left = [], False, _SELF_NOTES
         self.capture = Capture()
         self.error_body = b''
         self.prefix = '/admit/' + secrets.token_urlsafe(32)

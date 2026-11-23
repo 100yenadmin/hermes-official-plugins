@@ -76,20 +76,53 @@ def test_a_missing_or_retyped_block_names_both_kinds():
     assert admission._byte_diff(profile(shorter), profile(old)) == (1, 'byte_role=a/- byte_block=0 byte_kinds=text/-')
 
 
-def test_a_native_reports_its_own_same_length_change_once():
+def test_a_native_reports_its_own_same_length_changes_a_few_times():
     g = gate()
     admission.observe_parity(g, body(rows('alpha', 'bravo', 'charlie')))
     admission.observe_parity(g, body(rows('alpha', 'brave', 'charlie', 'delta', 'echo')))
     admission.observe_parity(g, body(rows('alpha', 'bravx', 'charlie', 'delta', 'echo', 'fox', 'golf')))
-    assert g.parity_notes == ['self_bytes rows=5 byte_diff=1 byte_role=a byte_block=0 byte_kinds=text/text']
+    assert g.parity_notes == ['self_bytes rows=5 byte_diff=1 byte_role=a byte_block=0 byte_kinds=text/text',
+                              'self_bytes rows=7 byte_diff=1 byte_role=a byte_block=0 byte_kinds=text/text']
     assert_metadata_only(g.parity_notes[0], 'brave', 'bravo')
+    for n in range(5):  # a few per native, then quiet
+        admission.observe_parity(g, body(rows('alpha', f'brav{n}', 'charlie', 'delta', 'echo', 'fox', 'golf', 'h', 'i')))
+    assert len(g.parity_notes) == 3
 
 
 def test_a_count_change_still_wins_the_self_line():
     g = gate()
     admission.observe_parity(g, body(rows('alpha', 'bravo', 'charlie')))
     admission.observe_parity(g, body(rows('alpha', 'bravo!', 'charlie', 'delta', 'echo')))
-    assert g.parity_notes == ['self_diff row=1 role=a blocks=1/1 chars=5/6 rows=5']
+    assert g.parity_notes == ['self_diff row=1 role=a blocks=1/1 chars=5/6 rows=5 byte_diff=1 byte_role=a byte_block=0 byte_kinds=text/text']
+
+
+def test_an_earlier_same_length_edit_is_named_beside_a_later_count_change():
+    g = gate()
+    admission.observe_parity(g, body(rows('alpha', 'bravo', 'charlie')))
+    admission.observe_parity(g, body(rows('alphb', 'bravo', 'charlie!', 'delta', 'echo')))  # row 0 same length, row 2 longer
+    assert g.parity_notes == ['self_diff row=2 role=u blocks=1/1 chars=7/8 rows=5 byte_diff=0 byte_role=u byte_block=0 byte_kinds=text/text']
+
+
+def test_a_cache_control_key_inside_tool_input_is_data():
+    def call(value):
+        return [{'role': 'user', 'content': 'q'},
+                {'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 't', 'name': 'x', 'input': {'cache_control': value}}]}]
+    assert admission._byte_diff(profile(call('aaaa')), profile(call('bbbb')))[0] == 1
+    marked = call('aaaa')
+    marked[1]['content'][0]['cache_control'] = {'type': 'ephemeral'}
+    assert admission._byte_diff(profile(marked), profile(call('aaaa'))) is None
+
+
+def test_odd_blocks_keep_byte_coverage():
+    odd = [{'role': 'user', 'content': [{'type': {'not': 'hashable'}, 'text': 'x'}, {'type': 'text', 'text': 'a\ud800b'}]}]
+    [row] = admission.row_digests(odd)
+    assert [kind for kind, _ in row] == ['?', 'text']
+
+
+def test_a_role_only_change_is_a_byte_change():
+    a = [{'role': 'user', 'content': 'same'}, {'role': 'assistant', 'content': 'x'}]
+    b = [{'role': 'assistant', 'content': 'same'}, {'role': 'assistant', 'content': 'x'}]
+    assert admission._byte_diff(profile(b), profile(a)) == (0, 'byte_role=u/a byte_block=0 byte_kinds=str/str')
 
 
 def test_three_part_profiles_keep_the_count_diff_and_the_retired_prefix_mark_working():
