@@ -136,6 +136,7 @@ SESSION_POOL_SETTING = "session_pool"
 GUIDANCE_SETTING = "claude_guidance"
 EARLY_OPENER_SETTING = "early_opener"
 SETTLE_SETTING = "settle_answers"
+DROP_OPEN_TURN_THINKING_SETTING = "drop_open_turn_thinking"
 # Set on every child unless the user turns claude_code_telemetry on (#331).
 QUIET_TRAFFIC = {"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1", "DISABLE_TELEMETRY": "1", "DISABLE_ERROR_REPORTING": "1"}
 # Either one turns off the feature-flag fetch that the account's own picker needs (2.1.319: 13 rows
@@ -226,6 +227,12 @@ def early_opener_enabled():
 def settle_answers_enabled():
     """The ``settle_answers`` plugin setting, default off: one more harness note (off until measured)."""
     return _flag(SETTLE_SETTING, False)
+
+
+def drop_open_turn_thinking_enabled():
+    """The ``drop_open_turn_thinking`` plugin setting, default off: a session spawn whose history ends inside an
+    open turn replays that turn without its thinking blocks."""
+    return _flag(DROP_OPEN_TURN_THINKING_SETTING, False)
 
 
 def session_pool():

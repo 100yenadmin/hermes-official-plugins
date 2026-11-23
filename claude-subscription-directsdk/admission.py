@@ -896,6 +896,82 @@ def observe_parity(gate, payload):
         pass
 
 
+_COLD_NOTES = 2  # a native's first requests always get a cold note; then the first that opens a user turn
+
+
+def _is_user_turn(message):
+    """A user row that carries more than tool results: it opens a new user turn."""
+    if message.get('role') != 'user':
+        return False
+    content = message.get('content')
+    blocks = content if isinstance(content, list) else [content]
+    return any(not (isinstance(b, dict) and b.get('type') == 'tool_result') for b in blocks)
+
+
+def _thinking_blocks(messages):
+    count = 0
+    for message in messages:
+        content = message.get('content') if message.get('role') == 'assistant' else None
+        for block in content if isinstance(content, list) else ():
+            if isinstance(block, dict) and block.get('type') in ('thinking', 'redacted_thinking'):
+                count += 1
+    return count
+
+
+def _cold_note(body):
+    """Log fields of one forwarded request: cache marks (row.block:ttl), system block lengths, the thinking setting, and thinking blocks in the open turn, the turn it closed and the whole history. Counts,
+    positions and keyed digests only, never text."""
+    messages = body.get('messages') or []
+    marks = []
+    for i, block in enumerate(body.get('system') or []):
+        if isinstance(block, dict) and isinstance(block.get('cache_control'), dict):
+            marks.append(f"s{i}:{block['cache_control'].get('ttl', '5m')}")
+    for i, message in enumerate(messages):
+        content = message.get('content')
+        for j, block in enumerate(content if isinstance(content, list) else ()):
+            if isinstance(block, dict) and isinstance(block.get('cache_control'), dict):
+                marks.append(f"m{i}.{j}:{block['cache_control'].get('ttl', '5m')}")
+    system, digests = [], []
+    for block in body.get('system') or []:
+        raw = json.dumps(_unmarked(block) if isinstance(block, dict) else block, ensure_ascii=False,
+                         separators=(',', ':')).encode('utf-8', 'surrogatepass')
+        system.append(str(len(raw)))
+        digests.append(hmac.new(_ROW_KEY, raw, hashlib.sha256).digest()[:8])
+    turns = [i for i, m in enumerate(messages) if _is_user_turn(m)]
+    last = turns[-1] if turns else -1
+    opens = 'user' if messages and last == len(messages) - 1 else 'tool'
+    closed = messages[turns[-2] + 1:last] if opens == 'user' and len(turns) > 1 else []
+    thinking = body.get('thinking') if isinstance(body.get('thinking'), dict) else {}
+    return (opens, digests, f"opens={opens} rows={len(messages)} think={thinking.get('type', '-')}:{thinking.get('display', '-')}"
+            f" marks={','.join(marks) or '-'} sys={','.join(system) or '-'}"
+            f" open_think={_thinking_blocks(messages[last + 1:])} closed_think={_thinking_blocks(closed)}"
+            f" hist_think={_thinking_blocks(messages)}")
+
+
+def observe_cold(gate, payload):
+    """Session mode, log only: queue a cold note for a native's first two requests and for the first later request
+    that opens a new user turn, where a second large cache write after a mid-turn spawn lands. Any failure skips it."""
+    if not isinstance(getattr(gate, 'first_turn', None), dict):
+        return
+    try:
+        gate.cold_seen = getattr(gate, 'cold_seen', 0) + 1
+        n = gate.cold_seen
+        if n > _COLD_NOTES and getattr(gate, 'cold_turn_logged', False):
+            return
+        opens, digests, note = _cold_note(json.loads(payload))
+        previous, gate.cold_system = getattr(gate, 'cold_system', None), digests
+        if n > _COLD_NOTES and opens != 'user':
+            return
+        if n > 1 and opens == 'user':
+            gate.cold_turn_logged = True
+        # Which system blocks changed since this native's previous request (indexes only; the digests stay in memory).
+        changed = '-' if previous is None else ','.join(str(i) for i in range(max(len(digests), len(previous)))
+                                                        if i >= len(digests) or i >= len(previous) or digests[i] != previous[i]) or 'none'
+        gate.cold_notes = getattr(gate, 'cold_notes', []) + [f'n={n} {note} sys_changed={changed}']
+    except Exception:
+        pass
+
+
 class Capture:
     def __init__(self):
         self.message = None
@@ -1066,6 +1142,8 @@ class Admission:
         # Log-only row parity (session mode): the latest profile, a retired native's handed-over one, queued notes.
         self.parity = self.parity_prev = None
         self.parity_notes, self.parity_logged, self.parity_self_left = [], False, _SELF_NOTES
+        # Log-only cold notes (session mode): requests seen, queued notes, whether a later user turn was noted.
+        self.cold_seen, self.cold_notes, self.cold_turn_logged, self.cold_system = 0, [], False, None
         self.capture = Capture()
         self.error_body = b''
         self.prefix = '/admit/' + secrets.token_urlsafe(32)
@@ -1272,6 +1350,7 @@ class Handler(BaseHTTPRequestHandler):
                 payload = stream_tool_input(payload)
             payload = mark_retired_prefix(gate, payload)
             observe_parity(gate, payload)
+            observe_cold(gate, payload)
             target = gate.upstream
             conn, upstream_socket = self._connect_upstream()
             if conn is None:

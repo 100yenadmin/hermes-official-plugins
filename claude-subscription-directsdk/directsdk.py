@@ -36,7 +36,7 @@ try:
         ClaudeCodeLoggedOut, INSTALL_HINT, LOGGED_OUT_HINT, _resolve as resolve_claude, apply_config_dir, apply_profile_credential,
         apply_traffic_policy, check_extra_usage, drop_api_credentials, egress_env, max_concurrent, observe_rate_limit,
         reap_orphaned_refresh_lock, relay, resolve_upstream, Upstream)
-    from .directsdk_setup import session_mode_enabled, session_pool, claude_guidance_enabled, settle_answers_enabled, early_opener_enabled, QUIET_TRAFFIC
+    from .directsdk_setup import session_mode_enabled, session_pool, claude_guidance_enabled, settle_answers_enabled, early_opener_enabled, drop_open_turn_thinking_enabled, QUIET_TRAFFIC
 except ImportError:
     import concurrency
     from admission import Admission
@@ -46,7 +46,7 @@ except ImportError:
         ClaudeCodeLoggedOut, INSTALL_HINT, LOGGED_OUT_HINT, _resolve as resolve_claude, apply_config_dir, apply_profile_credential,
         apply_traffic_policy, check_extra_usage, drop_api_credentials, egress_env, max_concurrent, observe_rate_limit,
         reap_orphaned_refresh_lock, relay, resolve_upstream, Upstream)
-    from directsdk_setup import session_mode_enabled, session_pool, claude_guidance_enabled, settle_answers_enabled, early_opener_enabled, QUIET_TRAFFIC
+    from directsdk_setup import session_mode_enabled, session_pool, claude_guidance_enabled, settle_answers_enabled, early_opener_enabled, drop_open_turn_thinking_enabled, QUIET_TRAFFIC
 
 # Read at import and written next to each request's tools.json: Hermes imports this module from a frozen copy in
 # the temp directory, and a temp cleaner can remove that copy while the process runs (hermes-agent#156493).
@@ -563,6 +563,33 @@ def replay_history(frames, send, receive, names=None, session=False, exited=None
                     if ack.get('num_turns') != 0 or ack.get('is_error'):
                         raise RuntimeError('Native history replay not supported: expected zero-turn acknowledgment' + tail())
                     break
+
+
+def drop_open_turn_thinking(frames):
+    """Frames whose last turn is still open (they end in tool results after the turn's newest user message), with
+    the thinking blocks of that open turn's assistant frames removed; an assistant frame left empty is dropped.
+    Earlier, closed turns are untouched. Returns the frames and how many blocks were removed (0: frames as given).
+
+    Probable cause this answers (reproduced once at ~349k, 5 of 6 in eva's logs, API mechanism unproven): a native
+    spawned mid-turn whose open turn carries thinking, and whose first answer has none, misses the cache on the
+    next user turn and rewrites the whole history a second time."""
+    def opens_turn(frame):
+        return frame['type'] == 'user' and any(
+            not (isinstance(b, dict) and b.get('type') == 'tool_result') for b in frame['message']['content'])
+    start = next((i for i in range(len(frames) - 1, -1, -1) if opens_turn(frames[i])), None)
+    if start is None or start == len(frames) - 1:
+        return frames, 0
+    kept, dropped = frames[:start + 1], 0
+    for frame in frames[start + 1:]:
+        if frame['type'] == 'assistant':
+            content = frame['message']['content']
+            rest = [b for b in content if not (isinstance(b, dict) and b.get('type') in ('thinking', 'redacted_thinking'))]
+            dropped += len(content) - len(rest)
+            if not rest:
+                continue
+            frame = {**frame, 'message': {**frame['message'], 'content': rest}}
+        kept.append(frame)
+    return (kept, dropped) if dropped else (frames, 0)
 
 
 def tool_calls(blocks, hermes_names):
@@ -1549,7 +1576,8 @@ class Client:
                                                       for tool_id in order])
                     session.deliver(results)
             else:
-                self._session_spawn(session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved, upstream)
+                self._session_spawn(session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved, upstream,
+                                    cold=how == 'cold')
             emitted, native_error, native_error_code, final = '', None, None, None
             rate_limit = None
             handed, opener_attempted, stopped = None, False, False
@@ -1742,6 +1770,12 @@ class Client:
                     _session_log.info('session parity: session=%s %s', session.ident[:8] + ':' + str(session.pid), text)
             except Exception:
                 pass
+            try:  # the relay's queued cold notes (cache marks, system digests, thinking per turn), log only
+                notes, admission.cold_notes = getattr(admission, 'cold_notes', []), []
+                for text in notes:
+                    _session_log.info('session cold: session=%s %s', session.ident[:8] + ':' + str(session.pid), text)
+            except Exception:
+                pass
             if spawn and not launched:
                 launched = True
                 _session_launched()
@@ -1783,7 +1817,7 @@ class Client:
             with self._lock:
                 self._requests.discard(request)
 
-    def _session_spawn(self, session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved, upstream):
+    def _session_spawn(self, session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved, upstream, cold=False):
         # MCP replies enter a kept-alive native as text-block lists. Replaying
         # Hermes' scalar tool results must use that same cache-prefix shape.
         session_id = conversation_session_id(system, frames)
@@ -1792,6 +1826,11 @@ class Client:
             for block in frame['message']['content']:
                 if block.get('type') == 'tool_result' and isinstance(block.get('content'), str):
                     block['content'] = [{'type': 'text', 'text': block['content']}]
+        dropped = 0
+        # Cold spawns only (a compaction commit lands as one): a rebuild replays rows the retired native cached, and
+        # changing its open turn would cost the cache read the rebuild keeps today.
+        if cold and drop_open_turn_thinking_enabled():
+            frames, dropped = drop_open_turn_thinking(frames)
         root = Path(tempfile.mkdtemp(prefix='claude-directsdk-session-'))
         session.root, session.manifest = root, manifest
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.
@@ -1816,6 +1855,8 @@ class Client:
             request.process, request.admission = session.process, session.admission
         session.request = request
         session.pid = session.process.pid
+        if dropped:
+            _session_log.info('session open-turn thinking dropped: session=%s blocks=%d', session.ident[:8] + ':' + str(session.pid), dropped)
         threading.Thread(target=session.read, daemon=True).start()
         session.send({'type': 'control_request', 'request_id': 'hermes-init', 'request': {'subtype': 'initialize', 'hooks': None}})
         replay_history(frames, session.send, lambda: session.receive(request, timeout), names, session=True)
