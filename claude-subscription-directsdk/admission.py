@@ -953,7 +953,7 @@ def _cold_note(body):
     opens = 'user' if stable and last == stable - 1 else 'tool'
     closed = messages[turns[-2] + 1:last] if opens == 'user' and len(turns) > 1 else []
     thinking = body.get('thinking') if isinstance(body.get('thinking'), dict) else {}
-    return (opens, digests, f"opens={opens} rows={len(messages)} think={_word(thinking.get('type', '-')) if thinking else '-'}:{_word(thinking.get('display', '-')) if thinking.get('display') else '-'}"
+    return (opens, digests, f"opens={opens} rows={len(messages)} think={_word(thinking['type']) if 'type' in thinking else '-'}:{_word(thinking['display']) if 'display' in thinking else '-'}"
             f" marks={','.join(marks) or '-'} sys={','.join(system) or '-'}"
             f" open_think={_thinking_blocks(messages[last + 1:])} closed_think={_thinking_blocks(closed)}"
             f" hist_think={_thinking_blocks(messages)}")

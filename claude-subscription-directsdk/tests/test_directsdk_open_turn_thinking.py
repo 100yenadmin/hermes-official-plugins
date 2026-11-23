@@ -221,3 +221,9 @@ def test_free_text_wire_values_never_reach_the_note():
     g = gate()
     admission.observe_cold(g, payload([msg('user', text('q'))], thinking={'type': 'adaptive', 'display': 'synthetic_private_tag'}))
     assert 'think=adaptive:?' in g.cold_notes[0] and 'synthetic' not in g.cold_notes[0]
+
+
+def test_a_thinking_setting_without_type_logs_a_dash():
+    g = gate()
+    admission.observe_cold(g, payload([msg('user', text('q'))], thinking={'display': 'summarized'}))
+    assert 'think=-:summarized' in g.cold_notes[0]
