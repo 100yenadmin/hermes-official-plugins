@@ -570,7 +570,7 @@ def drop_open_turn_thinking(frames):
     the thinking blocks of that open turn's assistant frames removed; an assistant frame left empty is dropped.
     Earlier, closed turns are untouched. Returns the frames and how many blocks were removed (0: frames as given).
 
-    Probable cause this answers (reproduced once at ~349k, 5 of 6 in eva's logs, API mechanism unproven): a native
+    Probable cause this answers (reproduced once at ~349k; both same-native cases in eva's logs; API mechanism unproven): a native
     spawned mid-turn whose open turn carries thinking, and whose first answer has none, misses the cache on the
     next user turn and rewrites the whole history a second time."""
     def opens_turn(frame):
@@ -1773,7 +1773,8 @@ class Client:
             try:  # the relay's queued cold notes (cache marks, system digests, thinking per turn), log only
                 notes, admission.cold_notes = getattr(admission, 'cold_notes', []), []
                 for text in notes:
-                    _session_log.info('session cold: session=%s %s', session.ident[:8] + ':' + str(session.pid), text)
+                    _session_log.info('session cold: session=%s mode=%s dropped=%s %s', session.ident[:8] + ':' + str(session.pid), how,
+                                      getattr(session, 'open_turn_drop', '-'), text)
             except Exception:
                 pass
             if spawn and not launched:
@@ -1831,6 +1832,9 @@ class Client:
         # changing its open turn would cost the cache read the rebuild keeps today.
         if cold and drop_open_turn_thinking_enabled():
             frames, dropped = drop_open_turn_thinking(frames)
+            session.open_turn_drop = str(dropped)
+        else:
+            session.open_turn_drop = 'off'
         root = Path(tempfile.mkdtemp(prefix='claude-directsdk-session-'))
         session.root, session.manifest = root, manifest
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.

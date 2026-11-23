@@ -1,7 +1,7 @@
 """A cold session spawn whose history ends inside an open turn can replay that turn without its thinking blocks
 (setting ``drop_open_turn_thinking``, default off), and the relay queues `session cold:` notes for a native's first
 requests and for the first later request that opens a user turn. Probable cause the drop answers: reproduced once at
-~349k, 5 of 6 in eva's logs, API mechanism unproven."""
+~349k, both same-native cases in eva's logs, API mechanism unproven."""
 import json
 import re
 from types import SimpleNamespace
@@ -107,13 +107,15 @@ def _spawn(monkeypatch, *, cold, enabled):
         client._session_spawn(session, None, {'model': 'm'}, '{}', None, {}, [], frames, 1, {}, ['claude'], None, cold=cold)
     except _Stop:
         pass
+    seen['drop'] = session.open_turn_drop
     return seen
 
 
 def test_only_a_cold_spawn_with_the_setting_on_drops(monkeypatch):
-    assert _spawn(monkeypatch, cold=True, enabled=True)['out'][1] == 1
-    assert _spawn(monkeypatch, cold=False, enabled=True) == {}  # a rebuild keeps the rows its retired native cached
-    assert _spawn(monkeypatch, cold=True, enabled=False) == {}
+    on = _spawn(monkeypatch, cold=True, enabled=True)
+    assert on['out'][1] == 1 and on['drop'] == '1'  # the `session cold:` line's dropped= field
+    assert _spawn(monkeypatch, cold=False, enabled=True) == {'drop': 'off'}  # a rebuild keeps the rows its retired native cached
+    assert _spawn(monkeypatch, cold=True, enabled=False) == {'drop': 'off'}
 
 
 SAFE = re.compile(r'^[a-z_]+=[a-z0-9_\-/:.,]+$')
