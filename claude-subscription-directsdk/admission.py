@@ -1053,7 +1053,7 @@ class Admission:
         self.unrestored = None
         # Log-only row parity (session mode): the latest profile, a retired native's handed-over one, queued notes.
         self.parity = self.parity_prev = None
-        self.parity_notes, self.parity_logged = [], False
+        self.parity_notes, self.parity_logged, self.parity_bytes_logged = [], False, False
         self.capture = Capture()
         self.error_body = b''
         self.prefix = '/admit/' + secrets.token_urlsafe(32)
