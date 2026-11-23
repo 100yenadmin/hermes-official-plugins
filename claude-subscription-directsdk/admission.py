@@ -918,9 +918,12 @@ def _thinking_blocks(messages):
     return count
 
 
+_WIRE_WORDS = frozenset({'5m', '1h', 'adaptive', 'enabled', 'disabled', 'summarized', 'omitted', 'updates'})
+
+
 def _word(value):
-    """A wire enum (a TTL, a thinking type or display) as logged; anything else logs as `?`."""
-    return value if isinstance(value, str) and re.fullmatch(r'[a-z0-9_]{1,24}', value) else '?'
+    """A known wire enum (a TTL, a thinking type or display) as logged; anything else logs as `?`."""
+    return value if value in _WIRE_WORDS else '?'
 
 
 def _cold_note(body):
