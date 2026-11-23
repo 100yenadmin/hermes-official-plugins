@@ -2036,7 +2036,7 @@ def test_a_rebuild_logs_the_first_row_that_differs_from_the_retired_natives_last
     second = step(rig.client(), messages)
     assert second.usage.model_dump()['native_admission']['session'] == 'rebuild:suffix'
     (line,) = _parity_lines(caplog)
-    assert line.split(' ', 3)[3] == f'prev={old} first_diff=none role=- blocks=- chars=- rows=3/1', line
+    assert line.split(' ', 3)[3] == f'prev={old} first_diff=none role=- blocks=- chars=- rows=3/1 byte_diff=none', line
     # A history edit (rebuild:prefix): the edited tool-result row is the first that differs.
     old = directsdk._session_pool[0].pid
     messages += [as_history(second)]
@@ -2045,7 +2045,7 @@ def test_a_rebuild_logs_the_first_row_that_differs_from_the_retired_natives_last
     assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'rebuild:prefix'
     line = _parity_lines(caplog)[-1]
     # The retired native had replayed 3 rows (results and steer in one row); the edit shortened row 2's text.
-    assert line.split(' ', 3)[3] == f'prev={old} first_diff=2 role=u blocks=3/3 chars=216/129 rows=5/3', line
+    assert line.split(' ', 3)[3] == f'prev={old} first_diff=2 role=u blocks=3/3 chars=216/129 rows=5/3 byte_diff=2 byte_role=u byte_block=0 byte_kinds=tool_result/tool_result', line
 
 
 def test_a_failing_row_profile_leaves_the_request_and_the_step_intact(rig, caplog, monkeypatch):

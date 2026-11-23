@@ -2288,8 +2288,10 @@ def _divergence(consumed, keys, messages, expect, why):
         want = 'user' if expect == 'user' else f'tools:{len(expect or ())}'
         got = ','.join(sorted({str(m.get('role')) for m in tail})) or 'none'
         matched = 0 if expect == 'user' else len(ids & set(expect or ()))
+        # Tool results a native cannot take over its MCP answer (list content, such as a screenshot): replayed instead.
+        nonstr = sum(1 for m in tail if m.get('role') == 'tool' and not isinstance(m.get('content'), str))
         return (f'why=suffix at={n} consumed={n} request={len(keys)} expect={want} got={got}:{len(tail)} '
-                f'matched_ids={matched} hash=-/{_short_hash(keys[n] if n < len(keys) else None)}')
+                f'matched_ids={matched} hash=-/{_short_hash(keys[n] if n < len(keys) else None)} nonstr={nonstr}')
     i = next((j for j, (a, b) in enumerate(zip(consumed, keys)) if a != b), min(n, len(keys)))
     old, new = (consumed[i] if i < n else None), (keys[i] if i < len(keys) else None)
     if new is None:

@@ -4,6 +4,7 @@ import codecs
 import copy
 import gzip
 import hashlib
+import hmac
 import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
 import ipaddress
@@ -676,6 +677,58 @@ def restore_spawn_row(payload, memory):
 
 
 _ROLE_CODES = {'user': 'u', 'assistant': 'a', 'system': 's'}
+# Keyed row digests for the parity log: a per-process key that never leaves memory, and only indexes and block kinds
+# are ever logged, never a digest or any text.
+_ROW_KEY = secrets.token_bytes(32)
+_BLOCK_KINDS = frozenset(('text', 'thinking', 'redacted_thinking', 'tool_use', 'tool_result', 'image', 'document'))
+
+
+def _unmarked(value):
+    """A copy without any ``cache_control`` key at any depth: marks move between requests and are not row bytes."""
+    if isinstance(value, dict):
+        return {k: _unmarked(v) for k, v in value.items() if k != 'cache_control'}
+    if isinstance(value, list):
+        return [_unmarked(v) for v in value]
+    return value
+
+
+def _block_kind(block):
+    if isinstance(block, str):
+        return 'str'
+    kind = block.get('type') if isinstance(block, dict) else None
+    return kind if kind in _BLOCK_KINDS else '?'
+
+
+def row_digests(messages):
+    """Per message row, per block: (kind, keyed digest of the block without marks). Same-length edits that
+    ``row_profile`` cannot see change the digest."""
+    rows = []
+    for message in messages:
+        content = message.get('content')
+        blocks = content if isinstance(content, list) else [content]
+        rows.append(tuple((_block_kind(b), hmac.new(_ROW_KEY, json.dumps(_unmarked(b), sort_keys=True,
+                    ensure_ascii=False, separators=(',', ':')).encode('utf-8'), hashlib.sha256).digest()[:8])
+                    for b in blocks))
+    return rows
+
+
+def _byte_diff(new, old):
+    """The first row of ``old`` whose bytes ``new`` changed or lacks (trailing per-request system rows excluded), as
+    log fields; None when every row is byte-identical, or when either profile has no digests."""
+    if len(new) < 3 or len(old) < 3:
+        return None
+    (rows, stable, digests), (before, kept, earlier) = new[:3], old[:3]
+    i = next((k for k in range(kept) if k >= stable or digests[k] != earlier[k]), None)
+    if i is None:
+        return None
+    a = earlier[i]
+    b = digests[i] if i < stable else ()
+    k = next((j for j in range(max(len(a), len(b))) if j >= len(a) or j >= len(b) or a[j] != b[j]), 0)
+    kind_a = a[k][0] if k < len(a) else '-'
+    kind_b = b[k][0] if k < len(b) else '-'
+    role_a, role_b = before[i][0], (rows[i][0] if i < stable else '-')
+    role = role_a if role_a == role_b else f'{role_a}/{role_b}'
+    return i, f'byte_role={role} byte_block={k} byte_kinds={kind_a}/{kind_b}'
 
 
 def _payload_chars(block):
@@ -714,7 +767,7 @@ def row_profile(messages):
 def _parity_diff(new, old):
     """The first row of ``old`` that ``new`` changed or lacks, both without trailing per-request system rows, and
     its fields (``old/new``; a missing row reads ``-``); None when every row of ``old`` is unchanged."""
-    (rows, stable), (before, kept) = new, old
+    rows, stable, before, kept = new[0], new[1], old[0], old[1]
     i = next((k for k in range(kept) if k >= stable or rows[k] != before[k]), None)
     if i is None:
         return None
@@ -781,6 +834,15 @@ def _donor_mark(body, row, block):
     return after[0] if after else (before[-1] if before else None)
 
 
+def _byte_field(byte):
+    """` byte_diff=<row> byte_role= byte_block= byte_kinds=`, `none`, or `-` when no digests were available."""
+    if byte is False:
+        return ' byte_diff=-'
+    if byte is None:
+        return ' byte_diff=none'
+    return f' byte_diff={byte[0]} {byte[1]}'
+
+
 def observe_parity(gate, payload):
     """Session mode, log only: profile the rows of each forwarded request (lengths, counts and role codes, never
     text) and queue notes for the session thread, which logs them at step end; nothing is logged here. Notes once
@@ -790,7 +852,12 @@ def observe_parity(gate, payload):
         return
     try:
         handed, gate.parity_prev = gate.parity_prev, None  # consumed by the first attempt, whatever happens next
-        profile = row_profile(json.loads(payload)['messages'])
+        messages = json.loads(payload)['messages']
+        profile = row_profile(messages)
+        try:
+            profile = profile + (row_digests(messages),)
+        except Exception:
+            pass  # counts only: the byte fields read `-`
         previous, gate.parity = gate.parity, profile
         if gate.cancelled:
             gate.parity = None  # closed meanwhile: keep nothing
@@ -799,13 +866,19 @@ def observe_parity(gate, payload):
         if handed is not None:
             pid, old = handed
             diff = _parity_diff(profile, old)
+            byte = _byte_diff(profile, old) if len(profile) > 2 and len(old) > 2 else False
             notes.append(f'prev={pid} first_diff=' + (f'{diff[0]} {diff[1]}' if diff else 'none role=- blocks=- chars=-')
-                         + f' rows={profile[1]}/{old[1]}')
+                         + f' rows={profile[1]}/{old[1]}' + _byte_field(byte))
         if previous is not None and not gate.parity_logged:
             diff = _parity_diff(profile, previous)
             if diff:
                 gate.parity_logged = True
                 notes.append(f'self_diff row={diff[0]} {diff[1]} rows={profile[1]}')
+            elif not getattr(gate, 'parity_bytes_logged', False) and len(profile) > 2 and len(previous) > 2:
+                byte = _byte_diff(profile, previous)
+                if byte:  # a same-length change the counts missed, once per native
+                    gate.parity_bytes_logged = True
+                    notes.append(f'self_bytes rows={profile[1]}' + _byte_field(byte))
         gate.parity_notes = gate.parity_notes + notes
     except Exception:
         pass
