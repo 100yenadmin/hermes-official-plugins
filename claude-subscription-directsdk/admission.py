@@ -965,6 +965,13 @@ def observe_cold(gate, payload):
     if not isinstance(getattr(gate, 'first_turn', None), dict):
         return
     try:
+        if getattr(gate, 'cold_turn_logged', False) and getattr(gate, 'cold_seen', 0) >= _COLD_NOTES:
+            return  # every note this native gets is taken: no more hashing or parsing
+        # A request repeated byte for byte (native's retry after an auth refresh, say) is not a new request.
+        sent = hashlib.sha256(payload).digest()
+        if sent == getattr(gate, 'cold_last', None):
+            return
+        gate.cold_last = sent
         gate.cold_seen = getattr(gate, 'cold_seen', 0) + 1
         n = gate.cold_seen
         if n > _COLD_NOTES and getattr(gate, 'cold_turn_logged', False):
@@ -1154,7 +1161,7 @@ class Admission:
         self.parity = self.parity_prev = None
         self.parity_notes, self.parity_logged, self.parity_self_left = [], False, _SELF_NOTES
         # Log-only cold notes (session mode): requests seen, queued notes, whether a later user turn was noted.
-        self.cold_seen, self.cold_notes, self.cold_turn_logged, self.cold_system = 0, [], False, None
+        self.cold_seen, self.cold_notes, self.cold_turn_logged, self.cold_system, self.cold_last = 0, [], False, None, None
         self.capture = Capture()
         self.error_body = b''
         self.prefix = '/admit/' + secrets.token_urlsafe(32)

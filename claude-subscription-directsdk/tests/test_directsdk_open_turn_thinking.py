@@ -227,3 +227,16 @@ def test_a_thinking_setting_without_type_logs_a_dash():
     g = gate()
     admission.observe_cold(g, payload([msg('user', text('q'))], thinking={'display': 'summarized'}))
     assert 'think=-:summarized' in g.cold_notes[0]
+
+
+def test_a_retried_request_is_not_counted_again():
+    g = gate()
+    first = payload([msg('user', text('q1'))])
+    admission.observe_cold(g, first)
+    admission.observe_cold(g, first)  # native retries the same request after refreshing its login
+    admission.observe_cold(g, payload([msg('user', text('q1')), msg('assistant', call('t1')),
+                                       msg('user', {'type': 'tool_result', 'tool_use_id': 't1', 'content': 'r'})]))
+    admission.observe_cold(g, payload([msg('user', text('q1')), msg('assistant', call('t1')),
+                                       msg('user', {'type': 'tool_result', 'tool_use_id': 't1', 'content': 'r'}),
+                                       msg('assistant', text('a')), msg('user', text('q2'))]))
+    assert [n.split()[0] for n in g.cold_notes] == ['n=1', 'n=2', 'n=3'] and 'opens=user' in g.cold_notes[2]
