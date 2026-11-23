@@ -306,6 +306,7 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(directsdk, '_session_failures', 0)
     monkeypatch.setattr(directsdk, '_session_off', False)
     monkeypatch.setattr(directsdk, '_session_noted', set())
+    monkeypatch.setattr(directsdk, '_LAST_PROFILE', __import__('collections').OrderedDict())
     upstream = Upstream()
     native = tmp_path / 'native.py'
     native.write_text(NATIVE)
@@ -2290,3 +2291,25 @@ def test_effort_cover_never_lowers_the_effort_a_step_asked_for():
     assert not covers('low', 'high') and not covers('high', 'xhigh') and not covers('medium', 'max')
     # Unknown levels only match themselves.
     assert covers('turbo', 'turbo') and not covers('turbo', 'low') and not covers('high', 'turbo')
+
+
+def test_a_cold_native_logs_the_first_row_it_no_longer_repeats_from_its_conversations_last_request(rig, caplog):
+    """Log only: a cold spawn in a conversation this process already served names the first row that differs from
+    that conversation's last request (`cold_prev=`), with that row's block kinds and characters on both sides; a new
+    conversation has none, and the line adds no cache mark."""
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    messages = [{'role': 'user', 'content': 'SECRETTEXT hello'}]
+    for text in ('SECRETTEXT again', 'SECRETTEXT third'):
+        messages += [as_history(step(rig.client(), messages)), {'role': 'user', 'content': text}]
+    old = directsdk._session_pool[0].pid
+    directsdk._session_discard(directsdk._session_pool[0], 'test', 'test')  # e.g. a killed native, retried
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'cold'
+    (line,) = [line for line in _parity_lines(caplog) if 'cold_prev=' in line]
+    # The fake native keeps its first answer's text empty in its own transcript: that row is the first that differs.
+    assert line.split(' ', 3)[3] == (f'cold_prev={old} first_diff=1 role=a blocks=1/1 chars=0/21 rows=5/3 '
+                                     'byte_diff=1 byte_role=a byte_block=0 byte_kinds=text/text '
+                                     'row_kinds=text1/text1 row_chars=0/21'), line
+    # Another conversation (a new first row) spawns cold with no line.
+    other = [{'role': 'user', 'content': 'SECRETTEXT elsewhere'}]
+    assert step(rig.client(), other).usage.model_dump()['native_admission']['session'] == 'cold'
+    assert len([line for line in _parity_lines(caplog) if 'cold_prev=' in line]) == 1

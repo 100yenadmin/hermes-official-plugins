@@ -852,15 +852,37 @@ def _byte_field(byte):
     return f' byte_diff={byte[0]} {byte[1]}'
 
 
+def _row_kinds(profile, row):
+    """A row's block kinds with counts in first-seen order (`thinking1.text1.tool_use3`), `-` when absent or unknown."""
+    if len(profile) < 3 or row >= profile[1]:
+        return '-'
+    counts = {}
+    for kind, _ in profile[2][row]:
+        counts[kind] = counts.get(kind, 0) + 1
+    return '.'.join(f'{k}{n}' for k, n in counts.items()) or '-'
+
+
+def _row_fields(new, old, row):
+    """` row_kinds=<old>/<new> row_chars=<old>/<new>` for the first differing row, `` when every row matches."""
+    if row is None:
+        return ''
+    chars = lambda p: str(p[0][row][2]) if row < p[1] else '-'
+    return f' row_kinds={_row_kinds(old, row)}/{_row_kinds(new, row)} row_chars={chars(old)}/{chars(new)}'
+
+
 def observe_parity(gate, payload):
     """Session mode, log only: profile the rows of each forwarded request (lengths, counts and role codes, never
     text) and queue notes for the session thread, which logs them at step end; nothing is logged here. Notes once
     per native when a row an earlier request sent has changed, and on a rebuilt native's first request where its
-    rows first differ from the retired native's last request. Any failure skips the note."""
+    rows first differ from the retired native's last request; and on a cold native's first request, where its rows
+    first differ from the last request this process sent for the same conversation (``gate.cold_prev``; it never adds
+    a cache mark), with that row's block kinds and characters on both sides (``row_kinds=``, ``row_chars=``). Any
+    failure skips the note."""
     if not isinstance(getattr(gate, 'first_turn', None), dict):
         return
     try:
         handed, gate.parity_prev = gate.parity_prev, None  # consumed by the first attempt, whatever happens next
+        cold, gate.cold_prev = getattr(gate, 'cold_prev', None), None
         messages = json.loads(payload)['messages']
         profile = row_profile(messages)
         try:
@@ -878,6 +900,13 @@ def observe_parity(gate, payload):
             byte = _byte_diff(profile, old) if len(profile) > 2 and len(old) > 2 else False
             notes.append(f'prev={pid} first_diff=' + (f'{diff[0]} {diff[1]}' if diff else 'none role=- blocks=- chars=-')
                          + f' rows={profile[1]}/{old[1]}' + _byte_field(byte))
+        if cold is not None:
+            pid, old = cold
+            diff = _parity_diff(profile, old)
+            byte = _byte_diff(profile, old) if len(profile) > 2 and len(old) > 2 else False
+            row = byte[0] if byte else (diff[0] if diff else None)
+            notes.append(f'cold_prev={pid} first_diff=' + (f'{diff[0]} {diff[1]}' if diff else 'none role=- blocks=- chars=-')
+                         + f' rows={profile[1]}/{old[1]}' + _byte_field(byte) + _row_fields(profile, old, row))
         if previous is not None:
             counts = _parity_diff(profile, previous)
             byte = _byte_diff(profile, previous) if len(profile) > 2 and len(previous) > 2 else False
@@ -1158,7 +1187,7 @@ class Admission:
         self.failure = None
         self.unrestored = None
         # Log-only row parity (session mode): the latest profile, a retired native's handed-over one, queued notes.
-        self.parity = self.parity_prev = None
+        self.parity = self.parity_prev = self.cold_prev = None
         self.parity_notes, self.parity_logged, self.parity_self_left = [], False, _SELF_NOTES
         # Log-only cold notes (session mode): requests seen, queued notes, whether a later user turn was noted.
         self.cold_seen, self.cold_notes, self.cold_turn_logged, self.cold_system, self.cold_last = 0, [], False, None, None
@@ -1243,7 +1272,7 @@ class Admission:
             if self.first_turn.get('spawn_row'):
                 self.first_turn['spawn_row'] = None  # the remembered frame may hold base64 images
         self.abort()
-        self.parity = self.parity_prev = None
+        self.parity = self.parity_prev = self.cold_prev = None
         try:
             self._waker.send(b'\0')
         except OSError:

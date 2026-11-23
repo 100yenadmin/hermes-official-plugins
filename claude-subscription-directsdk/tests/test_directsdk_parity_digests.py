@@ -167,3 +167,48 @@ def test_a_later_mixed_change_still_names_its_earlier_same_length_edit():
     assert g.parity_notes[1:] == ['self_bytes rows=7 byte_diff=0 byte_role=u byte_block=0 byte_kinds=text/text']
     admission.observe_parity(g, body(rows('alphb', 'bravo', 'charlie!!!', 'delta', 'echo', 'fox', 'golf', 'h', 'i')))
     assert len(g.parity_notes) == 2  # a count change alone after the latch stays quiet
+
+
+def test_a_cold_prior_is_compared_once_and_names_the_rows_kinds_and_lengths():
+    old = rows('alpha', 'bravo')
+    new = rows('alpha', 'BRAVO!', 'charlie')
+    g = gate()
+    g.cold_prev = (9, profile(old))
+    admission.observe_parity(g, body(new))
+    [note] = g.parity_notes
+    assert note == ('cold_prev=9 first_diff=1 role=a blocks=1/1 chars=5/6 rows=3/2 byte_diff=1 byte_role=a byte_block=0 '
+                    'byte_kinds=text/text row_kinds=text1/text1 row_chars=5/6'), note
+    assert g.cold_prev is None
+    assert_metadata_only(note, 'BRAVO', 'bravo')
+    admission.observe_parity(g, body(new + rows('delta')))
+    assert not any(n.startswith('cold_prev=') for n in g.parity_notes[1:])
+
+
+def test_a_cold_prior_names_an_attachment_row_by_its_kinds():
+    old = [{'role': 'user', 'content': [{'type': 'text', 'text': 'note'},
+                                        {'type': 'document', 'source': {'type': 'base64', 'data': 'QUJD'}}]}]
+    new = [{'role': 'user', 'content': [{'type': 'text', 'text': 'note'}]}, *rows('x', 'y')[1:]]
+    g = gate()
+    g.cold_prev = (9, profile(old))
+    admission.observe_parity(g, body(new))
+    [note] = g.parity_notes
+    assert ' row_kinds=text1.document1/text1 row_chars=8/4' in note, note
+    assert_metadata_only(note, 'note', 'QUJD')
+
+
+def test_an_unchanged_cold_prior_logs_none_and_no_row_fields():
+    old = rows('alpha', 'bravo')
+    g = gate()
+    g.cold_prev = (9, profile(old))
+    admission.observe_parity(g, body(old + rows('x', 'y')[1:]))
+    [note] = g.parity_notes
+    assert note.startswith('cold_prev=9 first_diff=none ') and note.endswith('byte_diff=none') and 'row_' not in note
+
+
+def test_a_cold_prior_never_adds_a_cache_mark():
+    old = rows('alpha', 'bravo')
+    new = rows('alpha', 'bravo', *('x%d' % i for i in range(30)))
+    new[-1]['content'][-1]['cache_control'] = {'type': 'ephemeral'}
+    g = SimpleNamespace(first_turn={}, parity_prev=None, cold_prev=(9, profile(old)))
+    payload = body(new)
+    assert admission.mark_retired_prefix(g, payload) is payload
