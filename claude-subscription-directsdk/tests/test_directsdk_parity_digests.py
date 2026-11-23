@@ -119,6 +119,12 @@ def test_odd_blocks_keep_byte_coverage():
     assert [kind for kind, _ in row] == ['?', 'text']
 
 
+def test_a_key_order_change_is_a_byte_change():
+    a = [{'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 't', 'name': 'x', 'input': {'a': 1, 'b': 2}}]}]
+    b = [{'role': 'assistant', 'content': [{'type': 'tool_use', 'id': 't', 'name': 'x', 'input': {'b': 2, 'a': 1}}]}]
+    assert admission._byte_diff(profile(b), profile(a))[0] == 0
+
+
 def test_a_role_only_change_is_a_byte_change():
     a = [{'role': 'user', 'content': 'same'}, {'role': 'assistant', 'content': 'x'}]
     b = [{'role': 'assistant', 'content': 'same'}, {'role': 'assistant', 'content': 'x'}]

@@ -709,7 +709,7 @@ def row_digests(messages):
     for message in messages:
         content = message.get('content')
         blocks = content if isinstance(content, list) else [content]
-        rows.append(tuple((_block_kind(b), hmac.new(_ROW_KEY, json.dumps(_unmarked(b), sort_keys=True,
+        rows.append(tuple((_block_kind(b), hmac.new(_ROW_KEY, json.dumps(_unmarked(b),
                     ensure_ascii=False, separators=(',', ':')).encode('utf-8', 'surrogatepass'), hashlib.sha256).digest()[:8])
                     for b in blocks))
     return rows
