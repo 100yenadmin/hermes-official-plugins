@@ -872,9 +872,10 @@ def _row_fields(new, old, row):
 
 def remember_sent(gate):
     """Log only: once a request has gone upstream (``conn.request`` returned), record its profile as its conversation's
-    latest for a later cold spawn's ``cold_prev=`` line; a request that never left (connection refused) is not recorded."""
+    latest for a later cold spawn's ``cold_prev=`` line; a request that never left (connection refused) is not recorded.
+    A cancel landing after the send still records it (it went upstream); a closed relay has no callback."""
     remember, profile = getattr(gate, 'remember', None), getattr(gate, 'parity', None)
-    if remember is None or not profile or getattr(gate, 'cancelled', False):
+    if remember is None or not profile:
         return
     try:
         remember(profile)

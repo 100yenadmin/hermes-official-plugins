@@ -212,3 +212,12 @@ def test_a_cold_prior_never_adds_a_cache_mark():
     g = SimpleNamespace(first_turn={}, parity_prev=None, cold_prev=(9, profile(old)))
     payload = body(new)
     assert admission.mark_retired_prefix(g, payload) is payload
+
+
+def test_a_sent_request_is_recorded_even_when_a_cancel_lands_after_the_send():
+    seen = []
+    g = SimpleNamespace(remember=seen.append, parity=('rows', 1), cancelled=True)
+    admission.remember_sent(g)
+    assert seen == [('rows', 1)]
+    admission.remember_sent(SimpleNamespace(remember=None, parity=('rows', 1)))  # closed relay: nothing
+    assert seen == [('rows', 1)]
