@@ -918,6 +918,11 @@ def _thinking_blocks(messages):
     return count
 
 
+def _word(value):
+    """A wire enum (a TTL, a thinking type or display) as logged; anything else logs as `?`."""
+    return value if isinstance(value, str) and re.fullmatch(r'[a-z0-9_]{1,24}', value) else '?'
+
+
 def _cold_note(body):
     """Log fields of one forwarded request: cache marks (row.block:ttl), system block lengths, the thinking setting, and thinking blocks in the open turn, the turn it closed and the whole history. Counts,
     positions and keyed digests only, never text."""
@@ -925,12 +930,12 @@ def _cold_note(body):
     marks = []
     for i, block in enumerate(body.get('system') or []):
         if isinstance(block, dict) and isinstance(block.get('cache_control'), dict):
-            marks.append(f"s{i}:{block['cache_control'].get('ttl', '5m')}")
+            marks.append(f"s{i}:{_word(block['cache_control'].get('ttl', '5m'))}")
     for i, message in enumerate(messages):
         content = message.get('content')
         for j, block in enumerate(content if isinstance(content, list) else ()):
             if isinstance(block, dict) and isinstance(block.get('cache_control'), dict):
-                marks.append(f"m{i}.{j}:{block['cache_control'].get('ttl', '5m')}")
+                marks.append(f"m{i}.{j}:{_word(block['cache_control'].get('ttl', '5m'))}")
     system, digests = [], []
     for block in body.get('system') or []:
         raw = json.dumps(_unmarked(block) if isinstance(block, dict) else block, ensure_ascii=False,
@@ -939,10 +944,13 @@ def _cold_note(body):
         digests.append(hmac.new(_ROW_KEY, raw, hashlib.sha256).digest()[:8])
     turns = [i for i, m in enumerate(messages) if _is_user_turn(m)]
     last = turns[-1] if turns else -1
-    opens = 'user' if messages and last == len(messages) - 1 else 'tool'
+    stable = len(messages)
+    while stable and messages[stable - 1].get('role') == 'system':
+        stable -= 1  # trailing per-request system rows (native's reminders) follow the turn's own row
+    opens = 'user' if stable and last == stable - 1 else 'tool'
     closed = messages[turns[-2] + 1:last] if opens == 'user' and len(turns) > 1 else []
     thinking = body.get('thinking') if isinstance(body.get('thinking'), dict) else {}
-    return (opens, digests, f"opens={opens} rows={len(messages)} think={thinking.get('type', '-')}:{thinking.get('display', '-')}"
+    return (opens, digests, f"opens={opens} rows={len(messages)} think={_word(thinking.get('type', '-')) if thinking else '-'}:{_word(thinking.get('display', '-')) if thinking.get('display') else '-'}"
             f" marks={','.join(marks) or '-'} sys={','.join(system) or '-'}"
             f" open_think={_thinking_blocks(messages[last + 1:])} closed_think={_thinking_blocks(closed)}"
             f" hist_think={_thinking_blocks(messages)}")

@@ -565,22 +565,34 @@ def replay_history(frames, send, receive, names=None, session=False, exited=None
                     break
 
 
-def drop_open_turn_thinking(frames):
+def drop_open_turn_thinking(frames, turn=None):
     """Frames whose last turn is still open (they end in tool results after the turn's newest user message), with
     the thinking blocks of that open turn's assistant frames removed; an assistant frame left empty is dropped.
-    Earlier, closed turns are untouched. Returns the frames and how many blocks were removed (0: frames as given).
+    Earlier, closed turns are untouched. With ``turn`` (the record an earlier drop returned), the same frames are
+    stripped again on a rebuild whose replay still starts with exactly the frames that drop saw, so the rebuilt
+    native's rows match the retired native's; later frames stay as they are. Returns the frames, how many blocks
+    were removed, and the record (start row, end row, digest of the unstripped frames) when any were.
 
-    Probable cause this answers (reproduced once at ~349k; both same-native cases in eva's logs; API mechanism unproven): a native
-    spawned mid-turn whose open turn carries thinking, and whose first answer has none, misses the cache on the
-    next user turn and rewrites the whole history a second time."""
+    Probable cause this answers (reproduced once at ~349k; both same-native cases in eva's logs; API mechanism
+    unproven): a native spawned mid-turn whose open turn carries thinking, and whose first answer has none, misses
+    the cache on the next user turn and rewrites the whole history a second time."""
     def opens_turn(frame):
         return frame['type'] == 'user' and any(
             not (isinstance(b, dict) and b.get('type') == 'tool_result') for b in frame['message']['content'])
-    start = next((i for i in range(len(frames) - 1, -1, -1) if opens_turn(frames[i])), None)
-    if start is None or start == len(frames) - 1:
-        return frames, 0
+
+    def digest(rows):
+        return hashlib.sha256(json.dumps(rows, sort_keys=True, ensure_ascii=False).encode('utf-8', 'surrogatepass')).hexdigest()
+    if turn is None:
+        start = next((i for i in range(len(frames) - 1, -1, -1) if opens_turn(frames[i])), None)
+        if start is None or start == len(frames) - 1:
+            return frames, 0, None
+        end = len(frames)
+    else:
+        start, end, seen = turn
+        if len(frames) < end or digest(frames[:end]) != seen:
+            return frames, 0, None
     kept, dropped = frames[:start + 1], 0
-    for frame in frames[start + 1:]:
+    for frame in frames[start + 1:end]:
         if frame['type'] == 'assistant':
             content = frame['message']['content']
             rest = [b for b in content if not (isinstance(b, dict) and b.get('type') in ('thinking', 'redacted_thinking'))]
@@ -589,7 +601,9 @@ def drop_open_turn_thinking(frames):
                 continue
             frame = {**frame, 'message': {**frame['message'], 'content': rest}}
         kept.append(frame)
-    return (kept, dropped) if dropped else (frames, 0)
+    if not dropped:
+        return frames, 0, None
+    return kept + frames[end:], dropped, (start, end, digest(frames[:end]))
 
 
 def tool_calls(blocks, hermes_names):
@@ -1544,10 +1558,12 @@ class Client:
         effort = _step_effort(body)
         session, how = _session_checkout(ident, keys, messages, first, login, effort)
         handed, _parity_handover.prev = getattr(_parity_handover, 'prev', None), None  # never outlives this step
+        drop_handed, _parity_handover.drop = getattr(_parity_handover, 'drop', None), None
         if session is None:
             session = NativeSession(ident, first, login)
             session.effort = effort
             session.parity_prev = handed
+            session.spawn_how, session.drop_handed = how, drop_handed
             if not _session_admit(session):
                 # Every session slot is busy: this step takes the per-call path instead of exceeding the cap.
                 yield from self._run(request, kwargs, body, manifest, names, system, frames)
@@ -1576,8 +1592,7 @@ class Client:
                                                       for tool_id in order])
                     session.deliver(results)
             else:
-                self._session_spawn(session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved, upstream,
-                                    cold=how == 'cold')
+                self._session_spawn(session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved, upstream)
             emitted, native_error, native_error_code, final = '', None, None, None
             rate_limit = None
             handed, opener_attempted, stopped = None, False, False
@@ -1818,7 +1833,7 @@ class Client:
             with self._lock:
                 self._requests.discard(request)
 
-    def _session_spawn(self, session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved, upstream, cold=False):
+    def _session_spawn(self, session, request, kwargs, body, manifest, names, system, frames, timeout, env, resolved, upstream):
         # MCP replies enter a kept-alive native as text-block lists. Replaying
         # Hermes' scalar tool results must use that same cache-prefix shape.
         session_id = conversation_session_id(system, frames)
@@ -1827,14 +1842,17 @@ class Client:
             for block in frame['message']['content']:
                 if block.get('type') == 'tool_result' and isinstance(block.get('content'), str):
                     block['content'] = [{'type': 'text', 'text': block['content']}]
-        dropped = 0
-        # Cold spawns only (a compaction commit lands as one): a rebuild replays rows the retired native cached, and
-        # changing its open turn would cost the cache read the rebuild keeps today.
-        if cold and drop_open_turn_thinking_enabled():
-            frames, dropped = drop_open_turn_thinking(frames)
-            session.open_turn_drop = str(dropped)
-        else:
-            session.open_turn_drop = 'off'
+        # Cold spawns only (a compaction commit lands as one): a rebuild replays rows the retired native cached, so it
+        # drops only what that native dropped (handed over by the checkout), keeping its rows and the cache read.
+        dropped, session.drop_turn, session.open_turn_drop = 0, None, 'off'
+        if drop_open_turn_thinking_enabled():
+            handed = getattr(session, 'drop_handed', None)
+            if getattr(session, 'spawn_how', None) == 'cold':
+                frames, dropped, session.drop_turn = drop_open_turn_thinking(frames)
+                session.open_turn_drop = str(dropped)
+            elif handed is not None:
+                frames, dropped, session.drop_turn = drop_open_turn_thinking(frames, handed)
+                session.open_turn_drop = f'again:{dropped}'
         root = Path(tempfile.mkdtemp(prefix='claude-directsdk-session-'))
         session.root, session.manifest = root, manifest
         # A parked hermes tool call lasts as long as Hermes runs the tool; Hermes already bounds its output.
@@ -1860,7 +1878,8 @@ class Client:
         session.request = request
         session.pid = session.process.pid
         if dropped:
-            _session_log.info('session open-turn thinking dropped: session=%s blocks=%d', session.ident[:8] + ':' + str(session.pid), dropped)
+            _session_log.info('session open-turn thinking dropped: session=%s blocks=%d how=%s', session.ident[:8] + ':' + str(session.pid), dropped,
+                              getattr(session, 'spawn_how', None))
         threading.Thread(target=session.read, daemon=True).start()
         session.send({'type': 'control_request', 'request_id': 'hermes-init', 'request': {'subtype': 'initialize', 'hooks': None}})
         replay_history(frames, session.send, lambda: session.receive(request, timeout), names, session=True)
@@ -2378,7 +2397,7 @@ def _session_checkout(ident, keys, messages, first, login=None, effort=None):
     system prompt, tools or generation fields is a fork, such as a review on another model: both stay,
     and the idle limit and pool LRU reclaim whichever goes unused."""
     now, stale, matches, how, oversize, diverged = time.monotonic(), [], [], 'cold', None, []
-    _parity_handover.prev, retired = None, []  # log only: the sessions this checkout retires for divergence
+    _parity_handover.prev, _parity_handover.drop, retired = None, None, []  # the sessions this checkout retires for divergence
     with _session_lock:
         for session in list(_session_pool):
             if session.busy:
@@ -2424,6 +2443,8 @@ def _session_checkout(ident, keys, messages, first, login=None, effort=None):
                else retired[0] if how in ('rebuild:prefix', 'rebuild:suffix', 'rebuild:ident', 'rebuild:effort') and len(retired) == 1 else None)
         if old is not None and old.admission is not None and old.admission.parity:
             _parity_handover.prev = (old.pid, old.admission.parity)
+        # The open-turn thinking the retired native's spawn dropped, so the rebuild drops the same (not log only).
+        _parity_handover.drop = getattr(old, 'drop_turn', None) if old is not None else None
     except Exception:
         pass
     for session, consumed, expect, why in diverged:

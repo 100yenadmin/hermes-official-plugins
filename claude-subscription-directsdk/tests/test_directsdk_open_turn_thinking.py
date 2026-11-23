@@ -10,6 +10,8 @@ import admission
 import directsdk
 import directsdk_setup
 
+REAL_DROP = directsdk.drop_open_turn_thinking
+
 
 def user(text):
     return {'type': 'user', 'message': {'role': 'user', 'content': [{'type': 'text', 'text': text}]}}
@@ -42,8 +44,8 @@ def test_an_open_turn_loses_its_thinking_and_closed_turns_keep_theirs():
               assistant(THINK, text('looking'), call('t1'), mid='a1'), results('t1'),
               assistant(REDACTED, call('t2'), mid='a2'), results('t2')]
     before = json.dumps(frames)
-    out, dropped = directsdk.drop_open_turn_thinking(frames)
-    assert dropped == 2
+    out, dropped, turn = directsdk.drop_open_turn_thinking(frames)
+    assert dropped == 2 and turn[:2] == (2, 7)
     assert json.dumps(frames) == before  # the caller's frames are not mutated
     assert out[1] == closed  # a closed turn is untouched, signature and all
     assert [b['type'] for b in out[3]['message']['content']] == ['text', 'tool_use']
@@ -55,7 +57,7 @@ def test_interleaved_thinking_only_frames_are_dropped_whole():
     # stream-json carries one block per assistant message: a thinking-only frame between tool rounds goes away
     frames = [user('q'), assistant(THINK, mid='a'), assistant(call('t1'), mid='a'), results('t1'),
               assistant({**THINK, 'signature': 'sig-b'}, mid='b'), assistant(call('t2'), mid='b'), results('t2')]
-    out, dropped = directsdk.drop_open_turn_thinking(frames)
+    out, dropped, _ = directsdk.drop_open_turn_thinking(frames)
     assert dropped == 2
     assert [f['type'] for f in out] == ['user', 'assistant', 'user', 'assistant', 'user']
     assert all(b['type'] != 'thinking' for f in out for b in f['message']['content'])
@@ -63,19 +65,19 @@ def test_interleaved_thinking_only_frames_are_dropped_whole():
 
 def test_a_history_ending_at_a_user_turn_or_without_thinking_is_returned_as_given():
     at_user = [user('q1'), assistant(THINK, text('a')), user('q2')]
-    assert directsdk.drop_open_turn_thinking(at_user) == (at_user, 0)
+    assert directsdk.drop_open_turn_thinking(at_user) == (at_user, 0, None)
     plain = [user('q'), assistant(text('x'), call('t1')), results('t1')]
-    out, dropped = directsdk.drop_open_turn_thinking(plain)
-    assert dropped == 0 and out is plain
+    out, dropped, turn = directsdk.drop_open_turn_thinking(plain)
+    assert dropped == 0 and out is plain and turn is None
     only_results = [results('t0')]
-    assert directsdk.drop_open_turn_thinking(only_results) == (only_results, 0)
+    assert directsdk.drop_open_turn_thinking(only_results) == (only_results, 0, None)
 
 
 def test_a_user_row_with_text_beside_tool_results_opens_the_turn():
     mixed = {'type': 'user', 'message': {'role': 'user', 'content': [
         {'type': 'tool_result', 'tool_use_id': 't0', 'content': 'r'}, {'type': 'text', 'text': 'and also'}]}}
     frames = [user('q'), assistant(THINK, call('t0')), mixed, assistant(THINK, call('t1')), results('t1')]
-    out, dropped = directsdk.drop_open_turn_thinking(frames)
+    out, dropped, _ = directsdk.drop_open_turn_thinking(frames)
     assert dropped == 1
     assert out[1]['message']['content'][0] == THINK  # before the mixed row: a closed turn
 
@@ -89,7 +91,7 @@ class _Stop(Exception):
     pass
 
 
-def _spawn(monkeypatch, *, cold, enabled):
+def _spawn(monkeypatch, *, how, enabled, frames=None, handed=None):
     seen = {}
     monkeypatch.setattr(directsdk, 'drop_open_turn_thinking_enabled', lambda: enabled)
     monkeypatch.setattr(directsdk, 'relay', lambda *a, **k: SimpleNamespace(url='http://127.0.0.1:9', parity_prev=None))
@@ -98,24 +100,39 @@ def _spawn(monkeypatch, *, cold, enabled):
         raise _Stop
 
     monkeypatch.setattr(directsdk, 'native_command', fake_command)
-    real = directsdk.drop_open_turn_thinking
-    monkeypatch.setattr(directsdk, 'drop_open_turn_thinking', lambda frames: seen.setdefault('out', real(frames)))
-    frames = [user('q'), assistant(THINK, call('t1')), results('t1')]
-    session = SimpleNamespace()
+    monkeypatch.setattr(directsdk, 'drop_open_turn_thinking', lambda frames, turn=None: seen.setdefault('out', REAL_DROP(frames, turn)))
+    frames = frames or [user('q'), assistant(THINK, call('t1')), results('t1')]
+    session = SimpleNamespace(spawn_how=how, drop_handed=handed)
     client = directsdk.Client(env={})
     try:
-        client._session_spawn(session, None, {'model': 'm'}, '{}', None, {}, [], frames, 1, {}, ['claude'], None, cold=cold)
+        client._session_spawn(session, None, {'model': 'm'}, '{}', None, {}, [], frames, 1, {}, ['claude'], None)
     except _Stop:
         pass
-    seen['drop'] = session.open_turn_drop
+    seen['drop'], seen['turn'] = session.open_turn_drop, session.drop_turn
     return seen
 
 
 def test_only_a_cold_spawn_with_the_setting_on_drops(monkeypatch):
-    on = _spawn(monkeypatch, cold=True, enabled=True)
-    assert on['out'][1] == 1 and on['drop'] == '1'  # the `session cold:` line's dropped= field
-    assert _spawn(monkeypatch, cold=False, enabled=True) == {'drop': 'off'}  # a rebuild keeps the rows its retired native cached
-    assert _spawn(monkeypatch, cold=True, enabled=False) == {'drop': 'off'}
+    on = _spawn(monkeypatch, how='cold', enabled=True)
+    assert on['out'][1] == 1 and on['drop'] == '1' and on['turn'][:2] == (0, 3)  # the `session cold:` dropped= field
+    # a rebuild keeps the rows its retired native cached: nothing handed over, nothing dropped
+    assert _spawn(monkeypatch, how='rebuild:suffix', enabled=True) == {'drop': 'off', 'turn': None}
+    assert _spawn(monkeypatch, how='cold', enabled=False) == {'drop': 'off', 'turn': None}
+
+
+def test_a_rebuild_drops_again_what_its_retired_native_dropped_and_keeps_later_thinking(monkeypatch):
+    opened = [user('q0'), assistant(THINK, text('a0')), user('q'), assistant(THINK, call('t1'), mid='a1'), results('t1')]
+    cold = _spawn(monkeypatch, how='cold', enabled=True, frames=opened)
+    fresh = assistant({**THINK, 'signature': 'sig-fresh'}, call('t2'), mid='a2')  # the cold native's own next step
+    later = opened + [fresh, results('t2')]
+    again = _spawn(monkeypatch, how='rebuild:oversize', enabled=True, frames=later, handed=cold['turn'])
+    out, dropped, turn = again['out']
+    assert dropped == 1 and again['drop'] == 'again:1' and turn == cold['turn']
+    assert out[:5] == cold['out'][0]  # the rebuilt native replays the retired native's rows exactly
+    assert out[5] == fresh and out[1]['message']['content'][0] == THINK  # later and closed thinking stay
+    # a replay that no longer starts with the frames the drop saw (another row changed) drops nothing
+    changed = [user('q0 edited')] + later[1:]
+    assert _spawn(monkeypatch, how='rebuild:prefix', enabled=True, frames=changed, handed=cold['turn'])['drop'] == 'again:0'
 
 
 SAFE = re.compile(r'^[a-z_]+=[a-z0-9_\-/:.,]+$')
@@ -185,3 +202,19 @@ def test_a_changed_system_block_is_named_by_index_without_its_digest():
     admission.observe_cold(g, json.dumps(first).encode())
     assert g.cold_notes[0].endswith('sys_changed=-') and g.cold_notes[1].endswith('sys_changed=0')
     assert not re.search(r'[0-9a-f]{8}', ' '.join(g.cold_notes))
+
+
+def test_a_trailing_system_reminder_does_not_hide_a_user_turn():
+    g = gate()
+    base = [msg('user', text('q1'))]
+    admission.observe_cold(g, payload(base))
+    admission.observe_cold(g, payload(base + [msg('assistant', call('t1')), msg('user', {'type': 'tool_result', 'tool_use_id': 't1', 'content': 'r'})]))
+    admission.observe_cold(g, payload(base + [msg('assistant', call('t1')), msg('user', {'type': 'tool_result', 'tool_use_id': 't1', 'content': 'r'}),
+                                              msg('assistant', text('done')), msg('user', text('q2')), {'role': 'system', 'content': 'reminder'}]))
+    assert [n.split()[0] for n in g.cold_notes] == ['n=1', 'n=2', 'n=3'] and 'opens=user' in g.cold_notes[2]
+
+
+def test_free_text_wire_values_never_reach_the_note():
+    g = gate()
+    admission.observe_cold(g, payload([msg('user', text('q'))], thinking={'type': 'Some Free Text', 'display': 'x y'}))
+    assert 'think=?:?' in g.cold_notes[0] and 'Free' not in g.cold_notes[0]
