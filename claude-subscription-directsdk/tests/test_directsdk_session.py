@@ -306,7 +306,7 @@ def rig(tmp_path, monkeypatch):
     monkeypatch.setattr(directsdk, '_session_failures', 0)
     monkeypatch.setattr(directsdk, '_session_off', False)
     monkeypatch.setattr(directsdk, '_session_noted', set())
-    monkeypatch.setattr(directsdk, '_LAST_PROFILE', __import__('collections').OrderedDict())
+    monkeypatch.setattr(directsdk, '_LAST_PROFILE', __import__('collections').OrderedDict(), raising=False)
     upstream = Upstream()
     native = tmp_path / 'native.py'
     native.write_text(NATIVE)
@@ -2313,3 +2313,35 @@ def test_a_cold_native_logs_the_first_row_it_no_longer_repeats_from_its_conversa
     other = [{'role': 'user', 'content': 'SECRETTEXT elsewhere'}]
     assert step(rig.client(), other).usage.model_dump()['native_admission']['session'] == 'cold'
     assert len([line for line in _parity_lines(caplog) if 'cold_prev=' in line]) == 1
+
+
+def test_a_cold_prior_comes_from_the_last_forwarded_request_even_when_that_step_failed(rig, caplog):
+    """The relay records every forwarded request, so a native killed mid-step (the request went upstream, the step
+    never finished) still leaves its last request as the comparison for the cold spawn that follows."""
+    caplog.set_level('INFO', logger=directsdk._session_log.name)
+    messages = [{'role': 'user', 'content': 'SECRETTEXT hello'}]
+    messages += [as_history(step(rig.client(), messages)), {'role': 'user', 'content': 'SECRETTEXT again'}]
+    session = directsdk._session_pool[0]
+    key = next(iter(directsdk._LAST_PROFILE))
+    assert directsdk._LAST_PROFILE[key][1][1] == 1  # the first request's single row
+    # A forwarded request that never completes a step: the relay saw it, so it is what a cold spawn compares with.
+    import admission
+    body = json.dumps({'messages': [{'role': 'user', 'content': [{'type': 'text', 'text': 'x'}]}] * 4}).encode()
+    admission.observe_parity(session.admission, body)
+    assert directsdk._LAST_PROFILE[key] == (session.pid, session.admission.parity) and session.admission.parity[1] == 4
+
+
+def test_a_delegated_child_sharing_the_history_never_takes_the_chats_slot(rig):
+    messages = [{'role': 'user', 'content': 'SECRETTEXT hello'}]
+    step(rig.client(), messages)
+    step(rig.client(), messages, hermes_cache_ttl='5m')
+    keys = list(directsdk._LAST_PROFILE)
+    assert len(keys) == 2 and keys[0][0] == keys[1][0] and {k[2] for k in keys} == {None, '5m'}
+
+
+def test_a_failing_cold_lookup_leaves_the_spawn_in_session_mode(rig, monkeypatch):
+    def broken(key):
+        raise RuntimeError('lookup failed')
+    monkeypatch.setattr(directsdk, '_last_profile', broken)
+    messages = [{'role': 'user', 'content': 'hello'}]
+    assert step(rig.client(), messages).usage.model_dump()['native_admission']['session'] == 'cold'

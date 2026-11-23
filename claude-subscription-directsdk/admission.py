@@ -893,6 +893,12 @@ def observe_parity(gate, payload):
         if gate.cancelled:
             gate.parity = None  # closed meanwhile: keep nothing
             return
+        remember = getattr(gate, 'remember', None)
+        if remember is not None:
+            try:  # this conversation's latest forwarded request, for a later cold spawn's `cold_prev=` (log only)
+                remember(profile)
+            except Exception:
+                pass
         notes = []
         if handed is not None:
             pid, old = handed
@@ -1187,7 +1193,7 @@ class Admission:
         self.failure = None
         self.unrestored = None
         # Log-only row parity (session mode): the latest profile, a retired native's handed-over one, queued notes.
-        self.parity = self.parity_prev = self.cold_prev = None
+        self.parity = self.parity_prev = self.cold_prev = self.remember = None
         self.parity_notes, self.parity_logged, self.parity_self_left = [], False, _SELF_NOTES
         # Log-only cold notes (session mode): requests seen, queued notes, whether a later user turn was noted.
         self.cold_seen, self.cold_notes, self.cold_turn_logged, self.cold_system, self.cold_last = 0, [], False, None, None
@@ -1272,7 +1278,7 @@ class Admission:
             if self.first_turn.get('spawn_row'):
                 self.first_turn['spawn_row'] = None  # the remembered frame may hold base64 images
         self.abort()
-        self.parity = self.parity_prev = self.cold_prev = None
+        self.parity = self.parity_prev = self.cold_prev = self.remember = None
         try:
             self._waker.send(b'\0')
         except OSError:

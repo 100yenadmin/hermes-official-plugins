@@ -1801,7 +1801,6 @@ class Client:
                            session.ident[:8] + ':' + str(session.pid), how, int(admission.used), admission.denied, bool(admission.unrestored), time.monotonic() - started,
                            usage['input_tokens'], usage.get('cache_read_input_tokens', 0), usage.get('cache_creation_input_tokens', 0), usage['output_tokens'], thinking, len(calls), assistant.get('stop_reason'), assistant.get('id'), parts)
             try:  # the relay's queued parity notes, logged here, never from its request path
-                _remember_profile(getattr(session, 'conversation', None), session.pid, admission.parity)
                 notes, admission.parity_notes = admission.parity_notes, []
                 for text in notes:
                     _session_log.info('session parity: session=%s %s', session.ident[:8] + ':' + str(session.pid), text)
@@ -1886,9 +1885,14 @@ class Client:
         session.admission = relay(upstream, timeout, queried=queried, first_turn={})
         # The native this rebuild retired in the checkout just before: its last row profile (log only).
         session.admission.parity_prev, session.parity_prev = getattr(session, 'parity_prev', None), None
-        session.conversation = session_id
-        if getattr(session, 'spawn_how', None) == 'cold':  # log only: this conversation's last request in this process
-            session.admission.cold_prev = _last_profile(session_id)
+        try:  # log only: the relay records each forwarded request's profile, and a cold spawn gets its conversation's last
+            # (keyed by model and cache tier too, so a delegated 5m child sharing the history never takes the chat's slot)
+            key = (session_id, kwargs['model'], env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'))
+            session.admission.remember = lambda profile: _remember_profile(key, session.pid, profile)
+            if getattr(session, 'spawn_how', None) == 'cold':
+                session.admission.cold_prev = _last_profile(key)
+        except Exception:
+            pass
         # Streamed tool arguments stay on unless this conversation's came back invalid (#164 #221 #326); a session keeps
         # its setting for life, so its request bytes never change between steps.
         session.admission.eager = session_id not in _BUFFER_TOOL_INPUT
