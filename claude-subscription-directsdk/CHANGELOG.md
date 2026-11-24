@@ -4,7 +4,7 @@
 
 - New setting `rebuild_boundary_mark` (bool, default off). With it on, a rebuilt native's first request places its one extra cache mark at the last row that equals the retired native's last request, not only when every row does. The comparison uses the keyed per-block digests. Without the mark, a rebuild whose replay differs further back than the API's ~20-block lookback rewrites the whole conversation, even though the retired native cached nearly all of it. The common case is native's own mid-conversation `role: system` row, which a replay never carries. On eva on 11-24 such rebuilds wrote 382k, 325k and 375k (05:48Z, 08:40Z, 08:47Z). In each, an entry the retired native wrote ended a few rows before that row.
   - **Conditions (any one unmet: no mark, the request goes as with the setting off):**
-    - a hand-over from exactly one retired native (`rebuild:prefix`, `suffix`, `ident`, `effort`, `oversize` or `unpaired`; never a cold spawn or `rebuild:ambiguous`) whose profile carries row digests and the request identity;
+    - a hand-over from exactly one retired native (`rebuild:prefix`, `suffix`, `ident`, `oversize` or `unpaired`; never a cold spawn or `rebuild:ambiguous`; an effort rebuild changes `output_config`, so the identity check refuses it) whose profile carries row digests and the request identity;
     - the identity unchanged: model, system, tools, tool_choice, thinking, output_config, context_management (marks removed), and whether any image is present (adding one invalidates the cached message prefix);
     - rows `0..b` equal in role and per-block digests;
     - `b` is a user or assistant row with list content;
