@@ -36,7 +36,7 @@ try:
         ClaudeCodeLoggedOut, INSTALL_HINT, LOGGED_OUT_HINT, _resolve as resolve_claude, apply_config_dir, apply_profile_credential,
         apply_traffic_policy, check_extra_usage, drop_api_credentials, egress_env, max_concurrent, observe_rate_limit,
         reap_orphaned_refresh_lock, relay, resolve_upstream, Upstream)
-    from .directsdk_setup import session_mode_enabled, session_pool, claude_guidance_enabled, settle_answers_enabled, early_opener_enabled, drop_open_turn_thinking_enabled, QUIET_TRAFFIC
+    from .directsdk_setup import session_mode_enabled, session_pool, claude_guidance_enabled, settle_answers_enabled, early_opener_enabled, drop_open_turn_thinking_enabled, rebuild_boundary_mark_enabled, QUIET_TRAFFIC
 except ImportError:
     import concurrency
     from admission import Admission
@@ -46,7 +46,7 @@ except ImportError:
         ClaudeCodeLoggedOut, INSTALL_HINT, LOGGED_OUT_HINT, _resolve as resolve_claude, apply_config_dir, apply_profile_credential,
         apply_traffic_policy, check_extra_usage, drop_api_credentials, egress_env, max_concurrent, observe_rate_limit,
         reap_orphaned_refresh_lock, relay, resolve_upstream, Upstream)
-    from directsdk_setup import session_mode_enabled, session_pool, claude_guidance_enabled, settle_answers_enabled, early_opener_enabled, drop_open_turn_thinking_enabled, QUIET_TRAFFIC
+    from directsdk_setup import session_mode_enabled, session_pool, claude_guidance_enabled, settle_answers_enabled, early_opener_enabled, drop_open_turn_thinking_enabled, rebuild_boundary_mark_enabled, QUIET_TRAFFIC
 
 # Read at import and written next to each request's tools.json: Hermes imports this module from a frozen copy in
 # the temp directory, and a temp cleaner can remove that copy while the process runs (hermes-agent#156493).
@@ -1885,6 +1885,10 @@ class Client:
         session.admission = relay(upstream, timeout, queried=queried, first_turn={})
         # The native this rebuild retired in the checkout just before: its last row profile (log only).
         session.admission.parity_prev, session.parity_prev = getattr(session, 'parity_prev', None), None
+        try:  # session.21, off by default: the rebuild mark goes at the last row equal to the retired native's request
+            session.admission.boundary_mark = rebuild_boundary_mark_enabled()
+        except Exception:
+            pass
         try:  # log only: the relay records each forwarded request's profile, and a cold spawn gets its conversation's last
             # (keyed by model and cache tier too, so a delegated 5m child sharing the history never takes the chat's slot)
             key = (session_id, kwargs['model'], env.get('CLAUDE_CODE_PROMPT_CACHE_TTL'))

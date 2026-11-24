@@ -1,6 +1,6 @@
 name: claude-subscription-directsdk-experimental
 kind: model-provider
-version: 0.4.0+session.20
+version: 0.4.0+session.21
 manifest_version: 2
 description: Claude Subscription DirectSDK (Experimental), session-mode fork — drive your Claude Pro/Max subscription through the official Claude Code CLI; Hermes owns tools, approvals and compaction
 author: Nous Research
@@ -81,6 +81,14 @@ config_schema:
       Session mode: when a native is spawned cold in the middle of a turn (after a compaction, say),
       replay that unfinished turn without its thinking blocks. Avoids a second full cache write on the next
       user turn; Claude loses its own earlier reasoning for the rest of that one turn.
+  rebuild_boundary_mark:
+    type: bool
+    default: false
+    label: Mark the last equal row on a rebuild
+    description: >-
+      Session mode: when a native is rebuilt and the replay differs from the retired native's history at some row,
+      put one extra cache mark at the last row before that one, so the rebuild can read the history the retired
+      native cached instead of rewriting all of it.
   max_concurrent:
     type: int
     default: 4

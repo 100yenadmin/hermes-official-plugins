@@ -685,12 +685,14 @@ _BLOCK_KINDS = frozenset(('text', 'thinking', 'redacted_thinking', 'tool_use', '
 
 def _unmarked(block):
     """A block without its cache mark, and a tool_result's nested blocks without theirs: marks move between requests
-    and are not row bytes. Only those protocol positions; a ``cache_control`` key inside tool input is data and stays."""
+    and are not row bytes. Only those protocol positions; a ``cache_control`` key inside tool input is data and stays.
+    Those blocks' own keys are sorted (protocol fields: native writes a live tool_result as ``tool_use_id, type,
+    content``, a replay as ``type, tool_use_id, content``); key order inside data such as tool input is kept."""
     if not isinstance(block, dict):
         return block
-    out = {k: v for k, v in block.items() if k != 'cache_control'}
+    out = {k: block[k] for k in sorted(block) if k != 'cache_control'}
     if block.get('type') == 'tool_result' and isinstance(block.get('content'), list):
-        out['content'] = [{k: v for k, v in b.items() if k != 'cache_control'} if isinstance(b, dict) else b
+        out['content'] = [{k: b[k] for k in sorted(b) if k != 'cache_control'} if isinstance(b, dict) else b
                           for b in block['content']]
     return out
 
@@ -704,15 +706,36 @@ def _block_kind(block):
 
 def row_digests(messages):
     """Per message row, per block: (kind, keyed digest of the block without marks). Same-length edits that
-    ``row_profile`` cannot see change the digest."""
+    ``row_profile`` cannot see change the digest. A block's own keys are sorted (``_unmarked``): native writes a live tool_result as
+    ``tool_use_id, type, content`` and a replay as ``type, tool_use_id, content``, which the API reads as the same
+    prefix (synthetic capture 2026-11-24: the rebuild read the full cache); unsorted, every live tool result looked
+    changed (eva 11-24: each such ``byte_diff`` was the retired native's first live tool result)."""
     rows = []
     for message in messages:
         content = message.get('content')
         blocks = content if isinstance(content, list) else [content]
-        rows.append(tuple((_block_kind(b), hmac.new(_ROW_KEY, json.dumps(_unmarked(b),
-                    ensure_ascii=False, separators=(',', ':')).encode('utf-8', 'surrogatepass'), hashlib.sha256).digest()[:8])
+        rows.append(tuple((_block_kind(b), hmac.new(_ROW_KEY, json.dumps(_unmarked(b), ensure_ascii=False,
+                    separators=(',', ':')).encode('utf-8', 'surrogatepass'), hashlib.sha256).digest()[:8])
                     for b in blocks))
     return rows
+
+
+# Request fields outside ``messages`` that decide whether a cached message prefix can be read: a change to any of them
+# means no earlier entry matches, so the boundary mark is skipped.
+_IDENTITY_FIELDS = ('model', 'system', 'tools', 'tool_choice', 'thinking', 'output_config', 'context_management')
+
+
+def request_identity(body):
+    """A keyed digest of a request's cache-relevant fields outside ``messages``, marks removed (system blocks' and
+    tools' own ``cache_control``; a key of that name inside a tool schema is data and stays)."""
+    out = {}
+    for field in _IDENTITY_FIELDS:
+        value = body.get(field)
+        if field in ('system', 'tools') and isinstance(value, list):
+            value = [{k: v for k, v in b.items() if k != 'cache_control'} if isinstance(b, dict) else b for b in value]
+        out[field] = value
+    return hmac.new(_ROW_KEY, json.dumps(out, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+                    .encode('utf-8', 'surrogatepass'), hashlib.sha256).digest()[:8]
 
 
 def _byte_diff(new, old):
@@ -817,6 +840,80 @@ def mark_retired_prefix(gate, payload):
         return payload
 
 
+def mark_last_equal_row(gate, payload):
+    """Session mode with ``rebuild_boundary_mark`` on (default off), a rebuilt native's first request: one more cache
+    mark at the end of the last row before the first row that differs from the retired native's last request.
+
+    The retired native's requests wrote cache entries ending at each of their last rows, from its spawn row on. When
+    a rebuild's replay changes an earlier row or lacks a native-only row (native's mid-conversation ``role: system``
+    row a replay never carries), session.17's mark is refused and the request's only message mark sits at its end;
+    the API looks back about 20 blocks from a mark, so a change further back rewrites the whole conversation
+    (eva 11-24: 382k at 05:48Z, 325k and 375k at 08:40Z and 08:47Z). A mark at the last equal row ``b`` lets the API
+    find an entry ending within about 20 blocks before ``b``. Requires the hand-over (``gate.parity_prev``) with keyed
+    row digests and the request identity (model, system, tools, tool_choice, thinking, output_config,
+    context_management) equal to this request's; every row ``0..b`` equal in role and per-block digests; ``b`` a
+    user or assistant row with list content; fewer than 4 marks. The mark goes on row ``b``'s last block that can
+    carry one (thinking and redacted_thinking cannot), walking back within the row; a block already marked there
+    means nothing is added. When no row differs, ``b`` is the retired request's last row (session.17's place, now
+    also checked byte for byte). The TTL comes from the next mark (``_donor_mark``). Reads the hand-over without
+    consuming it; sets ``gate.boundary_note`` for the parity line; any failure forwards the payload as is."""
+    handed = getattr(gate, 'parity_prev', None)
+    if handed is None or not isinstance(getattr(gate, 'first_turn', None), dict):
+        return payload
+    gate.boundary_note = ' boundary=-:error'
+    try:
+        old = handed[1]
+        if len(old) < 4:
+            gate.boundary_note = ' boundary=-:no_digests'
+            return payload
+        body = json.loads(payload)
+        messages = body['messages']
+        rows, stable = row_profile(messages)
+        digests = row_digests(messages)
+        if request_identity(body) != old[3]:
+            gate.boundary_note = ' boundary=-:identity'
+            return payload
+        if _breakpoints(body) >= 4:
+            gate.boundary_note = ' boundary=-:marks'
+            return payload
+        before, kept, earlier = old[0], old[1], old[2]
+        k = next((i for i in range(min(kept, stable)) if rows[i][0] != before[i][0] or digests[i] != earlier[i]), None)
+        if k is None:
+            if kept >= stable:
+                gate.boundary_note = ' boundary=-:no_tail'
+                return payload
+            k = kept
+        b = k - 1
+        if b < 0:
+            gate.boundary_note = ' boundary=-:row0'
+            return payload
+        message = messages[b]
+        content = message.get('content')
+        if message.get('role') not in ('user', 'assistant') or not isinstance(content, list):
+            gate.boundary_note = f' boundary=-:row{b}'
+            return payload
+        j = len(content) - 1
+        while j >= 0 and isinstance(content[j], dict) and content[j].get('type') in ('thinking', 'redacted_thinking') \
+                and 'cache_control' not in content[j]:
+            j -= 1
+        if j < 0 or not isinstance(content[j], dict):
+            gate.boundary_note = f' boundary=-:block{b}'
+            return payload
+        if 'cache_control' in content[j]:
+            gate.boundary_note = f' boundary={b}.{j}:present'
+            return payload
+        mark = _donor_mark(body, b, j)
+        if mark is None:
+            gate.boundary_note = ' boundary=-:donor'
+            return payload
+        # Only the tier travels: a system mark's `scope` (global) has no meaning on a message block.
+        content[j]['cache_control'] = {key: mark[key] for key in ('type', 'ttl') if key in mark}
+        gate.boundary_note = f' boundary={b}.{j}'
+        return json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+    except Exception:
+        return payload
+
+
 def _donor_mark(body, row, block):
     """The cache mark the new one copies: the next genuine mark after (row, block) in API order (tools, system,
     messages), else the one before it, so TTLs stay non-increasing (the API rejects a 1h mark after a 5m one). Only
@@ -896,12 +993,14 @@ def observe_parity(gate, payload):
     try:
         handed, gate.parity_prev = gate.parity_prev, None  # consumed by the first attempt, whatever happens next
         cold, gate.cold_prev = getattr(gate, 'cold_prev', None), None
-        messages = json.loads(payload)['messages']
+        body = json.loads(payload)
+        messages = body['messages']
         profile = row_profile(messages)
         try:
             profile = profile + (row_digests(messages),)
+            profile = profile + (request_identity(body),)
         except Exception:
-            pass  # counts only: the byte fields read `-`
+            pass  # counts only (the byte fields read `-`), or no identity (no boundary mark)
         previous, gate.parity = gate.parity, profile
         if gate.cancelled:
             gate.parity = None  # closed meanwhile: keep nothing
@@ -912,7 +1011,7 @@ def observe_parity(gate, payload):
             diff = _parity_diff(profile, old)
             byte = _byte_diff(profile, old) if len(profile) > 2 and len(old) > 2 else False
             notes.append(f'prev={pid} first_diff=' + (f'{diff[0]} {diff[1]}' if diff else 'none role=- blocks=- chars=-')
-                         + f' rows={profile[1]}/{old[1]}' + _byte_field(byte))
+                         + f' rows={profile[1]}/{old[1]}' + _byte_field(byte) + getattr(gate, 'boundary_note', ''))
         if cold is not None:
             pid, old = cold
             diff = _parity_diff(profile, old)
@@ -1202,6 +1301,8 @@ class Admission:
         # Log-only row parity (session mode): the latest profile, a retired native's handed-over one, queued notes.
         self.parity = self.parity_prev = self.cold_prev = self.remember = None
         self.parity_notes, self.parity_logged, self.parity_self_left = [], False, _SELF_NOTES
+        # Session.21 (setting rebuild_boundary_mark, default off): the rebuild mark goes at the last equal row.
+        self.boundary_mark, self.boundary_note = False, ''
         # Log-only cold notes (session mode): requests seen, queued notes, whether a later user turn was noted.
         self.cold_seen, self.cold_notes, self.cold_turn_logged, self.cold_system, self.cold_last = 0, [], False, None, None
         self.capture = Capture()
@@ -1408,7 +1509,7 @@ class Handler(BaseHTTPRequestHandler):
             payload = pin_message_breakpoint(payload, gate.queried, gate.first_turn)
             if gate.eager:
                 payload = stream_tool_input(payload)
-            payload = mark_retired_prefix(gate, payload)
+            payload = (mark_last_equal_row if getattr(gate, 'boundary_mark', False) else mark_retired_prefix)(gate, payload)
             observe_parity(gate, payload)
             observe_cold(gate, payload)
             target = gate.upstream
