@@ -182,3 +182,41 @@ def test_off_by_default_and_the_relay_picks_the_function_by_setting():
     assert source.index('mark_retired_prefix)(gate, payload)') < source.index('observe_parity(gate, payload)')
     init = inspect.getsource(admission.Admission.__init__) if hasattr(admission, 'Admission') else ''
     assert 'self.boundary_mark, self.boundary_note = False, ' in inspect.getsource(admission)
+
+
+def test_a_nested_1h_mark_after_the_boundary_sets_the_ttl_not_the_later_5m_end_mark():
+    # Codex review r1: the donor scan skipped a mark inside an edited tool result and copied the final 5m mark, giving
+    # 1h, 5m, 1h, 5m, which the API rejects (TTLs must not increase).
+    old, new = shape(302, 306, 330, 330)
+    new['messages'][-1]['content'][-1]['cache_control'] = {'type': 'ephemeral', 'ttl': '5m'}
+    new['messages'][310]['content'][0]['content'][0]['cache_control'] = dict(MARK)
+    out = json.loads(admission.mark_last_equal_row(gate_for(old), json.dumps(new).encode()))
+    assert out['messages'][305]['content'][-1]['cache_control'] == MARK
+    # Session.17's donor (setting off) is unchanged.
+    assert admission._donor_mark(new, 305, 1) == {'type': 'ephemeral', 'ttl': '5m'}
+
+
+def test_an_image_added_after_the_equal_prefix_changes_the_identity():
+    # Codex review r1: adding the first image anywhere invalidates the cached message prefix.
+    old, new = shape(302, 306, 330, 330)
+    with_image = json.loads(json.dumps(new))
+    with_image['messages'][-1]['content'].insert(0, {'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'AAAA'}})
+    gate = gate_for(old)
+    data = json.dumps(with_image).encode()
+    assert admission.mark_last_equal_row(gate, data) is data
+    assert gate.boundary_note == ' boundary=-:identity'
+    nested = json.loads(json.dumps(new))
+    nested['messages'][320]['content'][0]['content'].append({'type': 'image', 'source': {'type': 'base64', 'media_type': 'image/png', 'data': 'AAAA'}})
+    assert admission.request_identity(nested) != admission.request_identity(new)
+
+
+def test_the_note_is_set_only_after_the_payload_is_built():
+    old, new = shape(302, 306, 330, 330)
+    # Codex review r1 nit: a payload that cannot be re-encoded (a lone surrogate in a later row) is forwarded as is,
+    # and the note does not claim a mark.
+    text = json.dumps(new).replace('"step 329"', '"\\ud800 step 329"', 1)
+    assert text != json.dumps(new)
+    gate = gate_for(old)
+    data = text.encode()
+    assert admission.mark_last_equal_row(gate, data) is data
+    assert gate.boundary_note == ' boundary=-:error'

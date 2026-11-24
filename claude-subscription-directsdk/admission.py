@@ -725,6 +725,13 @@ def row_digests(messages):
 _IDENTITY_FIELDS = ('model', 'system', 'tools', 'tool_choice', 'thinking', 'output_config', 'context_management')
 
 
+def _has_image(content):
+    for b in content if isinstance(content, list) else ():
+        if isinstance(b, dict) and (b.get('type') == 'image' or (b.get('type') == 'tool_result' and _has_image(b.get('content')))):
+            return True
+    return False
+
+
 def request_identity(body):
     """A keyed digest of a request's cache-relevant fields outside ``messages``, marks removed (system blocks' and
     tools' own ``cache_control``; a key of that name inside a tool schema is data and stays)."""
@@ -734,6 +741,9 @@ def request_identity(body):
         if field in ('system', 'tools') and isinstance(value, list):
             value = [{k: v for k, v in b.items() if k != 'cache_control'} if isinstance(b, dict) else b for b in value]
         out[field] = value
+    # Adding or removing images anywhere in the prompt invalidates the cached message prefix (Anthropic's prompt-caching
+    # docs), so whether any image is present is part of the identity.
+    out['images'] = any(_has_image(m.get('content')) for m in body.get('messages') or [] if isinstance(m, dict))
     return hmac.new(_ROW_KEY, json.dumps(out, ensure_ascii=False, sort_keys=True, separators=(',', ':'))
                     .encode('utf-8', 'surrogatepass'), hashlib.sha256).digest()[:8]
 
@@ -851,11 +861,12 @@ def mark_last_equal_row(gate, payload):
     (eva 11-24: 382k at 05:48Z, 325k and 375k at 08:40Z and 08:47Z). A mark at the last equal row ``b`` lets the API
     find an entry ending within about 20 blocks before ``b``. Requires the hand-over (``gate.parity_prev``) with keyed
     row digests and the request identity (model, system, tools, tool_choice, thinking, output_config,
-    context_management) equal to this request's; every row ``0..b`` equal in role and per-block digests; ``b`` a
+    context_management, whether any image is present) equal to this request's; every row ``0..b`` equal in role and per-block digests; ``b`` a
     user or assistant row with list content; fewer than 4 marks. The mark goes on row ``b``'s last block that can
     carry one (thinking and redacted_thinking cannot), walking back within the row; a block already marked there
     means nothing is added. When no row differs, ``b`` is the retired request's last row (session.17's place, now
-    also checked byte for byte). The TTL comes from the next mark (``_donor_mark``). Reads the hand-over without
+    also checked byte for byte). The TTL comes from the next mark, nested tool_result marks included
+    (``_donor_mark_nested``). Reads the hand-over without
     consuming it; sets ``gate.boundary_note`` for the parity line; any failure forwards the payload as is."""
     handed = getattr(gate, 'parity_prev', None)
     if handed is None or not isinstance(getattr(gate, 'first_turn', None), dict):
@@ -902,16 +913,44 @@ def mark_last_equal_row(gate, payload):
         if 'cache_control' in content[j]:
             gate.boundary_note = f' boundary={b}.{j}:present'
             return payload
-        mark = _donor_mark(body, b, j)
+        mark = _donor_mark_nested(body, b, j)
         if mark is None:
             gate.boundary_note = ' boundary=-:donor'
             return payload
         # Only the tier travels: a system mark's `scope` (global) has no meaning on a message block.
         content[j]['cache_control'] = {key: mark[key] for key in ('type', 'ttl') if key in mark}
+        out = json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
         gate.boundary_note = f' boundary={b}.{j}'
-        return json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        return out
     except Exception:
         return payload
+
+
+def _donor_mark_nested(body, row, block):
+    """``_donor_mark`` with marks nested in a tool_result's content counted at their place (before the block's own),
+    for session.21's boundary mark: a nested 1h mark after the boundary must not be passed over for a later 5m one."""
+    marks = []
+    for tool in body.get('tools') or []:
+        if isinstance(tool, dict):
+            marks.append(((-2, 0, 1, 0), tool.get('cache_control')))
+    system = body.get('system')
+    for k, b in enumerate(system if isinstance(system, list) else []):
+        if isinstance(b, dict):
+            marks.append(((-1, k, 1, 0), b.get('cache_control')))
+    for r, message in enumerate(body.get('messages') or []):
+        content = message.get('content') if isinstance(message, dict) else None
+        for k, b in enumerate(content if isinstance(content, list) else []):
+            if not isinstance(b, dict):
+                continue
+            inner = b.get('content') if b.get('type') == 'tool_result' else None
+            for n, x in enumerate(inner if isinstance(inner, list) else []):
+                if isinstance(x, dict):
+                    marks.append(((r, k, 0, n), x.get('cache_control')))
+            marks.append(((r, k, 1, 0), b.get('cache_control')))
+    marks = [(at, m) for at, m in marks if isinstance(m, dict) and m.get('type') == 'ephemeral']
+    after = [m for at, m in marks if at > (row, block, 1, 0)]
+    before = [m for at, m in marks if at < (row, block, 1, 0)]
+    return after[0] if after else (before[-1] if before else None)
 
 
 def _donor_mark(body, row, block):
