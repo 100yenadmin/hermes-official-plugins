@@ -60,7 +60,7 @@ def test_no_mark_when_rows_changed_or_nothing_follows_or_marks_are_full_or_no_ha
 def test_the_relay_runs_the_mark_before_observing_parity():
     import inspect
     source = inspect.getsource(admission.Handler.do_POST)
-    assert source.index('mark_retired_prefix(gate, payload)') < source.index('observe_parity(gate, payload)')
+    assert source.index('mark_retired_prefix)(gate, payload)') < source.index('observe_parity(gate, payload)')
 
 
 def test_the_copied_mark_keeps_ttls_non_increasing_and_ignores_schema_fields():
